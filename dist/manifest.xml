@@ -11,7 +11,7 @@
   <SupportUrl DefaultValue="https://www.contoso.com/help"/>
   <PrivacyUrl DefaultValue="https://goindia-addin.netlify.app/privacy.html" />
   <AppDomains>
-    <AppDomain>https://www.contoso.com</AppDomain>
+    <AppDomain>https://goindia-addin.netlify.app</AppDomain>
   </AppDomains>
   <Hosts>
     <Host Name="Workbook"/>
