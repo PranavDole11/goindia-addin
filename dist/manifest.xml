@@ -5,7 +5,7 @@
   <ProviderName>Go India Stocks</ProviderName>
   <DefaultLocale>en-US</DefaultLocale>
   <DisplayName DefaultValue="GoIndia Add in"/>
-  <Description DefaultValue="A template to get started."/>
+  <Description DefaultValue="Get company data in excel at the click of a button"/>
   <IconUrl DefaultValue="https://pranavdole11.github.io/goindia-addin/assets/AppLogo_sq.png"/>
   <HighResolutionIconUrl DefaultValue="https://pranavdole11.github.io/goindia-addin/assets/AppLogo_sq.png"/>
   <SupportUrl DefaultValue="https://www.contoso.com/help"/>
