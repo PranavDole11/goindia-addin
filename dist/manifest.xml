@@ -4,7 +4,7 @@
   <Version>1.0.0.0</Version>
   <ProviderName>Go India Stocks</ProviderName>
   <DefaultLocale>en-US</DefaultLocale>
-  <DisplayName DefaultValue="GoIndia Add in"/>
+  <DisplayName DefaultValue="Go India Stocks Add in"/>
   <Description DefaultValue="Get company data in excel at the click of a button"/>
   <IconUrl DefaultValue="https://goindia-addin.netlify.app/assets/logo32.png"/>
   <HighResolutionIconUrl DefaultValue="https://goindia-addin.netlify.app/assets/logo64.png"/>
