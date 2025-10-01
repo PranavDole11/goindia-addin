@@ -61,13 +61,13 @@
       </Host>
     </Hosts>
     <Resources>
-      <PrivacyUrl DefaultValue="https://goindia-addin.netlify.app/privacy.html" />
       <bt:Images>
         <bt:Image id="Icon.16x16" DefaultValue="https://goindia-addin.netlify.app/assets/logo16.png"/>
         <bt:Image id="Icon.32x32" DefaultValue="https://goindia-addin.netlify.app/assets/logo32.png"/>
         <bt:Image id="Icon.80x80" DefaultValue="https://goindia-addin.netlify.app/assets/logo64.png"/>
       </bt:Images>
       <bt:Urls>
+        <bt:Url id="App.PrivacyUrl" DefaultValue="https://pranavdole11.github.io/goindia-addin/privacy.html"/>
         <bt:Url id="GetStarted.LearnMoreUrl" DefaultValue="https://go.microsoft.com/fwlink/?LinkId=276812"/>
         <bt:Url id="Commands.Url" DefaultValue="https://goindia-addin.netlify.app/dist/commands.html"/>
         <bt:Url id="Taskpane.Url" DefaultValue="https://goindia-addin.netlify.app/dist/taskpane.html"/>
