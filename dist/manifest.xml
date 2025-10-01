@@ -6,12 +6,11 @@
   <DefaultLocale>en-US</DefaultLocale>
   <DisplayName DefaultValue="GoIndia Add in"/>
   <Description DefaultValue="Get company data in excel at the click of a button"/>
-  <IconUrl DefaultValue="https://goindia-addin.netlify.app/assets/AppLogo_sq.png"/>
-  <HighResolutionIconUrl DefaultValue="https://goindia-addin.netlify.app/assets/AppLogo_sq.png"/>
-  <SupportUrl DefaultValue="https://www.contoso.com/help"/>
-  <PrivacyUrl DefaultValue="https://goindia-addin.netlify.app/privacy.html" />
+  <IconUrl DefaultValue="https://goindia-addin.netlify.app/assets/logo32.png"/>
+  <HighResolutionIconUrl DefaultValue="https://goindia-addin.netlify.app/assets/logo64.png"/>
+  <SupportUrl DefaultValue="https://goindia-addin.netlify.app/privacy.html"/>
   <AppDomains>
-    <AppDomain>https://goindia-addin.netlify.app/dist/taskpane.html</AppDomain>
+    <AppDomain>https://pranavdole11.github.io</AppDomain>
   </AppDomains>
   <Hosts>
     <Host Name="Workbook"/>
@@ -28,6 +27,7 @@
             <Title resid="GetStarted.Title"/>
             <Description resid="GetStarted.Description"/>
             <LearnMoreUrl resid="GetStarted.LearnMoreUrl"/>
+            <PrivacyUrl DefaultValue="https://goindia-addin.netlify.app/privacy.html" />
           </GetStarted>
           <FunctionFile resid="Commands.Url"/>
           <ExtensionPoint xsi:type="PrimaryCommandSurface">
