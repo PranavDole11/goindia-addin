@@ -75,6 +75,14 @@ module.exports = async (env, options) => {
             to: "assets/[name][ext][query]",
           },
           {
+            from: "EULA.html",
+            to: "[name][ext]",
+          },
+          {
+            from: "privacy.html",
+            to: "[name][ext]",
+          },
+          {
             from: "manifest*.xml",
             to: "[name]" + "[ext]",
             transform(content) {
