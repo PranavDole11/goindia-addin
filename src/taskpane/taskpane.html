@@ -1,0 +1,1625 @@
+<!-- Copyright (c) Microsoft Corporation. All rights reserved. Licensed under the MIT License. -->
+<!-- This file shows how to design a first-run page that provides a welcome screen to the user about the features of the add-in. -->
+
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=Edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>GoIndia Stocks for Excel</title>
+
+    <!-- Office JavaScript API -->
+    <script type="text/javascript" src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+
+    <!-- For more information on Fluent UI, visit https://developer.microsoft.com/fluentui#/. -->
+    <link rel="stylesheet" href="https://res-1.cdn.office.net/files/fabric-cdn-prod_20230815.002/office-ui-fabric-core/11.1.0/css/fabric.min.css"/>
+
+    <!-- Template styles -->
+    <link href="taskpane.css" rel="stylesheet" type="text/css" />
+</head>
+
+<body class="ms-font-m ms-welcome ms-Fabric">
+    <!-- Include Choices.js -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/choices.js/public/assets/styles/choices.min.css" />
+    <script src="https://cdn.jsdelivr.net/npm/choices.js/public/assets/scripts/choices.min.js"></script>
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
+
+    <style>
+        /* Container spacing */
+
+        #buttons {
+            display: flex;
+            flex-direction: row;
+            gap: 10px;
+            align-items: flex-start; /* Align items to left */
+            margin-top: 6px; /* extra breathing room below the AI Financial Model card above it */
+        }
+
+        /* Modern buttons */
+        button {
+            color: white;
+            font-weight: 400;
+            border: none;
+            border-radius: 8px;
+            padding: 8px 16px;
+            font-size: 14px;
+            margin-top: 8px;
+            margin-bottom: 12px;
+            cursor: pointer;
+            transition: background-color 0.2s, transform 0.1s, box-shadow 0.2s;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+        }
+
+        /* Download Data — primary, solid navy */
+        #refreshBtn {
+            background: #173760;
+            border-radius: 10px;
+            padding: 7px 14px;
+            font-size: 13px;
+            font-weight: 600;
+            box-shadow: 0 2px 8px rgba(23,55,96,0.35);
+        }
+        #refreshBtn:hover {
+            background: #1d4576;
+            transform: translateY(-1px);
+            box-shadow: 0 0 16px rgba(47,111,208,0.55), 0 6px 14px rgba(0,0,0,0.28);
+        }
+        #refreshBtn:active {
+            transform: translateY(0);
+            box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+        }
+        #refreshBtn:disabled {
+            background: #9fb3cc;
+            box-shadow: none;
+            cursor: default;
+            transform: none;
+        }
+
+        #refreshStatusBtn {
+            background-color: #4b9f27; /* Bootstrap green */
+        }
+        #refreshStatusBtn:hover {
+            background-color: #316017;
+            transform: translateY(-1px);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.25);
+        }
+        #refreshStatusBtn:active {
+            transform: translateY(0);
+            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+        }
+        #refreshStatusBtn:disabled {
+            background-color: #999999; /* Bootstrap green */
+        }
+
+        /* Help — secondary "ghost" button in brand red */
+        #helpBtn {
+            background: #ffffff;
+            color: #d80404;
+            border: 1.5px solid #d80404;
+            border-radius: 10px;
+            padding: 6px 14px;
+            font-size: 13px;
+            font-weight: 600;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+        }
+        #helpBtn:hover {
+            background: #d80404;
+            color: #ffffff;
+            transform: translateY(-1px);
+            box-shadow: 0 4px 10px rgba(216,4,4,0.3);
+        }
+        #helpBtn:active {
+            transform: translateY(0);
+            box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+        }
+
+        #logoutBtn:hover {
+            background-color: #b80000;
+            transform: translateY(-1px);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.25);
+        }
+
+        #profileSection:hover {
+            background-color: #B80000;
+            transform: translateY(-1px);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.25);
+        }
+
+        /* Modern dropdown styling */
+        select {
+            border-radius: 8px;
+            border: 1px solid #ccc;
+            padding: 6px 12px;
+            font-size: 14px;
+            cursor: pointer;
+            width: 250px; /* decreased width */
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+
+        select:focus {
+            border-color: #0078D4;
+            box-shadow: 0 0 4px rgba(0,120,212,0.5);
+            outline: none;
+        }
+
+        .dropdown {
+            position: relative;
+            width: 280px;
+            font-family: Arial, sans-serif;
+        }
+
+        .dropdown-toggle {
+            padding: 10px 12px;
+            width: 100%;
+            border: 3px solid #d6e5f5;
+            border-radius: 8px;
+            cursor: text;
+            background-color: white;
+            font-size: 14px;
+            outline: none;
+            box-sizing: border-box;
+            color: #333;
+            font-family: Arial, sans-serif;
+        }
+
+        .dropdown-toggle:active {
+            border: 3px solid #8bbef4;
+        }
+
+        .dropdown-toggle:focus {
+            border: 3px solid #8bbef4;
+        }
+
+        .dropdown-menu {
+            position: absolute;
+            top: 100%;
+            left: 0;
+            right: 0;
+            border: 1px solid #8bbef4;
+            border-top: none;
+            border-radius: 0 0 8px 8px;
+            background-color: white;
+            max-height: 300px;
+            overflow-x: hidden;
+            overflow-y: auto;
+            display: none;
+            z-index: 1000;
+        }
+
+        .dropdown-menu.active {
+            display: block;
+        }
+
+        #customDropdown.open .dropdown-toggle {
+            border-radius: 8px 8px 0 0;
+            border-color: #8bbef4;
+        }
+
+        
+
+        .dropdown-menu ul {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+
+        .dropdown-menu li {
+            padding: 8px 12px;
+            cursor: pointer;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .dropdown-menu li:hover {
+            background-color: #f0f0f0;
+        }
+
+        .arrow-down {
+            width: 0;
+            height: 0;
+            border-left: 6px solid transparent;
+            border-right: 6px solid transparent;
+            border-top: 6px solid #000;
+        }
+
+        /* Financial-statement format: inline multi-select text toggles */
+        .format-row {
+            display: flex;
+            align-items: baseline;
+            flex-wrap: wrap;
+            gap: 4px 12px;
+            margin-top: 44px; /* clears the absolutely-positioned profile bar above it */
+            font-family: Arial, sans-serif;
+        }
+
+        .format-label {
+            font-size: 11.5px;
+            font-weight: 600;
+            color: #6b7c93;
+        }
+
+        .format-opt {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            cursor: pointer;
+            user-select: none;
+            padding: 1px 2px;
+        }
+
+        /* leading dot reserves its width even when hidden, so toggling never shifts layout */
+        .format-opt::before {
+            content: "";
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: #173760;
+            opacity: 0;
+            flex: 0 0 auto;
+            transition: opacity 0.15s;
+        }
+
+        .format-opt:has(input:checked)::before { opacity: 1; }
+
+        .format-opt input[type="checkbox"] { display: none; }
+
+        .format-opt span {
+            font-size: 12.5px;
+            font-weight: 400;
+            color: #9aa5b1;              /* deselected: greyed, not bold */
+            transition: color 0.15s, font-weight 0.15s;
+        }
+
+        .format-opt:has(input:checked) span {
+            font-weight: 700;
+            color: #173760;             /* selected: bold, dark blue */
+        }
+
+
+        .include-row {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            margin-top: 14px;
+            padding: 8px 12px;
+            background: #f0f5ff;
+            border: 1.5px solid #d6e5f5;
+            border-radius: 8px;
+            font-family: Arial, sans-serif;
+        }
+
+        .include-label {
+            font-weight: 700;
+            color: #173760;
+            font-size: 11.5px;
+        }
+
+        .include-option {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            cursor: pointer;
+            color: #333;
+            font-size: 12px;
+            font-weight: 500;
+        }
+
+        .include-option input[type="checkbox"] {
+            accent-color: #173760;
+            width: 14px;
+            height: 14px;
+        }
+
+        /* AI Financial Model — a "hero" feature card with a toggle switch. Width matches the
+           company dropdown (280px) so the stacked controls line up uniformly. */
+        .model-card {
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+            width: 280px;
+            box-sizing: border-box;
+            margin-top: 14px;
+            padding: 11px 13px;
+            border: 1.5px solid #d6e5f5;
+            border-radius: 10px;
+            background: #f7faff;
+            font-family: Arial, sans-serif;
+            cursor: pointer;
+            user-select: none;
+            transition: border-color 0.18s, box-shadow 0.18s, background 0.18s;
+        }
+        .model-card:hover { border-color: #8bbef4; }
+        .model-card:has(.mc-input:checked) {
+            border-color: #173760;
+            background: #eaf1ff;
+            box-shadow: 0 2px 10px rgba(23, 55, 96, 0.13);
+        }
+
+        .mc-input { position: absolute; opacity: 0; width: 0; height: 0; }
+
+        .mc-icon {
+            font-size: 20px;
+            line-height: 1.15;
+            flex: 0 0 auto;
+            opacity: 0.5;
+            transition: opacity 0.18s;
+        }
+        .model-card:has(.mc-input:checked) .mc-icon { opacity: 1; }
+
+        .mc-body { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
+        .mc-titlerow { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+        .mc-title { font-size: 13px; font-weight: 700; color: #173760; }
+        .mc-desc { font-size: 10.5px; color: #6b7c93; line-height: 1.4; margin-top: 3px; }
+
+        /* toggle switch (purely visual — the whole card is the label) */
+        .mc-switch { flex: 0 0 auto; position: relative; width: 40px; height: 22px; margin-top: 2px; }
+        .mc-track {
+            position: absolute; inset: 0;
+            border-radius: 999px;
+            background: #c6ccd6;
+            transition: background 0.18s;
+        }
+        .mc-track::before {
+            content: "";
+            position: absolute; width: 16px; height: 16px; left: 3px; top: 3px;
+            border-radius: 50%;
+            background: #fff;
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+            transition: transform 0.18s;
+        }
+        .model-card:has(.mc-input:checked) .mc-track { background: #173760; }
+        .model-card:has(.mc-input:checked) .mc-track::before { transform: translateX(18px); }
+        .model-card:has(.mc-input:focus-visible) .mc-track { outline: 2px solid #8bbef4; outline-offset: 2px; }
+
+        .selected-chips {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-top: 10px;
+            min-height: 20px;
+        }
+        .chip {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            padding: 5px 10px;
+            background: #e8edf3;
+            border: 1px solid #c8d5e3;
+            border-radius: 14px;
+            font-size: 11px;
+            font-family: Arial, sans-serif;
+            color: #173760;
+            font-weight: 600;
+        }
+        .chip-remove {
+            cursor: pointer;
+            font-size: 15px;
+            color: #999;
+            line-height: 1;
+        }
+        .chip-remove:hover {
+            color: #c00;
+        }
+        .compare-hint {
+            font-size: 10px;
+            color: #aaa;
+            margin-top: 6px;
+            cursor: pointer;
+        }
+
+
+        .data-tabs {
+            display: flex;
+            gap: 5px;
+            flex-wrap: wrap;
+            justify-content: flex-start;
+            margin: 14px 0 0 0;
+        }
+
+        .data-tab {
+            padding: 6px 10px;
+            border: 1.5px solid #d6e5f5;
+            border-radius: 6px;
+            background: #f5f5f5;
+            color: #555;
+            font-size: 10.5px;
+            font-weight: 600;
+            font-family: Arial, sans-serif;
+            cursor: pointer;
+            text-align: center;
+            transition: all 0.18s;
+            user-select: none;
+        }
+
+        .data-tab.active {
+            background: #173760;
+            border-color: #173760;
+            color: #fff;
+        }
+
+        .sector-select {
+            padding: 10px 12px;
+            width: 100%;
+            border: 3px solid #d6e5f5;
+            border-radius: 8px;
+            background-color: white;
+            font-size: 14px;
+            font-family: Arial, sans-serif;
+            color: #333;
+            cursor: pointer;
+            outline: none;
+            box-sizing: border-box;
+        }
+
+        .sector-select:focus {
+            border-color: #8bbef4;
+        }
+
+        /* Center the entire login container on the page */
+        #loginScreen {
+            width: 100%;
+            max-width: 300px;  /* ensures it never grows too wide */
+            display: flex;
+            justify-content: start;
+            align-items: flex-start;
+        }
+
+        #loginWrapper {
+            display: flex;
+            flex-direction: column;
+            align-items: start;
+            justify-content: flex-start;
+            min-height: 100vh;
+            background-color: #f3f4f6;
+            padding: 1rem;
+            box-sizing: border-box;
+        }
+
+        .login-container div {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            align-items: flex-start;
+        }
+
+        /* White rounded card wrapper */
+        #loginScreen .login-container {
+            background-color: #ffffff;
+            border-radius: 16px;          /* slightly smaller rounding */
+            padding: 1.5rem 2rem;         /* reduced padding */
+            box-shadow: 0 8px 20px rgba(0,0,0,0.08);
+            width: 100%;
+            max-width: 360px;             /* reduced width */
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        /* Header */
+        #loginScreen h2 {
+            margin-bottom: 1rem;          /* reduced spacing */
+            text-align: center;
+            font-size: 1.75rem;           /* slightly smaller */
+            color: #173760;
+        }
+
+        /* Inputs */
+        #loginScreen input[type="email"],
+        #loginScreen input[type="password"] {
+            width: 88%;
+            padding: 0.6rem 0.9rem;       /* slightly smaller height */
+            border-radius: 10px;          /* smaller radius */
+            border: 1px solid #ccc;
+            outline: none;
+            font-size: 0.95rem;
+            margin-bottom: 0.75rem;       /* reduced spacing */
+            transition: border 0.2s;
+            margin-right: 20px; 
+        }
+
+        #loginScreen input:focus {
+            border-color: #173760;
+        }
+
+        /* Login Button */
+        #loginScreen button[type="submit"] {
+            width: 100%;
+            padding: 0.6rem 0.9rem;       /* smaller height */
+            border-radius: 10px;
+            background-color: #173760;
+            color: #fff;
+            font-weight: 600;
+            font-size: 0.95rem;
+            border: none;
+            cursor: pointer;
+            transition: transform 0.2s;
+        }
+
+        #loginScreen button[type="submit"]:hover {
+            transform: scale(1.03);       /* slightly smaller hover scale */
+        }
+
+        /* Divider "OR" */
+        #loginScreen .divider {
+            display: flex;
+            align-items: center;
+            gap: 0.3rem;                  /* smaller gap */
+            width: 100%;
+            margin: 1rem 0;               /* reduced spacing */
+        }
+
+        #loginScreen .divider hr {
+            flex: 1;
+            border-color: #ccc;
+        }
+
+        #loginScreen .divider span {
+            font-size: 0.8rem;
+            color: #999;
+        }
+
+        /* Social buttons */
+        #loginScreen .social-buttons {
+            width: 100%;
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;                 /* smaller gap */
+            align-items: center;
+        }
+
+        /* Apple Button */
+        #loginScreen .apple-btn {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.4rem;                  /* smaller gap */
+            background-color: #000;
+            color: #fff;
+            width: 100%;
+            padding: 0.45rem 0.8rem;      /* reduced height */
+            border-radius: 10px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: transform 0.2s;
+            border: none;
+        }
+
+        #loginScreen .apple-btn:hover {
+            transform: scale(1.03);
+        }
+
+        /* Sign-up section */
+        #loginScreen .signup {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 100%;
+            
+            margin-top: 0.75rem;          /* reduced spacing */
+            font-size: 0.8rem;
+            color: #173760;
+        }
+
+        #loginScreen .signup button {
+            background: #173760;
+            border: 1px solid #173760;
+            border-radius: 10px;
+            height: 35px;
+            padding: 0.2rem 0.6rem;       /* reduced padding */
+            font-weight: 500;
+            cursor: pointer;
+            transition: transform 0.2s;
+        }
+
+        #loginScreen .signup button:hover {
+            transform: scale(1.03);
+        }
+
+        /* Forgot links */
+        #loginScreen .forgot {
+            display: flex;
+            flex-direction: column;
+            gap: 0.2rem;                  /* reduced gap */
+            margin-top: 0.5rem;
+            width: 100%;
+            font-size: 0.75rem;           /* smaller font */
+        }
+
+        #loginScreen .forgot button {
+            background: none;
+            border: none;
+            color: #173760;
+            cursor: pointer;
+            text-align: left;
+        }
+
+        #loginScreen .forgot button:hover {
+            text-decoration: underline;
+        }
+
+        #memberContent,
+        #enterpriseRequestContainer,
+        #blockedContainer {
+            width: 100%;
+            display: flex;
+            flex-direction: column;
+            align-items: start;      /* center horizontally if needed */
+            justify-content: start; /* align at the top */
+            padding: 1rem;
+            box-sizing: border-box;
+        }
+
+        #loginSpinner {
+            border: 2px solid #f3f3f3; /* Light grey */
+            border-top: 2px solid #fff; /* White top part */
+            border-radius: 50%;
+            width: 16px;
+            height: 16px;
+            animation: spin 1s linear infinite;
+            margin: auto;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        #infoBox {
+            border: 2px dotted #f39c12;
+            background-color: #fff8e5;
+            color: #333;
+            padding: 10px 12px;
+            margin-top: 12px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            font-size: 13px;
+            position: relative;
+        }
+
+        #infoBox .icon {
+            margin-right: 8px;
+            font-size: 18px;
+        }
+
+        #infoBox .text {
+            flex: 1;
+        }
+
+        #infoBox .closeBtn {
+            cursor: pointer;
+            font-weight: bold;
+            font-size: 18px;
+            margin-left: 10px;
+            color: #666;
+        }
+
+        #infoBox .closeBtn:hover {
+            color: #000;
+        }
+
+    </style>
+
+    <!-- Login Screen -->
+    <div id="loginWrapper" style="display:flex; justify-content:start; align-items:center; min-height:100vh; background:#f3f4f6; flex-direction:column;">
+    
+        <!-- Login Screen -->
+        <div id="loginScreen" style="width:100%; display:none; justify-content:center;">
+            <div class="login-container" id="loginContainer">
+                <img src="https://www.goindiastocks.com/_next/image?url=%2F_next%2Fstatic%2Fmedia%2Flogo.eb4c0c16.png&w=1920&q=75"
+                alt="App Logo"
+                style="width: 150px; height: 100px; margin-bottom: 14px;" />
+                <span style="font-family: 'Open Sans', sans-serif; font-size: 16px; margin-bottom: 8px;">
+                    <span style="color: #173760; font-weight: 600;">GO INDIA</span>
+                    <span style="color: #B80000; font-weight: 600;"> STOCKS</span>
+                </span>
+
+                <!-- Value proposition -->
+                <p style="font-size: 12px; color: #555; text-align: center; margin: 0 0 10px; line-height: 1.5;">
+                    Pull live NSE &amp; BSE financial data for thousands of Indian companies directly into your Excel workbook — no copy-pasting, always up to date.
+                </p>
+                <div style="width: 100%; background: #f0f5ff; border-radius: 10px; padding: 10px 12px; margin-bottom: 12px; box-sizing: border-box;">
+                    <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 12px; color: #173760;">
+                        <span><b>Financials in one click</b> — P&amp;L, Balance Sheet &amp; Cash Flows, both Standalone and Consolidated</span>
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 12px; color: #173760;">
+                        <span><b>Always current</b> — quarterly and annual data refreshed each reporting season</span>
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: #173760;">
+                        <span><b>Enterprise &amp; GIIN Club members</b> get full access across all listed companies</span>
+                    </div>
+                </div>
+
+                <form id="loginForm">
+                    <input required type="email" name="email" placeholder="Email ID">
+                    <input required type="password" name="password" placeholder="Password">
+                    <button type="submit" class="login-btn">
+                        <span id="loginText">Login</span>
+                        <div id="loginSpinner" class="spinner" style="display: none;"></div>
+                    </button>
+                </form>
+
+                <div class="divider">
+                    <hr><span>OR</span><hr>
+                </div>
+
+                <div class="social-buttons">
+                    <!-- Google Button -->
+                    <div id="googleSignInButton"></div>
+                </div>
+
+                <div class="signup">
+                    <p>Don't have an account?</p>
+                    <button onclick="window.open('https://www.goindiastocks.com/loginpage', '_blank')" >
+                        Sign Up
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Membership / Add-in content -->
+        <div id="memberContent" style="display:none;">
+            <div id="addinUI" style="display:none;">
+
+                <!-- Profile Section -->
+                <a href="https://www.goindiastocks.com/profile" target="_blank" id="profileSection" style="
+                    position: absolute;
+                    top: 5px;
+                    left: 30px;
+                    display: flex;
+                    align-items: center;
+                    gap: 0.5rem;
+                    background: #ffffff;
+                    padding: 0.22rem 0.6rem;
+                    border-radius: 10px;
+                    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                    text-decoration: none;
+                    color: inherit;
+                ">
+                    <div id="profileIcon" style="
+                        width: 32px;
+                        height: 32px;
+                        background: #f0f0f0;
+                        border-radius: 50%;
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                        font-weight: bold;
+                        color: #555;
+                        font-size: 14px;
+                    ">
+                        U
+                    </div>
+                    <span id="username" style="font-size: 14px; color: #333;">Username</span>
+                </a>
+                
+                <!-- Data Type Tabs — TEMPORARY: hidden pre-deployment per request. Company tab
+                     stays active/default and Compare's markup already starts display:none, so
+                     hiding this bar leaves Company shown and Compare unreachable with no other
+                     change needed. To re-enable, just remove this inline style. -->
+                <div class="data-tabs" id="dataTypeTabs" style="display:none;">
+                    <button class="data-tab active" data-type="company">Company</button>
+                    <button class="data-tab" data-type="compare">Compare</button>
+                </div>
+
+                <!-- Format selector (Company tab) — inline multi-select text toggles -->
+                <div id="companyDataControls" class="format-row">
+                    <span class="format-label">Financial data format:</span>
+                    <label class="format-opt" title="Standardised Ind-AS statements">
+                        <input type="checkbox" id="indASCheck" checked>
+                        <span>IndAS</span>
+                    </label>
+                    <label class="format-opt" title="Granular, detailed line-item breakdown">
+                        <input type="checkbox" id="detailedCheck" checked>
+                        <span>Detailed</span>
+                    </label>
+                </div>
+
+                <!-- Company Dropdown -->
+                <div id="companyDropdownWrap" style="margin-top:12px;">
+                    <div class="dropdown" id="customDropdown">
+                        <input type="text" class="dropdown-toggle" id="dropdownToggle"
+                               data-value="" data-sector=""
+                               placeholder="Search company..." autocomplete="off" />
+                        <div class="dropdown-menu" id="dropdownMenu">
+                            <ul id="dropdownList"></ul>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Sector Dropdown (Sector only) -->
+                <div id="sectorDropdownWrap" style="display:none; margin-top:12px;">
+                    <select id="sectorSelect" class="sector-select">
+                        <option value="">Select Sector...</option>
+                    </select>
+                </div>
+
+                <!-- Compare controls -->
+                <div id="compareControls" style="display:none;">
+                    <div style="margin-top:12px;">
+                        <div class="dropdown" id="compareDropdown">
+                            <input type="text" class="dropdown-toggle" id="compareToggle"
+                                   placeholder="Search & add companies..." autocomplete="off" />
+                            <div class="dropdown-menu" id="compareDropdownMenu">
+                                <ul id="compareDropdownList"></ul>
+                            </div>
+                        </div>
+                    </div>
+                    <div id="selectedChips" class="selected-chips"></div>
+                    <div class="compare-hint">Select 2–5 companies, then click Download Data</div>
+                </div>
+
+                <!-- AI Financial Model (Company tab) — optional hero feature, whole card is the toggle -->
+                <label id="includeOptions" class="model-card" title="Turn on to also build a full AI financial model">
+                    <input type="checkbox" id="aiModelCheck" class="mc-input">
+                    <span class="mc-icon">✨</span>
+                    <span class="mc-body">
+                        <span class="mc-titlerow">
+                            <span class="mc-title">AI Financial Model</span>
+                        </span>
+                        <span class="mc-desc">P&amp;L, balance sheet, cash flow &amp; DCF valuation — built by AI from the financial data.</span>
+                    </span>
+                    <span class="mc-switch"><span class="mc-track"></span></span>
+                </label>
+
+                <!-- Buttons -->
+                <div id="buttons">
+                    <button id="refreshBtn">Download Data</button>
+                    <button id="helpBtn">Help</button>
+                </div>
+
+                <!-- AI progress status box -->
+                <div id="aiStatusBox" style="display:none; margin-top:10px; padding:10px 12px; background:#f0f5ff; border:1.5px solid #d6e5f5; border-radius:8px; font-family:Arial,sans-serif;">
+                    <div style="font-size:10px; font-weight:700; color:#173760; margin-bottom:6px;">AI STATUS</div>
+                    <div id="aiStatusText" style="font-size:11px; color:#444; line-height:1.5;"></div>
+                </div>
+
+                <!-- Warning message container -->
+                <div id="warningMsg" style="display:none; color:red; margin-top:10px;"></div>
+
+                <!-- Financial Model disclaimer gate (shown after Download Data when AI Model is on) -->
+                <style>
+                    .dz-overlay {
+                        position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+                        display: none; align-items: center; justify-content: center;
+                        z-index: 1200; font-family: Arial, sans-serif;
+                    }
+                    .dz-box {
+                        background: #fff; width: 92%; max-width: 440px; max-height: 88vh;
+                        display: flex; flex-direction: column; border-radius: 12px;
+                        box-shadow: 0 14px 44px rgba(0,0,0,0.35); overflow: hidden;
+                    }
+                    .dz-header {
+                        background: #173760; color: #fff; padding: 12px 16px;
+                        font-weight: 700; font-size: 14px;
+                    }
+                    .dz-body { padding: 14px 16px; overflow-y: auto; }
+                    .dz-warn {
+                        background: #fff8e5; border: 1px solid #f3dcc9; color: #5a4a30;
+                        border-radius: 8px; padding: 10px 12px; font-size: 12px; line-height: 1.5;
+                        margin-bottom: 12px;
+                    }
+                    .dz-gen { font-size: 11px; color: #777; line-height: 1.5; }
+                    .dz-gen b { color: #173760; }
+                    .dz-footer {
+                        display: flex; justify-content: flex-end; gap: 10px;
+                        padding: 12px 16px; border-top: 1px solid #eee;
+                    }
+                    .dz-cancel {
+                        background: #fff; color: #555; border: 1px solid #ccc; border-radius: 8px;
+                        padding: 8px 16px; font-size: 13px; cursor: pointer;
+                    }
+                    .dz-agree {
+                        background: #173760; color: #fff; border: none; border-radius: 8px;
+                        padding: 8px 16px; font-size: 13px; font-weight: 700; cursor: pointer;
+                    }
+                </style>
+                <div id="disclaimerModal" class="dz-overlay">
+                    <div class="dz-box">
+                        <div class="dz-header">Before building the AI Financial Model</div>
+                        <div class="dz-body">
+                            <div class="dz-warn">⚠ This model is compiled by AI from public data sources. The figures, formulas and projections are estimates and may contain errors — please double-check every number before relying on it. It is not investment advice.</div>
+                            <div class="dz-gen">
+                                <b>General Disclaimer</b><br>
+                                General Disclaimer - The information on this website has been collected from certain public sources. GoIndia Advisors LLP believes that the information it uses comes from reliable sources, but does not guarantee the accuracy or completeness of this information, which is subject to change without notice, and nothing in this document shall be construed as such a guarantee. Employees involved in this service may hold positions in the companies mentioned in the services/information. We disclaim any liability arising from use of information contained on this website. Nothing herein shall constitute or be construed as an offering of financial instruments or as investment advice or recommendations by GoIndia Advisors LLP. The Site may include advertisements and links to external sites and co-branded pages which GoIndia Advisors LLP does not endorse and cannot accept any responsibility or liability for loss or damage suffered by the intended viewer. GoIndia Advisors LLP is unable to exercise control over the security or content of information passing over the network or via the Service, and GoIndia Advisors LLP hereby excludes all liability of any kind for the transmission or reception of infringing or unlawful information of whatever nature.
+                            </div>
+                        </div>
+                        <div class="dz-footer">
+                            <button id="disclaimerCancel" class="dz-cancel">Cancel</button>
+                            <button id="disclaimerAgree" class="dz-agree">I Agree — Build Model</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Read-only disclaimer viewer — reachable anytime via the "Disclaimer" link -->
+                <div id="disclaimerInfoModal" class="dz-overlay">
+                    <div class="dz-box">
+                        <div class="dz-header">Disclaimers</div>
+                        <div class="dz-body">
+                            <div class="dz-warn">⚠ Clicking <b>Download Data</b> replaces the existing data in your Key Financials, Quarterly and Annual Data sheets with the new company's data.</div>
+                            <div class="dz-warn">⚠ The AI Financial Model is compiled by AI from public data sources. The figures, formulas and projections are estimates and may contain errors — please double-check every number before relying on it. It is not investment advice.</div>
+                            <div class="dz-gen">
+                                <b>General Disclaimer</b><br>
+                                General Disclaimer - The information on this website has been collected from certain public sources. GoIndia Advisors LLP believes that the information it uses comes from reliable sources, but does not guarantee the accuracy or completeness of this information, which is subject to change without notice, and nothing in this document shall be construed as such a guarantee. Employees involved in this service may hold positions in the companies mentioned in the services/information. We disclaim any liability arising from use of information contained on this website. Nothing herein shall constitute or be construed as an offering of financial instruments or as investment advice or recommendations by GoIndia Advisors LLP. The Site may include advertisements and links to external sites and co-branded pages which GoIndia Advisors LLP does not endorse and cannot accept any responsibility or liability for loss or damage suffered by the intended viewer. GoIndia Advisors LLP is unable to exercise control over the security or content of information passing over the network or via the Service, and GoIndia Advisors LLP hereby excludes all liability of any kind for the transmission or reception of infringing or unlawful information of whatever nature.
+                            </div>
+                        </div>
+                        <div class="dz-footer">
+                            <button id="disclaimerInfoClose" class="dz-agree">Close</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Financial Model data-selection modal: DISABLED for now, kept commented out for easy re-enable.
+                <style>
+                    .fm-modal-overlay {
+                        position: fixed; inset: 0; background: rgba(0,0,0,0.45);
+                        display: none; align-items: center; justify-content: center;
+                        z-index: 1000; font-family: Arial, sans-serif;
+                    }
+                    .fm-modal {
+                        background: #fff; width: 92%; max-width: 420px; max-height: 86vh;
+                        overflow-y: auto; border-radius: 10px; box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+                    }
+                    .fm-modal-header {
+                        display: flex; align-items: center; justify-content: space-between;
+                        background: #173760; color: #fff; padding: 12px 16px;
+                        font-weight: 700; font-size: 14px; border-radius: 10px 10px 0 0;
+                    }
+                    .fm-modal-close { cursor: pointer; font-size: 20px; line-height: 1; }
+                    .fm-modal-sub { padding: 12px 16px 4px; font-size: 12px; color: #555; }
+                    .fm-modal-body { padding: 6px 16px 12px; }
+                    .fm-source { border-bottom: 1px solid #eee; }
+                    .fm-source-head {
+                        display: flex; align-items: center; gap: 8px;
+                        padding: 9px 0; font-size: 13px; color: #222; cursor: pointer;
+                    }
+                    .fm-source-head span { flex: 1; }
+                    .fm-expand {
+                        background: none; border: none; cursor: pointer; color: #173760;
+                        font-size: 13px; padding: 2px 6px;
+                    }
+                    .fm-suboptions {
+                        margin: 0 0 8px 26px; padding: 6px 0; border-left: 2px solid #e0e8f3;
+                        max-height: 240px; overflow-y: auto;
+                    }
+                    .fm-op-group { margin-bottom: 6px; }
+                    .fm-op-group-head {
+                        display: flex; align-items: center; gap: 8px;
+                        padding: 5px 0 5px 8px; font-size: 12px; font-weight: 700;
+                        color: #173760; cursor: pointer;
+                    }
+                    .fm-op-group-head span { flex: 1; }
+                    .fm-suboption {
+                        display: flex; align-items: center; gap: 8px;
+                        padding: 3px 0 3px 22px; font-size: 11.5px; color: #444; cursor: pointer;
+                    }
+                    .fm-unit { color: #aaa; font-weight: 400; }
+                    .fm-loading { padding: 6px 10px; font-size: 12px; color: #888; font-style: italic; }
+                    .fm-modal-footer {
+                        display: flex; justify-content: flex-end; gap: 10px;
+                        padding: 12px 16px; border-top: 1px solid #eee;
+                    }
+                    .fm-btn-primary {
+                        background: #173760; color: #fff; border: none; border-radius: 6px;
+                        padding: 8px 16px; font-size: 13px; cursor: pointer;
+                    }
+                    .fm-btn-secondary {
+                        background: #eee; color: #333; border: none; border-radius: 6px;
+                        padding: 8px 16px; font-size: 13px; cursor: pointer;
+                    }
+                </style>
+                <div id="modelDataModal" class="fm-modal-overlay">
+                    <div class="fm-modal">
+                        <div class="fm-modal-header">
+                            <span>Build Financial Model</span>
+                            <span class="fm-modal-close" id="modelModalClose">&times;</span>
+                        </div>
+                        <div class="fm-modal-sub">
+                            Choose the data to feed into the model for
+                            <b id="modelModalCompany">this company</b>. Financial data from your
+                            sheets is always included.
+                        </div>
+                        <div class="fm-modal-body" id="modelDataBody">
+                            Operational (expandable to specific metric groups)
+                            <div class="fm-source">
+                                <label class="fm-source-head">
+                                    <input type="checkbox" class="fm-source-toggle" data-source="operational" checked>
+                                    <span>Operational data</span>
+                                    <button type="button" class="fm-expand" id="opExpandBtn" aria-expanded="false">▸ choose</button>
+                                </label>
+                                <div class="fm-suboptions" id="opMetricList" style="display:none;">
+                                    <div class="fm-loading">Loading operational metrics…</div>
+                                </div>
+                            </div>
+                            Other sources (include / exclude)
+                            <div class="fm-source">
+                                <label class="fm-source-head">
+                                    <input type="checkbox" class="fm-source-toggle" data-source="earningCall" checked>
+                                    <span>Earnings call summaries &amp; sentiment (last 2 quarters)</span>
+                                </label>
+                            </div>
+                            <div class="fm-source">
+                                <label class="fm-source-head">
+                                    <input type="checkbox" class="fm-source-toggle" data-source="qna" checked>
+                                    <span>Earnings call Q&amp;A (last 2 quarters)</span>
+                                </label>
+                            </div>
+                            <div class="fm-source">
+                                <label class="fm-source-head">
+                                    <input type="checkbox" class="fm-source-toggle" data-source="broker" checked>
+                                    <span>Broker / analyst reports</span>
+                                </label>
+                            </div>
+                            <div class="fm-source">
+                                <label class="fm-source-head">
+                                    <input type="checkbox" class="fm-source-toggle" data-source="interview" checked>
+                                    <span>Management interviews</span>
+                                </label>
+                            </div>
+                            <div class="fm-source">
+                                <label class="fm-source-head">
+                                    <input type="checkbox" class="fm-source-toggle" data-source="orderBook" checked>
+                                    <span>Order book (last 2 quarters)</span>
+                                </label>
+                            </div>
+                        </div>
+                        <div class="fm-modal-footer">
+                            <button id="modelModalCancel" class="fm-btn-secondary">Cancel</button>
+                            <button id="modelModalBuild" class="fm-btn-primary">Download &amp; Build</button>
+                        </div>
+                    </div>
+                </div>
+                -->
+
+                <!-- Info Box -->
+                <div id="infoBox">
+                <span class="icon">⚠️</span>
+                <span class="text">
+                    Reminder: Clicking the <b>Download Data</b> button will replace the existing data in your Key Financials, Quarterly and Annual Data sheets with the new company's data.
+                </span>
+                <span class="closeBtn">&times;</span>
+                </div>
+
+
+                <!-- Data status container — width matches the dropdown (280px) for uniformity -->
+                <div style="margin-top:22px; width:280px; box-sizing:border-box; display:flex; padding:8px; align-items:center; gap:10px; border:1px solid #ccc; border-radius:5px;">
+                    <div id="dataStatus" style="font-size: small; flex: 1 1 auto; min-width: 0;">
+                        Checking for new data...
+                    </div>
+                    <button id="refreshStatusBtn" disabled>Refresh</button>
+                </div>
+
+                <!-- ╔════ ASK-CLAUDE CHAT (EXPERIMENTAL) ════╗
+                     To hide before deploy: set CHAT_ENABLED = false in taskpane.js,
+                     or comment out this whole #chatFeature block + its style block below. -->
+                <style>
+                    #chatFab {
+                        position: fixed; top: 8px; right: 14px; z-index: 1100;
+                        background: linear-gradient(135deg, #2f6fd0, #173760);
+                        color: #fff; cursor: pointer; border: 2px solid #d80404;
+                        border-radius: 22px; padding: 9px 16px; font-size: 13px; font-weight: 700;
+                        font-family: Arial, sans-serif;
+                        box-shadow: 0 0 14px rgba(47,111,208,0.65), 0 4px 12px rgba(0,0,0,0.28);
+                        animation: chatFabGlow 2.4s ease-in-out infinite;
+                    }
+                    #chatFab:hover {
+                        background: linear-gradient(135deg, #3a7ee0, #1d4576);
+                        box-shadow: 0 0 22px rgba(47,111,208,0.95), 0 6px 16px rgba(0,0,0,0.32);
+                    }
+                    @keyframes chatFabGlow {
+                        0%, 100% { box-shadow: 0 0 12px rgba(47,111,208,0.55), 0 4px 12px rgba(0,0,0,0.28); }
+                        50%      { box-shadow: 0 0 22px rgba(47,111,208,0.95), 0 4px 12px rgba(0,0,0,0.28); }
+                    }
+                    #chatPanel {
+                        position: fixed; top: 52px; right: 12px; z-index: 1100;
+                        width: 440px; max-width: calc(100vw - 24px);
+                        height: 620px; max-height: calc(100vh - 70px);
+                        background: #fff; border: 1px solid #d6e5f5; border-radius: 14px;
+                        box-shadow: 0 12px 36px rgba(0,0,0,0.22);
+                        flex-direction: column; overflow: hidden; font-family: Arial, sans-serif;
+                    }
+                    .chat-header {
+                        display: flex; align-items: center; justify-content: space-between;
+                        background: linear-gradient(135deg, #2f6fd0, #173760); color: #fff;
+                        border-bottom: 2px solid #d80404; padding: 10px 14px; font-weight: 700; font-size: 13px;
+                    }
+                    .chat-header small { font-weight: 400; opacity: .85; font-size: 10px; margin-left: 4px; }
+                    .chat-close { cursor: pointer; font-size: 20px; line-height: 1; }
+                    .chat-ctx { padding: 7px 14px 9px; background: #f0f5ff; border-bottom: 1px solid #d6e5f5; font-size: 11px; color: #55606e; display: flex; flex-direction: column; gap: 6px; }
+                    .chat-ctx b { color: #173760; }
+                    .chat-ctx-field { display: flex; align-items: center; gap: 6px; }
+                    .chat-ctx-label { flex-shrink: 0; width: 72px; color: #55606e; }
+                    .chat-co-wrap { position: relative; flex: 1; }
+                    .chat-co-input { width: 100%; box-sizing: border-box; border: 1px solid #cddbef; border-radius: 6px; padding: 4px 22px 4px 7px; font-size: 11.5px; font-family: inherit; outline: none; color: #173760; background: #fff; }
+                    .chat-co-input:focus { border-color: #2f6fd0; }
+                    .chat-co-list { position: absolute; top: 100%; left: 0; right: 0; margin: 2px 0 0; padding: 0; list-style: none; max-height: 150px; overflow-y: auto; background: #fff; border: 1px solid #d6e5f5; border-radius: 8px; box-shadow: 0 6px 18px rgba(0,0,0,0.18); z-index: 1300; display: none; }
+                    .chat-co-list.open { display: block; }
+                    .chat-co-list li { padding: 6px 9px; font-size: 11.5px; color: #2c3744; cursor: pointer; }
+                    .chat-co-list li:hover { background: #f0f5ff; }
+                    .chat-co-clear { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); cursor: pointer; color: #999; font-weight: 700; font-size: 13px; }
+                    .chat-co-clear:hover { color: #b80000; }
+                    .chat-stream { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+                    .chat-msg { display: flex; max-width: 100%; }
+                    .chat-msg.user { justify-content: flex-end; }
+                    .chat-bubble { border-radius: 12px; padding: 8px 11px; font-size: 12.5px; line-height: 1.5; white-space: pre-wrap; max-width: 88%; }
+                    .chat-msg.bot .chat-bubble { background: #f5f7fa; color: #25303d; border: 1px solid #eceff3; border-top-left-radius: 3px; }
+                    .chat-msg.user .chat-bubble { background: #173760; color: #fff; border-top-right-radius: 3px; }
+                    .chat-card { display: flex; align-items: center; gap: 8px; background: #fff; border: 1px solid #e6eaf0; border-left: 3px solid #275b9f; border-radius: 8px; padding: 7px 10px; font-size: 11.5px; color: #2c3744; }
+                    .chat-card.run { border-left-color: #2f6fd0; }
+                    .chat-card.done { border-left-color: #4b9f27; }
+                    .chat-card.err { border-left-color: #b80000; }
+                    .chat-card .chat-card-st { margin-left: auto; font-weight: 700; }
+                    .chat-suggest { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 12px; }
+                    .chat-chip { border: 1px solid #d6e5f5; background: #f0f5ff; color: #173760; border-radius: 14px; padding: 5px 10px; font-size: 10.5px; font-weight: 600; cursor: pointer; }
+                    .chat-composer { border-top: 1px solid #eef1f5; padding: 8px 10px; display: flex; align-items: flex-end; gap: 8px; }
+                    .chat-composer textarea { flex: 1; border: 2px solid #d6e5f5; border-radius: 10px; outline: none; resize: none; font-family: inherit; font-size: 12.5px; color: #2c3744; max-height: 96px; line-height: 1.4; padding: 7px 9px; }
+                    .chat-composer button { width: 34px; height: 34px; padding: 0; border-radius: 9px; border: none; background: linear-gradient(135deg, #2f6fd0, #173760); color: #fff; font-size: 14px; line-height: 1; cursor: pointer; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; }
+                </style>
+                <div id="chatFeature">
+                    <button id="chatFab" title="Ask DataGPT">✦ Ask</button>
+                    <div id="chatPanel" style="display:none;">
+                        <div class="chat-header">
+                            <span>✦ Ask DataGPT <small>experimental</small></span>
+                            <span class="chat-close" id="chatClose">&times;</span>
+                        </div>
+                        <div class="chat-ctx">
+                            <div class="chat-ctx-field">
+                                <span class="chat-ctx-label">Acting on</span>
+                                <div class="chat-co-wrap">
+                                    <input type="text" id="chatCompanyInput" class="chat-co-input" placeholder="Search company…" autocomplete="off">
+                                    <ul id="chatCompanyList" class="chat-co-list"></ul>
+                                </div>
+                            </div>
+                            <div class="chat-ctx-field">
+                                <span class="chat-ctx-label">Compare with</span>
+                                <div class="chat-co-wrap">
+                                    <input type="text" id="chatCompareInput" class="chat-co-input" placeholder="+ add company (optional)" autocomplete="off">
+                                    <ul id="chatCompareList" class="chat-co-list"></ul>
+                                    <span id="chatCompareClear" class="chat-co-clear" style="display:none;" title="Remove">&times;</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="chat-stream" id="chatStream"></div>
+                        <div class="chat-suggest">
+                            <span class="chat-chip">Add a sheet with quarterly revenue</span>
+                            <span class="chat-chip">What is the 3-year revenue CAGR?</span>
+                            <span class="chat-chip">Summarise the latest earnings call</span>
+                        </div>
+                        <div class="chat-composer">
+                            <textarea id="chatInput" rows="1" placeholder="Ask to fetch or edit your sheet…"></textarea>
+                            <button id="chatSend">➤</button>
+                        </div>
+                    </div>
+                </div>
+                <!-- ╚════ END ASK-CLAUDE CHAT ════╝ -->
+
+                <!-- Disclaimer viewer link -->
+                <div id="disclaimerInfoLink" style="
+                    margin-top: 1.5rem;
+                    font-size: 11px;
+                    color: #999;
+                    cursor: pointer;
+                    text-align: center;
+                    user-select: none;
+                ">
+                    <span style="display:inline-block; width:13px; height:13px; line-height:13px; border:1px solid #999; border-radius:50%; font-size:9px; margin-right:4px;">i</span>Disclaimer
+                </div>
+
+                <!-- Log Out Button -->
+                <button id="logoutBtn" style="
+                    margin-top: 3rem;
+                    margin-left: 0;
+                    background: #ffffff;
+                    color: #b80000;
+                    padding: 0.5rem 1rem;
+                    border: 1px solid #b80000;
+                    border-radius: 12px;
+                    cursor: pointer;
+                    transition: transform 0.2s, box-shadow 0.2s;
+                ">
+                    Log Out
+                </button>
+            </div>
+        </div>
+
+        <!-- Blocked / Not a Member -->
+        <div id="blockedContainer" style="display:none; text-align:center; padding:2rem; width:100%;">
+            <div style="background:white; border-radius:20px; padding:2rem; max-width:400px; margin:auto; display:flex; flex-direction:column; align-items:center; justify-content:center;">
+                <img src="https://www.goindiastocks.com/_next/image?url=%2F_next%2Fstatic%2Fmedia%2Flogo.eb4c0c16.png&w=1920&q=75" 
+                    alt="Membership Required" style="width:100px; margin-bottom:1rem;">
+                <p style="color:#b80000; font-weight:bold; margin-bottom:0.5rem;">This feature requires a GIS Pro or Enterprise subscription.</p>
+                <p style="color:#555; font-size:13px; margin-bottom:1rem;">Upgrade your plan to access live NSE &amp; BSE financial data in Excel.</p>
+                <button
+                    onclick="window.open('https://www.goindiastocks.com/pricing', '_blank')"
+                    style="background:#173760; color:white; border:none; padding:0.5rem 1rem; border-radius:12px; cursor:pointer;">
+                    Upgrade to GIS Pro
+                </button>
+            </div>
+        </div>
+
+        <!-- Enterprise Request Access -->
+        <!--<div id="enterpriseRequestContainer" style="display:none; text-align:center; padding:2rem; width:100%;">
+            <div style="background:white; border-radius:20px; padding:2rem; max-width:400px; margin:auto; display:flex; flex-direction:column; align-items:center; justify-content:center;">
+                <img src="https://www.goindiastocks.com/_next/image?url=%2F_next%2Fstatic%2Fmedia%2Flogo.eb4c0c16.png&w=1920&q=75" 
+                    alt="Enterprise Access" style="width:100px; margin-bottom:1rem;">
+                
+                <p id="enterpriseRequestMessage" style="color:#173760; font-weight:bold; margin-bottom:1rem; line-height:1.4; text-align:center;">
+                    This feature is available only for Enterprise Plan members.<br>
+                    If you need access, you can request it below.
+                </p>
+
+                <button id="requestAccessBtn" style="background:#173760; color:white; border:none; padding:0.5rem 1rem; border-radius:12px; cursor:pointer; margin-bottom:1rem;">
+                    Request Access
+                </button>
+
+                <a href="#" id="checkStatusLink" style="color:#173760; text-decoration:underline; cursor:pointer; margin-bottom:1rem;">
+                    Check Status
+                </a>
+
+                <div id="statusMessage" style="color:#173760; font-weight:bold;"></div>
+            </div>
+        </div>-->
+    </div>
+
+    
+
+    
+
+    <script>
+
+        // The "replace data" reminder is only shown until the user dismisses it once;
+        // after that it stays hidden and is reachable via the "Disclaimer" link instead.
+        const INFO_BANNER_SEEN_KEY = "goia_infoBannerSeen";
+
+        document.addEventListener("DOMContentLoaded", () => {
+            const infoBox = document.getElementById("infoBox");
+            if (localStorage.getItem(INFO_BANNER_SEEN_KEY)) {
+                infoBox.style.display = "none";
+            }
+            document.querySelector("#infoBox .closeBtn").addEventListener("click", () => {
+                infoBox.style.display = "none";
+                localStorage.setItem(INFO_BANNER_SEEN_KEY, "1");
+            });
+
+            // Read-only disclaimer viewer, reachable anytime.
+            const disclaimerInfoModal = document.getElementById("disclaimerInfoModal");
+            document.getElementById("disclaimerInfoLink").addEventListener("click", () => {
+                disclaimerInfoModal.style.display = "flex";
+            });
+            document.getElementById("disclaimerInfoClose").addEventListener("click", () => {
+                disclaimerInfoModal.style.display = "none";
+            });
+            disclaimerInfoModal.addEventListener("click", (e) => {
+                if (e.target === disclaimerInfoModal) disclaimerInfoModal.style.display = "none";
+            });
+        });
+        
+
+        window.onload = function () {
+            if (google && google.accounts && google.accounts.id) {
+                google.accounts.id.initialize({
+                    client_id: "588713186952-isq15ehjattbfce2hhhqnuffdfln3nco.apps.googleusercontent.com",
+                    callback: handleCredentialResponse
+                });
+
+                google.accounts.id.renderButton(
+                    document.getElementById("googleSignInButton"),
+                    { theme: "outline", size: "large", width: 250 }
+                );
+            } else {
+                console.error("Google Identity Services not loaded yet.");
+            }
+        };
+
+        function parseJwt(token) {
+            const base64Url = token.split('.')[1];
+            const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+            const jsonPayload = decodeURIComponent(atob(base64).split('').map(function(c) {
+                return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
+            }).join(''));
+            return JSON.parse(jsonPayload);
+        }
+
+        async function handleCredentialResponse(response) {
+            try {
+                // Parse JWT to get user info
+                const payload = parseJwt(response.credential);
+                const fullname = payload.name;
+                const email = payload.email;
+
+                // Send extracted fullname and email to backend
+                let userRes = await fetch("https://transcriptanalyser.com/payment/getGoogleuser", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ fullname, email })
+                });
+
+                let user = await userRes.json();
+
+                // Check membership
+                let membershipRes = await fetch("https://transcriptanalyser.com/payment/check_membership", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ user_id: user.UserId })
+                });
+
+                let membership = await membershipRes.json();
+
+                if (membership.is_giin_pro === true || membership.is_admin === true || membership.is_enterprise_member === true) {
+                    // Store user session if needed
+                    localStorage.setItem("user", JSON.stringify(user));
+                    localStorage.setItem("membership", JSON.stringify(membership));
+
+                    // Show UI
+                    document.getElementById("loginContainer").style.display = "none";
+                    document.getElementById("memberContent").style.display = "block";
+                    document.getElementById("addinUI").style.display = "block";
+                    document.getElementById("logoutBtn").style.display = "block";
+
+                    const profileIcon = document.getElementById("profileIcon");
+                    const username = document.getElementById("username");
+
+                    if (user.FullName) {
+                        username.textContent = user.FullName;
+                        const initials = user.FullName.split(" ").map(n => n[0]).join("").toUpperCase();
+                        profileIcon.textContent = initials;
+                    }
+                } else {
+                    // Not a member
+                    document.getElementById("loginContainer").style.display = "none";
+                    document.getElementById("blockedContainer").style.display = "block";
+                }
+            } catch (err) {
+                console.error("Login or membership check failed:", err);
+            }
+        }
+        let companies = [];
+
+        async function fetchCompanies() {
+            const response = await fetch("https://transcriptanalyser.com/operational/companies_excel");
+            const data = await response.json();
+            return data;
+        }
+
+        function populateCustomDropdown(filteredCompanies, resetToggle = false) {
+            const list = document.getElementById("dropdownList");
+            const toggle = document.getElementById("dropdownToggle");
+
+            list.innerHTML = "";  // Clear existing items
+
+            if (resetToggle) {
+                toggle.value = "";
+                toggle.placeholder = "Search company...";
+                toggle.dataset.value = "";
+                toggle.dataset.sector = "";
+            }
+
+            filteredCompanies.forEach((c) => {
+                const li = document.createElement("li");
+                li.textContent = c.CompName;
+                li.dataset.value = c.fincode;
+                li.dataset.sector = c.sector_type;
+
+                li.addEventListener("click", () => {
+                    toggle.value = c.CompName;
+                    toggle.dataset.value = c.fincode;
+                    toggle.dataset.sector = c.sector_type;
+                    document.getElementById("dropdownMenu").classList.remove("active");
+                    document.getElementById("customDropdown").classList.remove("open");
+                });
+
+                list.appendChild(li);
+            });
+        }
+
+        async function initCustomDropdown() {
+            companies = await fetchCompanies(); // assign to outer-scope variable
+            populateCustomDropdown(companies, true); // initial load resets toggle
+        }
+
+        // Open dropdown on focus, select all text so user can immediately type a new search
+        document.getElementById("dropdownToggle").addEventListener("focus", () => {
+            document.getElementById("dropdownToggle").select();
+            document.getElementById("dropdownMenu").classList.add("active");
+            document.getElementById("customDropdown").classList.add("open");
+        });
+
+        // Filter list as user types
+        document.getElementById("dropdownToggle").addEventListener("input", (e) => {
+            const query = e.target.value.toLowerCase();
+            const filtered = companies.filter(c => c.CompName.toLowerCase().includes(query));
+            populateCustomDropdown(filtered);
+            document.getElementById("dropdownMenu").classList.add("active");
+            document.getElementById("customDropdown").classList.add("open");
+        });
+
+        // Close dropdown when focus leaves (delay so li clicks register first)
+        document.getElementById("dropdownToggle").addEventListener("blur", () => {
+            setTimeout(() => {
+                document.getElementById("dropdownMenu").classList.remove("active");
+                document.getElementById("customDropdown").classList.remove("open");
+            }, 150);
+        });
+
+        // Keep the input focused when clicking inside the menu so the item's click
+        // registers. In Office task-pane webviews, blur otherwise fires first and
+        // tears down the menu before selection — making items appear unclickable.
+        document.getElementById("dropdownMenu").addEventListener("mousedown", (e) => e.preventDefault());
+
+        // ── Compare tab: multi-select dropdown + chips ──
+        const compareSelected = []; // { fincode, name, sector_type }
+        window.__compareSelected = compareSelected;
+
+        function renderChips() {
+            const container = document.getElementById("selectedChips");
+            container.innerHTML = "";
+            compareSelected.forEach((c, idx) => {
+                const chip = document.createElement("span");
+                chip.className = "chip";
+                chip.innerHTML = `${c.name} <span class="chip-remove" data-idx="${idx}">&times;</span>`;
+                container.appendChild(chip);
+            });
+            container.querySelectorAll(".chip-remove").forEach(btn => {
+                btn.addEventListener("click", (e) => {
+                    compareSelected.splice(parseInt(e.target.dataset.idx), 1);
+                    renderChips();
+                    populateCompareDropdown(companies);
+                });
+            });
+        }
+
+        function populateCompareDropdown(filteredCompanies) {
+            const list = document.getElementById("compareDropdownList");
+            list.innerHTML = "";
+            const selectedCodes = new Set(compareSelected.map(c => c.fincode));
+            filteredCompanies.filter(c => !selectedCodes.has(c.fincode)).forEach(c => {
+                const li = document.createElement("li");
+                li.textContent = c.CompName;
+                li.addEventListener("click", () => {
+                    if (compareSelected.length >= 5) return;
+                    compareSelected.push({ fincode: c.fincode, name: c.CompName, sector_type: c.sector_type });
+                    renderChips();
+                    populateCompareDropdown(companies);
+                    document.getElementById("compareToggle").value = "";
+                    document.getElementById("compareDropdownMenu").classList.remove("active");
+                    document.getElementById("compareDropdown").classList.remove("open");
+                });
+                list.appendChild(li);
+            });
+        }
+
+        document.getElementById("compareToggle").addEventListener("focus", () => {
+            document.getElementById("compareToggle").select();
+            populateCompareDropdown(companies);
+            document.getElementById("compareDropdownMenu").classList.add("active");
+            document.getElementById("compareDropdown").classList.add("open");
+        });
+        document.getElementById("compareToggle").addEventListener("input", (e) => {
+            const q = e.target.value.toLowerCase();
+            populateCompareDropdown(companies.filter(c => c.CompName.toLowerCase().includes(q)));
+            document.getElementById("compareDropdownMenu").classList.add("active");
+            document.getElementById("compareDropdown").classList.add("open");
+        });
+        document.getElementById("compareToggle").addEventListener("blur", () => {
+            setTimeout(() => {
+                document.getElementById("compareDropdownMenu").classList.remove("active");
+                document.getElementById("compareDropdown").classList.remove("open");
+            }, 150);
+        });
+
+        // Same fix as the company dropdown: prevent the menu from stealing focus so
+        // item clicks register reliably inside the Office task-pane webview.
+        document.getElementById("compareDropdownMenu").addEventListener("mousedown", (e) => e.preventDefault());
+
+        // Initialize dropdowns
+        initCustomDropdown();
+        initSectorDropdown();
+
+        // Data type tab switching
+        let activeDataType = "company";
+        document.querySelectorAll(".data-tab").forEach(tab => {
+            tab.addEventListener("click", () => {
+                document.querySelectorAll(".data-tab").forEach(t => t.classList.remove("active"));
+                tab.classList.add("active");
+                activeDataType = tab.dataset.type;
+                const isCompany = activeDataType === "company";
+                const isSector = activeDataType === "sector";
+                const isCompare = activeDataType === "compare";
+                document.getElementById("companyDataControls").style.display = isCompany ? "" : "none";
+                document.getElementById("companyDropdownWrap").style.display = isCompany ? "" : "none";
+                document.getElementById("includeOptions").style.display = isCompany ? "" : "none";
+                document.getElementById("sectorDropdownWrap").style.display = isSector ? "" : "none";
+                document.getElementById("compareControls").style.display = isCompare ? "" : "none";
+            });
+        });
+
+        async function initSectorDropdown() {
+            try {
+                const res = await fetch("https://transcriptanalyser.com/sector_metrics/sectors");
+                const sectors = await res.json();
+                const select = document.getElementById("sectorSelect");
+                sectors.sort((a, b) => a.sector_name.localeCompare(b.sector_name));
+                sectors.forEach(s => {
+                    const opt = document.createElement("option");
+                    opt.value = s.id;
+                    opt.textContent = s.sector_name;
+                    select.appendChild(opt);
+                });
+            } catch (e) {
+                console.error("Failed to load sectors:", e);
+            }
+        }
+
+        // Refresh button
+        const showMessage = (msg) => {
+            if (Office?.Runtime?.displayDialogAsync) {
+                console.log(msg); // fallback for dev
+            } else {
+                // fallback to alert
+                alert(msg);
+            }
+        };
+
+        // Refresh button
+        const getSelectedCompany = () => {
+            const toggle = document.getElementById("dropdownToggle");
+            if (!toggle) return null;
+
+            const fincode = toggle.dataset?.value || "";
+            const name = toggle.value?.trim() || "";
+            if (!fincode || !name) return null;
+
+            return { fincode, name };
+        };
+
+        // Prevent both mode checkboxes from being unchecked simultaneously
+        document.getElementById("indASCheck").addEventListener("change", function () {
+            if (!this.checked && !document.getElementById("detailedCheck").checked) this.checked = true;
+        });
+        document.getElementById("detailedCheck").addEventListener("change", function () {
+            if (!this.checked && !document.getElementById("indASCheck").checked) this.checked = true;
+        });
+
+        // Refresh button — validate based on active data type
+        document.getElementById("refreshBtn").addEventListener("click", () => {
+            const warning = document.getElementById("warningMsg");
+            if (activeDataType === "sector") {
+                if (!document.getElementById("sectorSelect").value) {
+                    warning.textContent = "⚠ Please select a sector to download data.";
+                    warning.style.display = "block";
+                    setTimeout(() => { warning.style.display = "none"; }, 3000);
+                    return;
+                }
+            } else {
+                if (!getSelectedCompany()) {
+                    warning.textContent = "⚠ Please select a company.";
+                    warning.style.display = "block";
+                    setTimeout(() => { warning.style.display = "none"; }, 3000);
+                    return;
+                }
+            }
+            warning.style.display = "none";
+        });
+
+        // Help button
+        document.getElementById("helpBtn").addEventListener("click", () => {
+            const company = getSelectedCompany();
+            if (!company) {
+                alert("⚠ Please select a company first.");
+                return;
+            }
+
+            const { fincode } = company;
+            const url = `https://www.goindiastocks.com/companyinfo/${encodeURIComponent(fincode)}`;
+            window.open(url, "_blank");
+        });
+
+        initCustomDropdown();
+    </script>
+    </main>
+</body>
+
+</html>

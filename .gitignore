@@ -1,0 +1,10 @@
+# Secrets — never commit real credentials
+.env
+
+# Build output — once the Netlify build step below is enabled, Netlify builds this
+# itself from source on every deploy; committing it defeats the purpose (it bakes in
+# the real OPENROUTER_KEY value) and is what triggered GitHub's secret scanning block.
+dist/
+
+# Dependencies — regenerate with `npm install`
+node_modules/
