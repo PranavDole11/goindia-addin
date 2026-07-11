@@ -1,0 +1,8 @@
+[build.environment]
+  # This is a static client-side add-in with no backend proxy for OpenRouter/MCP calls, so
+  # OPENROUTER_KEY and TEST_MCP_KEY are intentionally baked into the shipped JS bundle at build
+  # time (see webpack.config.js's DefinePlugin) — there is no way around that client-side. Netlify's
+  # secret scanner otherwise treats any configured env var value found in build output as a leak and
+  # fails the build; these two are expected to be there; anything else it flags should still be
+  # investigated, not blanket-disabled.
+  SECRETS_SCAN_OMIT_KEYS = "OPENROUTER_KEY,TEST_MCP_KEY"
