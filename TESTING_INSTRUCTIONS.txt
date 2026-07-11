@@ -1,0 +1,28 @@
+Testing Instructions – GoIndia Excel Add-in
+
+Overview
+Tests the GoIndia Excel Add-in, which authenticates users, populates Excel with company financial data, and optionally builds an AI financial model via a third-party AI service (OpenRouter).
+
+Steps
+1. Insert Add-in: Excel → Insert → Get Add-ins → My Add-ins → Upload My Add-in → upload manifest.xml. Appears in HOME tab as Go India Stocks.
+2. Click Go India Stocks to open the taskpane.
+3. Sign in with test credentials (or Google):
+   Username: ut@gmail.com
+   Password: 123
+4. Select a company from the dropdown (e.g., "ACC Ltd."). Leave "Financial data format" (IndAS/Detailed) at its defaults.
+5. (Optional) AI Financial Model toggle — OFF by default. If turned ON, the add-in sends the company's downloaded financial/operational data to OpenRouter (third-party AI, using models like Gemini/GPT) to build a 5-year projected model (P&L, balance sheet, cash flow, DCF, ratios). Takes ~30-90+ seconds with a progress status shown. No account credentials or personal data are sent — only company financial figures.
+6. Click "Download Data". Standard sheets (Key Financials, Quarterly Data, Annual Data, Index) populate first; if AI model was enabled, 7 more sheets appear prefixed "FM " (Assumptions, Operational, P&L, Balance Sheet, Capex & FCF, Valuation & DCF, Summary).
+7. Verify all sheets populate with correct data (and FM sheets are fully computed, not blank/error, if enabled).
+8. Confirm the Privacy Policy link in the manifest opens correctly.
+
+Expected Results
+- Add-in loads without errors; login (credentials or Google) works.
+- Company selection fetches correct data.
+- AI Financial Model, if enabled, completes within ~2 minutes and populates all 7 FM sheets correctly; if left off, no AI call is made.
+- Privacy Policy link opens correctly.
+
+Notes
+- Test in Excel desktop or Excel online. All backend calls use HTTPS.
+- Test account is pre-configured to simulate customer use.
+
+Contact: help@goindiaadvisors.com

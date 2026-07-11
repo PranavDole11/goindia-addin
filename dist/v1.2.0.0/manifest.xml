@@ -6,8 +6,8 @@
   <DefaultLocale>en-US</DefaultLocale>
   <DisplayName DefaultValue="GoIndia Stocks for Excel"/>
   <Description DefaultValue="Get company data in excel at the click of a button"/>
-  <IconUrl DefaultValue="https://goindia-addin.netlify.app/assets/logo32.png"/>
-  <HighResolutionIconUrl DefaultValue="https://goindia-addin.netlify.app/assets/logo64.png"/>
+  <IconUrl DefaultValue="https://goindia-addin.netlify.app/v1.2.0.0/assets/logo32.png"/>
+  <HighResolutionIconUrl DefaultValue="https://goindia-addin.netlify.app/v1.2.0.0/assets/logo64.png"/>
   <SupportUrl DefaultValue="https://www.goindiastocks.com/exceladdin"/>
   <AppDomains>
     <AppDomain>https://pranavdole11.github.io</AppDomain>
@@ -16,7 +16,7 @@
     <Host Name="Workbook"/>
   </Hosts>
   <DefaultSettings>
-    <SourceLocation DefaultValue="https://goindia-addin.netlify.app/taskpane.html"/>
+    <SourceLocation DefaultValue="https://goindia-addin.netlify.app/v1.2.0.0/taskpane.html"/>
   </DefaultSettings>
   <Permissions>ReadWriteDocument</Permissions>
   <VersionOverrides xmlns="http://schemas.microsoft.com/office/taskpaneappversionoverrides" xsi:type="VersionOverridesV1_0">
@@ -62,15 +62,15 @@
     </Hosts>
     <Resources>
       <bt:Images>
-        <bt:Image id="Icon.16x16" DefaultValue="https://goindia-addin.netlify.app/assets/logo16.png"/>
-        <bt:Image id="Icon.32x32" DefaultValue="https://goindia-addin.netlify.app/assets/logo32.png"/>
-        <bt:Image id="Icon.80x80" DefaultValue="https://goindia-addin.netlify.app/assets/logo64.png"/>
+        <bt:Image id="Icon.16x16" DefaultValue="https://goindia-addin.netlify.app/v1.2.0.0/assets/logo16.png"/>
+        <bt:Image id="Icon.32x32" DefaultValue="https://goindia-addin.netlify.app/v1.2.0.0/assets/logo32.png"/>
+        <bt:Image id="Icon.80x80" DefaultValue="https://goindia-addin.netlify.app/v1.2.0.0/assets/logo64.png"/>
       </bt:Images>
       <bt:Urls>
         <bt:Url id="App.PrivacyUrl" DefaultValue="https://www.goindiastocks.com/exceladdin"/>
         <bt:Url id="GetStarted.LearnMoreUrl" DefaultValue="https://go.microsoft.com/fwlink/?LinkId=276812"/>
-        <bt:Url id="Commands.Url" DefaultValue="https://goindia-addin.netlify.app/commands.html"/>
-        <bt:Url id="Taskpane.Url" DefaultValue="https://goindia-addin.netlify.app/taskpane.html"/>
+        <bt:Url id="Commands.Url" DefaultValue="https://goindia-addin.netlify.app/v1.2.0.0/commands.html"/>
+        <bt:Url id="Taskpane.Url" DefaultValue="https://goindia-addin.netlify.app/v1.2.0.0/taskpane.html"/>
       </bt:Urls>
       <bt:ShortStrings>
         <bt:String id="GetStarted.Title" DefaultValue="Get started with Go India's add-in!"/>

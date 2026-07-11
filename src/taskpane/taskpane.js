@@ -264,6 +264,7 @@ document.getElementById("loginForm").addEventListener("submit", async (e) => {
                 const initials = user.FullName.split(" ").map(n => n[0]).join("").toUpperCase();
                 profileIcon.textContent = initials;
             }
+            refreshWalletBalance();
 
             // Skip the rest of the login logic
             return;
@@ -315,6 +316,7 @@ document.getElementById("loginForm").addEventListener("submit", async (e) => {
                 const initials = user.FullName.split(" ").map(n => n[0]).join("").toUpperCase();
                 profileIcon.textContent = initials;
             }
+            refreshWalletBalance();
         } else {
             // Not a member: show blocked container
             document.getElementById("blockedContainer").style.display = "flex";
@@ -407,6 +409,185 @@ document.getElementById("loginForm").addEventListener("submit", async (e) => {
     document.getElementById("loginScreen").style.display = "flex";
 });*/
 
+const MAX_MODEL_COST_INR = 25; // matches the AI Financial Model card's own displayed cost ceiling
+const TEST_BYPASS_USER_ID = "test123"; // ut@gmail.com certification account — see refreshWalletBalance
+
+// Disables the AI Financial Model toggle (and unchecks it if it was on); re-enables it otherwise.
+function setAiModelAvailability(sufficientBalance) {
+    const check = document.getElementById("aiModelCheck");
+    if (!check) return;
+    check.disabled = !sufficientBalance;
+    if (!sufficientBalance) check.checked = false;
+}
+
+// Fetches the current user's wallet balance (sum of all three credit buckets, per backend
+// convention), updates the pill in the header, and gates the AI Financial Model toggle on it.
+// Fails CLOSED: a real account with an unverifiable balance (network error, non-200, etc.) gets
+// the toggle disabled, same as a confirmed-insufficient balance — we should never let a real user
+// generate a model we don't know they can afford. The one exemption is the ut@gmail.com
+// certification bypass (UserId "test123"), which always fails this fetch since it isn't a real
+// wallet user — it stays enabled unconditionally so Microsoft's reviewers can test the feature.
+async function refreshWalletBalance() {
+    const walletBalanceEl = document.getElementById("walletBalance");
+    if (!walletBalanceEl) return;
+    let userId = null;
+    try {
+        const user = JSON.parse(localStorage.getItem("user") || "{}");
+        userId = user.UserId || null;
+        if (!userId) { walletBalanceEl.textContent = "—"; setAiModelAvailability(false); return; }
+        const isTestAccount = userId === TEST_BYPASS_USER_ID;
+        if (isTestAccount) setAiModelAvailability(true);
+
+        const res = await fetch("https://transcriptanalyser.com/wallet/user_credit_balance", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ user_id: String(userId) })
+        });
+        if (!res.ok) {
+            walletBalanceEl.textContent = "—";
+            if (!isTestAccount) setAiModelAvailability(false);
+            return;
+        }
+        const data = await res.json();
+        const c = data.credits || {};
+        const total = (c.whatsapp_credit || 0) + (c.stockgpt_credit || 0) + (c.balance_credit || 0);
+        walletBalanceEl.textContent = `₹${total.toFixed(2)}`;
+        setAiModelAvailability(isTestAccount || total >= MAX_MODEL_COST_INR);
+    } catch (e) {
+        console.warn("Wallet balance fetch failed:", e);
+        walletBalanceEl.textContent = "—";
+        if (userId !== TEST_BYPASS_USER_ID) setAiModelAvailability(false);
+    }
+}
+
+// wallet.py's two excel_-prefixed endpoints, deployed alongside the pre-existing
+// /wallet/user_credit_balance on the same backend.
+const WALLET_BASE_URL = "https://transcriptanalyser.com/wallet";
+const WALLET_DEDUCT_URL = `${WALLET_BASE_URL}/excel_deduct_model_cost`;
+
+// Enterprise accounts are keyed by enterprise_id in wallet_balance, not user_id — check_membership's
+// response (already stored in full under localStorage["membership"] at login) carries enterprise_id
+// whenever is_enterprise_member is true, confirmed live: {"is_enterprise_member":true,"enterprise_id":25,...}.
+// Shared by deductModelCost and fetchWalletHistory so both branch the same way.
+function getWalletIdentity() {
+    const user = JSON.parse(localStorage.getItem("user") || "{}");
+    const membership = JSON.parse(localStorage.getItem("membership") || "{}");
+    const isEnterprise = membership.is_enterprise_member === true && membership.enterprise_id != null;
+    return {
+        userId: user.UserId || null,
+        isEnterprise,
+        enterpriseId: isEnterprise ? Number(membership.enterprise_id) : null,
+    };
+}
+
+// Briefly shows "Cost for <Company> Model: X Rs." below the Download Data button so the user
+// sees exactly what a deduction cost, then hides it again. Non-blocking, purely cosmetic.
+function showWalletDeductBanner(companyName, costInr) {
+    const el = document.getElementById("walletDeductBanner");
+    if (!el || costInr == null) return;
+    el.textContent = `Cost for ${companyName || "this"} Model: ${Math.round(Number(costInr))} Rs.`;
+    el.style.display = "block";
+    clearTimeout(showWalletDeductBanner._t);
+    showWalletDeductBanner._t = setTimeout(() => {
+        el.style.display = "none";
+    }, 4500);
+}
+
+// Deducts the OpenRouter cost of a financial-model generation from the user's wallet, then
+// refreshes the balance pill live (no page reload needed). Fire-and-forget from the caller —
+// never blocks the "model complete" status on a wallet round-trip.
+async function deductModelCost({ fincode, companyName, costUsd, usedFallback }) {
+    try {
+        const { userId, isEnterprise, enterpriseId } = getWalletIdentity();
+        if (!userId) return;
+        const res = await fetch(WALLET_DEDUCT_URL, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                user_id: isEnterprise ? null : (Number(userId) || null),
+                enterprise_id: enterpriseId,
+                fincode: Number(fincode),
+                cost_usd: costUsd,
+                used_fallback: !!usedFallback,
+            }),
+        });
+        if (!res.ok) {
+            console.warn("[Wallet] excel_deduct_model_cost failed:", res.status, await res.text().catch(() => ""));
+            return;
+        }
+        const data = await res.json().catch(() => null);
+        showWalletDeductBanner(companyName, data?.cost_inr);
+        await refreshWalletBalance();
+    } catch (e) {
+        console.warn("[Wallet] excel_deduct_model_cost request failed:", e);
+    }
+}
+
+// ── Wallet history popup ──
+// Reads /wallet/excel_cost_history (fincode + cost only), then resolves each unique fincode to a
+// company name via the existing company_search endpoint (passing a fincode as searchtxt returns
+// that company as a match, same as passing a name) — cached per-open so repeat fincodes in the
+// list don't refetch.
+async function fetchWalletHistory() {
+    const listEl = document.getElementById("walletHistoryList");
+    if (!listEl) return;
+    listEl.textContent = "Loading…";
+    try {
+        const { userId, isEnterprise, enterpriseId } = getWalletIdentity();
+        if (!userId) { listEl.textContent = "Not logged in."; return; }
+        const qs = isEnterprise ? `enterprise_id=${enterpriseId}` : `user_id=${encodeURIComponent(userId)}`;
+        const res = await fetch(`${WALLET_BASE_URL}/excel_cost_history?${qs}&limit=20`);
+        if (!res.ok) { listEl.textContent = "Couldn't load history."; return; }
+        const data = await res.json();
+        const entries = data.entries || [];
+        if (!entries.length) { listEl.textContent = "No AI model charges yet."; return; }
+
+        const nameCache = new Map();
+        const resolveCompanyName = async (fincode) => {
+            if (nameCache.has(fincode)) return nameCache.get(fincode);
+            let name = `Fincode ${fincode}`;
+            try {
+                const r = await fetch("https://transcriptanalyser.com/goindiastock/company_search", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ searchtxt: String(fincode) })
+                });
+                const d = await r.json();
+                const match = d?.data?.[0];
+                if (match?.label) name = match.label;
+            } catch (e) { /* keep fincode fallback */ }
+            nameCache.set(fincode, name);
+            return name;
+        };
+
+        listEl.innerHTML = "";
+        for (const entry of entries) {
+            const name = await resolveCompanyName(entry.fincode);
+            const row = document.createElement("div");
+            row.style.cssText = "padding:8px 0; border-bottom:1px solid #eee;";
+            const dt = entry.created_utc ? new Date(entry.created_utc) : null;
+            row.innerHTML = `
+                <div style="display:flex; justify-content:space-between; gap:8px;">
+                    <span>${name}</span>
+                    <span style="font-weight:700; color:#173760; white-space:nowrap;">₹${Number(entry.cost_inr).toFixed(2)}</span>
+                </div>
+                <div style="font-size:10.5px; color:#999; margin-top:2px;">${dt ? dt.toLocaleString() : ""}${entry.used_fallback ? " · fallback model" : ""}</div>
+            `;
+            listEl.appendChild(row);
+        }
+    } catch (e) {
+        console.warn("[Wallet] excel_cost_history fetch failed:", e);
+        listEl.textContent = "Couldn't load history.";
+    }
+}
+
+// webpack scopes top-level functions inside its own module wrapper, not onto window — so
+// taskpane.html's separate inline <script> can't see these by bare name even though a
+// `typeof x === "function"` guard makes that failure silent instead of throwing. Explicitly
+// exposing the two functions taskpane.html actually calls across that boundary.
+window.refreshWalletBalance = refreshWalletBalance;
+window.fetchWalletHistory = fetchWalletHistory;
+
 async function checkLocalSession() {
     const savedUser = localStorage.getItem("user");
     const savedMembership = localStorage.getItem("membership");
@@ -429,6 +610,12 @@ async function checkLocalSession() {
 
             // Only proceed if user has GIS Pro or Enterprise access
             if (updatedMembership.is_giin_pro === true || updatedMembership.is_admin === true || updatedMembership.is_enterprise_member === true) {
+                // Keep stored membership in sync with the live API — this used to be fetched here
+                // and discarded, leaving localStorage["membership"] permanently frozen at whatever
+                // was captured at the original login (e.g. missing enterprise_id if that wasn't
+                // part of the response back then, or just generally stale).
+                localStorage.setItem("membership", JSON.stringify(updatedMembership));
+
                 // Show member content
                 document.getElementById("memberContent").style.display = "block";
                 document.getElementById("addinUI").style.display = "block";
@@ -445,6 +632,7 @@ async function checkLocalSession() {
                         .join("")
                         .toUpperCase();
                 }
+                refreshWalletBalance();
 
                 return true; // Session valid
             } else {
@@ -467,6 +655,10 @@ async function checkLocalSession() {
 // Usage example
 window.addEventListener("DOMContentLoaded", () => {
     checkLocalSession();
+    // Keeps the balance pill honest even when something else (another product, another
+    // session) deducts from the same wallet_balance row — not just after a model this
+    // add-in itself generated. refreshWalletBalance() already no-ops safely if not logged in.
+    setInterval(refreshWalletBalance, 60000);
 });
 
 
@@ -1123,7 +1315,7 @@ Office.onReady(async (info) => {
         // Cross-PROVIDER last-resort fallback for every call (not just Assumptions). A same-provider
         // fallback (e.g. flash -> pro) is useless against a Google-infra-wide blip — observed in
         // practice: an "Upstream idle timeout" on gemini-2.5-pro and "JSON error injected into SSE
-        const FALLBACK_MODEL = "anthropic/claude-opus-4.8";
+        const FALLBACK_MODEL = "openai/gpt-5.4";
 
         const GENERAL_DISCLAIMER = "General Disclaimer - The information on this website has been collected from certain public sources. GoIndia Advisors LLP believes that the information it uses comes from reliable sources, but does not guarantee the accuracy or completeness of this information, which is subject to change without notice, and nothing in this document shall be construed as such a guarantee. Employees involved in this service may hold positions in the companies mentioned in the services/information. We disclaim any liability arising from use of information contained on this website. Nothing herein shall constitute or be construed as an offering of financial instruments or as investment advice or recommendations by GoIndia Advisors LLP. The Site may include advertisements and links to external sites and co-branded pages which GoIndia Advisors LLP does not endorse and cannot accept any responsibility or liability for loss or damage suffered by the intended viewer. GoIndia Advisors LLP is unable to exercise control over the security or content of information passing over the network or via the Service, and GoIndia Advisors LLP hereby excludes all liability of any kind for the transmission or reception of infringing or unlawful information of whatever nature.";
 
@@ -1377,6 +1569,7 @@ Office.onReady(async (info) => {
             };
             const symbols = { assum: {}, op: {}, pnl: {}, bs: {}, capex: {}, val: {} }; // key -> Excel row
             let totalCost = 0, totalTokens = 0;
+            let usedFallbackModel = false; // true if any call in this workflow had to use FALLBACK_MODEL
             const costRows = [];
 
             // Lenient JSON parse: strip fences/prose, isolate the outer object, repair truncation.
@@ -1488,6 +1681,7 @@ Office.onReady(async (info) => {
                     }
 
                     const wf = workflowOf(model);
+                    if (attemptLabel === "fallback") usedFallbackModel = true;
                     totalCost += (cost || 0); totalTokens += callTotalTokens;
                     workflowTotals[wf].cost += (cost || 0); workflowTotals[wf].tokens += callTotalTokens; workflowTotals[wf].calls += 1;
                     costRows.push(`   • ${label} [${wf}/${model}]${attemptLabel !== "attempt 1" ? ` (${attemptLabel})` : ""}: ${cost != null ? "$" + cost.toFixed(5) : "n/a"}  (${callTotalTokens || "?"} tokens, ${completionTokens ?? "?"} completion / cap ${maxTokens})`);
@@ -2487,6 +2681,7 @@ PURE-FORMULA ROWS — when this prompt gives you the COMPLETE formula for a row 
                 + `   Dynamic [${DYNAMIC_MODEL}]: $${workflowTotals.dynamic.cost.toFixed(5)}  (${workflowTotals.dynamic.tokens} tokens, ${workflowTotals.dynamic.calls} calls)\n`
                 + costRows.join("\n")
             );
+            deductModelCost({ fincode, companyName, costUsd: totalCost, usedFallback: usedFallbackModel });
 
             aiStatus(null);
             console.log("✅ AI Financial Model (multi-sheet, linked) written to Excel");
@@ -2921,11 +3116,18 @@ Return ONLY a valid JSON object — no markdown, no explanation, no code fences.
         // Read selected modes
         const indASChecked = document.getElementById("indASCheck").checked;
         const detailedChecked = document.getElementById("detailedCheck").checked;
-        if (!indASChecked && !detailedChecked) return showWarning("Please select at least one format (IndAS or Detailed).");
+        const operationalChecked = document.getElementById("operationalCheck").checked;
+        if (!indASChecked && !detailedChecked && !operationalChecked) return showWarning("Please select at least one option (IndAS, Detailed, or Operational).");
+
+        // Operational is independent of the IndAS/Detailed financial-statement flow below — fire
+        // it in parallel rather than gating it on (or being gated by) that flow. It writes its own
+        // "Operational Data" sheet and handles its own errors, so nothing more to do with it here.
+        if (operationalChecked) handleOperationalRefresh().catch(e => console.error("Operational fetch failed:", e));
 
         const modes = [];
         if (indASChecked) modes.push({ label: "IndAS", suffix: "" });
         if (detailedChecked) modes.push({ label: "Detailed", suffix: "IND" });
+        if (modes.length === 0) return; // Operational-only selection — nothing else to do
 
         // Detects an empty/all-zero financial-statement response — used both to decide whether a
         // company has consolidated data at all (the probe below) and, later, to render "not
@@ -3434,15 +3636,24 @@ Return ONLY a valid JSON object — no markdown, no explanation, no code fences.
 });
 
 
-/* ═══════════════ ASK-CLAUDE CHAT (EXPERIMENTAL) ═══════════════
-   In-Excel chat running on a cheap/fast OpenRouter model with tool-calling: it fetches
-   company data (financials, operational, earnings calls, broker reports, management
-   interviews, order book) and reads/writes the open workbook on demand, one named tool
-   per underlying API, rather than pre-fetching everything up front.
+/* ═══════════════ DATAGPT CHAT (EXPERIMENTAL) ═══════════════
+   One agent, DeepSeek V4 Pro (via OpenRouter), with two tool sources merged into a single
+   tool-calling loop:
+   1. GoIndia's own MCP server (goindia-mcp.fly.dev/sse) — connected to directly (the same
+      server gia-chat2.js's own McpClient talks to; that file is a reference for the wire
+      protocol only, its /api/chatai/gia-chat2 wrapper is a separate product with its own
+      agent loop and is NOT called from here). Covers the full backend/routers/mcp.py data
+      surface. Requires the user to hold an active MCP subscription (checked via dbcatalog's
+      /get-mcp-key); a fresh MCP connection is opened per turn, mirroring gia-chat2.js's own
+      "one client per chat turn" lifecycle.
+   2. Local Excel tools (list/read/write the open workbook) — unchanged, still the only
+      write path and still gated by the ask-before-edits confirmation flow.
+   See the DataGPT plan doc for the original architecture proposal this has since diverged
+   from (this file is the source of truth for the current design).
    To hide before deploy: set CHAT_ENABLED = false (the UI is removed and nothing
    is wired up), or comment out this whole block + the #chatFeature markup/style
    in taskpane.html. The financial-model feature does not depend on any of this. */
-const CHAT_ENABLED = false; // TEMPORARY: hidden pre-deployment per request — re-enable by flipping this back to true
+const CHAT_ENABLED = false; // TEMPORARY: hidden again pre-deployment — priority is the wallet-feature update; re-enable by flipping back to true
 
 (function setupAskClaudeChat() {
     if (!CHAT_ENABLED) {
@@ -3453,7 +3664,7 @@ const CHAT_ENABLED = false; // TEMPORARY: hidden pre-deployment per request — 
 
     const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
     const OPENROUTER_KEY = process.env.OPENROUTER_KEY; // injected at build time from .env — see webpack.config.js
-    const AI_MODEL = "google/gemini-2.5-flash"; // cheap/fast — the tool-calling loop below does the heavy lifting
+    const AI_MODEL = "deepseek/deepseek-v4-pro"; // DataGPT — stronger multi-step tool-calling across the wider tool surface below
 
     const byId = (id) => document.getElementById(id);
     const fab = byId("chatFab"), panel = byId("chatPanel"), stream = byId("chatStream"),
@@ -3461,6 +3672,24 @@ const CHAT_ENABLED = false; // TEMPORARY: hidden pre-deployment per request — 
     const companyInput = byId("chatCompanyInput"), companyList = byId("chatCompanyList"),
         compareInput = byId("chatCompareInput"), compareList = byId("chatCompareList"), compareClear = byId("chatCompareClear");
     if (!fab || !panel) return;
+
+    // Whether workbook edits are applied immediately or held for a per-write confirmation.
+    // Defaults to OFF (ask first) — matches the "confirm before destructive edits" guardrail.
+    const AUTO_APPLY_KEY = "goia_chatAutoApplyEdits";
+    let autoApplyEdits = localStorage.getItem(AUTO_APPLY_KEY) === "1";
+    const autoApplyToggle = byId("chatAutoApply"), autoApplyLabel = byId("chatAutoApplyLabel");
+    const renderAutoApplyLabel = () => {
+        if (autoApplyLabel) autoApplyLabel.textContent = autoApplyEdits ? "Writing to sheets automatically" : "Ask before writing to sheets";
+    };
+    if (autoApplyToggle) {
+        autoApplyToggle.checked = autoApplyEdits;
+        renderAutoApplyLabel();
+        autoApplyToggle.addEventListener("change", () => {
+            autoApplyEdits = autoApplyToggle.checked;
+            try { localStorage.setItem(AUTO_APPLY_KEY, autoApplyEdits ? "1" : "0"); } catch (e) { /* storage unavailable */ }
+            renderAutoApplyLabel();
+        });
+    }
 
     // Chat history survives taskpane reloads (window close, Excel restart) via localStorage.
     const CHAT_HISTORY_KEY = "goia_chatHistory";
@@ -3553,6 +3782,49 @@ const CHAT_ENABLED = false; // TEMPORARY: hidden pre-deployment per request — 
         stream.scrollTop = stream.scrollHeight;
         return c;
     };
+    // Renders an inline approve/skip prompt and resolves once the user picks one —
+    // lets the tool-calling loop below simply `await` a write decision like any other I/O.
+    function addConfirmCard(text, opts) {
+        const { approveLabel = "Write", rejectLabel = "Skip" } = opts || {};
+        const c = document.createElement("div");
+        c.className = "chat-confirm";
+        const t = document.createElement("div"); t.className = "cf-text"; t.textContent = text;
+        const actions = document.createElement("div"); actions.className = "cf-actions";
+        const approve = document.createElement("button"); approve.className = "cf-approve"; approve.textContent = approveLabel;
+        const reject = document.createElement("button"); reject.className = "cf-reject"; reject.textContent = rejectLabel;
+        actions.appendChild(approve); actions.appendChild(reject);
+        c.appendChild(t); c.appendChild(actions);
+        stream.appendChild(c);
+        stream.scrollTop = stream.scrollHeight;
+        return new Promise((resolve) => {
+            approve.addEventListener("click", () => {
+                actions.remove(); c.classList.add("cf-done"); t.textContent = "✓ Approved — " + text;
+                resolve(true);
+            });
+            reject.addEventListener("click", () => {
+                actions.remove(); c.classList.add("cf-skipped"); t.textContent = "Cancelled — " + text;
+                resolve(false);
+            });
+        });
+    }
+
+    // Gate for every workbook write: asks first unless the user has flipped on
+    // "write automatically". Warns explicitly when a write would overwrite an existing sheet.
+    async function maybeConfirmAndWrite(action) {
+        const sheetName = String(action?.sheet || "Claude Output").slice(0, 31);
+        if (!autoApplyEdits) {
+            let exists = false;
+            try { exists = (await toolListSheets()).sheets.some(s => s.toLowerCase() === sheetName.toLowerCase()); }
+            catch (e) { /* assume new sheet */ }
+            const verb = exists ? `overwrite the existing sheet "${sheetName}"` : `create a new sheet "${sheetName}"`;
+            const rows = Array.isArray(action?.rows) ? action.rows.length : 0;
+            const approved = await addConfirmCard(`DataGPT wants to ${verb}${rows ? ` (${rows} row${rows === 1 ? "" : "s"})` : ""}.`);
+            if (!approved) return { ok: false, rejected: true, sheet: sheetName };
+        }
+        await writeAction(action);
+        return { ok: true, sheet: sheetName };
+    }
+
     const greet = () => addMsg("bot",
         "Hi — I'm connected to your GoIndia data and this workbook. Ask me about the selected company, or to write something into a sheet. (Experimental)");
 
@@ -3563,6 +3835,17 @@ const CHAT_ENABLED = false; // TEMPORARY: hidden pre-deployment per request — 
     const closePanel = () => { panel.style.display = "none"; fab.style.display = ""; };
     fab.addEventListener("click", openPanel);
     byId("chatClose").addEventListener("click", closePanel);
+    const chatClear = byId("chatClear");
+    if (chatClear) {
+        chatClear.addEventListener("click", async () => {
+            const ok = await addConfirmCard("Clear all chat history?", { approveLabel: "Clear", rejectLabel: "Cancel" });
+            if (!ok) return;
+            history = [];
+            persistHistory();
+            stream.innerHTML = "";
+            greet();
+        });
+    }
     document.querySelectorAll("#chatFeature .chat-chip").forEach(ch =>
         ch.addEventListener("click", () => { input.value = ch.textContent; input.focus(); }));
     input.addEventListener("input", () => { input.style.height = "auto"; input.style.height = Math.min(96, input.scrollHeight) + "px"; });
@@ -3571,134 +3854,181 @@ const CHAT_ENABLED = false; // TEMPORARY: hidden pre-deployment per request — 
     const ddToggle = byId("dropdownToggle");
     if (ddToggle) ddToggle.addEventListener("blur", setCompany);
 
-    // Last 2 completed fiscal quarter_years (YYYYQ, Indian FY) — mirrors the model.
-    const lastQuarterYears = (cnt) => {
-        const today = new Date(), m = today.getMonth() + 1, y = today.getFullYear();
-        let fy, q;
-        if (m <= 3) { fy = y; q = 4; } else if (m <= 6) { fy = y + 1; q = 1; }
-        else if (m <= 9) { fy = y + 1; q = 2; } else { fy = y + 1; q = 3; }
-        const out = [];
-        for (let i = 0; i < cnt; i++) { q -= 1; if (q === 0) { q = 4; fy -= 1; } out.push(fy * 10 + q); }
-        return out;
-    };
+    // ── GoIndia MCP access ──
+    const MCP_SERVER_URL = "https://goindia-mcp.fly.dev/sse"; // the actual MCP server — see McpClient below
+    const MCP_KEY_URL = "https://transcriptanalyser.com/dbcatalog/get-mcp-key";
+    const TEST_MCP_KEY = process.env.TEST_MCP_KEY || ""; // injected at build time from .env — see webpack.config.js
+    let mcpAccess = null; // { mcp_api_key, flag } | null — fetched once per panel session
+    async function ensureMcpAccess() {
+        if (mcpAccess) return mcpAccess;
+        try {
+            const user = JSON.parse(localStorage.getItem("user") || "{}");
+            // "test123" is the Microsoft-certification bypass account — not a real DB user, so
+            // /get-mcp-key can't resolve it — use the injected test key instead. Real accounts
+            // (including UserId 6 / rakeshadmin@goindiaadvisors.com, now granted real MCP
+            // access) go through the normal live lookup below, so their key is never stale.
+            if (user.UserId === "test123") {
+                return (mcpAccess = TEST_MCP_KEY ? { mcp_api_key: TEST_MCP_KEY, flag: 3 } : { mcp_api_key: null, flag: 0 });
+            }
+            if (!user.UserId) return (mcpAccess = { mcp_api_key: null, flag: 0 });
+            const res = await fetch(`${MCP_KEY_URL}?user_id=${encodeURIComponent(user.UserId)}`);
+            if (!res.ok) return (mcpAccess = { mcp_api_key: null, flag: 0 });
+            const data = await res.json();
+            mcpAccess = { mcp_api_key: data.mcp_api_key || null, flag: data.flag };
+        } catch (e) { mcpAccess = { mcp_api_key: null, flag: 0 }; }
+        return mcpAccess;
+    }
 
-    // ── Tool-calling ──
-    // Rather than pre-fetching every data source for every selected company on every
-    // message (expensive, and still incomplete whenever the user names a company that
-    // isn't pre-selected), the model calls named tools on demand — one per underlying
-    // API — plus two tools to read the ACTUAL layout of an existing worksheet before
-    // writing a formula that references it (fixes formulas guessing wrong row/column
-    // positions) and one to write a new sheet.
-    const toolCache = new Map(); // `${tool}:${fincode}` -> result, avoids re-fetching within/across turns
-    const TEXT_CAP = 2600;       // chars per tool result field
+    // ── MCP client (ported from gia-chat2.js's McpClient) ──
+    // MCP's HTTP+SSE transport: 1) open an SSE GET, 2) the server sends an "endpoint" event
+    // whose data is a relative URL to POST JSON-RPC requests to, 3) each request's response
+    // arrives back over that same SSE stream, matched by request id. One client per chat turn
+    // — opened at the start of send(), closed in its finally block.
+    class McpClient {
+        constructor(sseUrl, signal) {
+            this.sseUrl = sseUrl;
+            this.signal = signal;
+            this.postUrl = null;
+            this.id = 0;
+            this.tools = [];
+            this.pending = new Map();
+            this._endpointResolve = null;
+            this._endpointReject = null;
+            this._endpointPromise = new Promise((resolve, reject) => {
+                this._endpointResolve = resolve;
+                this._endpointReject = reject;
+            });
+            this._endpointPromise.catch(() => {});
+            this._closed = false;
+        }
+        _nextId() { return ++this.id; }
+        async open() {
+            const res = await fetch(this.sseUrl, { method: "GET", headers: { "Accept": "text/event-stream" }, signal: this.signal });
+            if (!res.ok || !res.body) {
+                const text = await res.text().catch(() => "");
+                throw new Error(`MCP SSE open HTTP ${res.status}: ${text.slice(0, 300)}`);
+            }
+            this._readSse(res.body).catch((err) => {
+                if (!this._closed) {
+                    this._endpointReject?.(err);
+                    for (const { reject } of this.pending.values()) reject(new Error(`MCP SSE stream closed: ${err.message ?? err}`));
+                    this.pending.clear();
+                }
+            });
+            this.postUrl = await this._endpointPromise;
+        }
+        async _readSse(body) {
+            const reader = body.getReader();
+            const decoder = new TextDecoder("utf-8");
+            let buf = "", evName = "", evData = "";
+            const flushEvent = () => {
+                if (!evName && !evData) return;
+                this._handleSseEvent(evName || "message", evData);
+                evName = ""; evData = "";
+            };
+            while (true) {
+                const { value, done } = await reader.read();
+                if (done) break;
+                buf += decoder.decode(value, { stream: true });
+                let nl;
+                while ((nl = buf.indexOf("\n")) !== -1) {
+                    const line = buf.slice(0, nl).replace(/\r$/, "");
+                    buf = buf.slice(nl + 1);
+                    if (line === "") { flushEvent(); continue; }
+                    if (line.startsWith(":")) continue;
+                    if (line.startsWith("event:")) evName = line.slice(6).trim();
+                    else if (line.startsWith("data:")) { const chunk = line.slice(5).replace(/^ /, ""); evData = evData ? `${evData}\n${chunk}` : chunk; }
+                }
+            }
+            flushEvent();
+        }
+        _handleSseEvent(name, data) {
+            if (name === "endpoint") {
+                let resolved;
+                try { resolved = new URL(data, this.sseUrl).toString(); } catch { resolved = data; }
+                this._endpointResolve?.(resolved);
+                return;
+            }
+            if (name === "message" || name === "") {
+                if (!data) return;
+                let obj;
+                try { obj = JSON.parse(data); } catch { return; }
+                if (obj && Object.prototype.hasOwnProperty.call(obj, "id") && this.pending.has(obj.id)) {
+                    const { resolve } = this.pending.get(obj.id);
+                    this.pending.delete(obj.id);
+                    resolve(obj);
+                }
+            }
+        }
+        async _rpc(method, params) {
+            if (!this.postUrl) throw new Error("MCP client not opened");
+            const id = this._nextId();
+            const body = { jsonrpc: "2.0", id, method, params: params ?? {} };
+            const responsePromise = new Promise((resolve, reject) => { this.pending.set(id, { resolve, reject }); });
+            responsePromise.catch(() => {});
+            let res;
+            try {
+                res = await fetch(this.postUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: this.signal });
+            } catch (err) { this.pending.delete(id); throw err; }
+            if (!res.ok && res.status !== 202) {
+                this.pending.delete(id);
+                const text = await res.text().catch(() => "");
+                throw new Error(`MCP ${method} POST HTTP ${res.status}: ${text.slice(0, 300)}`);
+            }
+            try {
+                const ctype = res.headers.get("content-type") || "";
+                if (ctype.includes("application/json")) {
+                    const inline = await res.json();
+                    if (inline && inline.id === id) {
+                        this.pending.delete(id);
+                        if (inline.error) throw new Error(`MCP ${method} error: ${inline.error.message ?? JSON.stringify(inline.error)}`);
+                        return inline.result;
+                    }
+                }
+            } catch { /* fall through to SSE-delivered response */ }
+            const payload = await responsePromise;
+            if (payload.error) throw new Error(`MCP ${method} error: ${payload.error.message ?? JSON.stringify(payload.error)}`);
+            return payload.result;
+        }
+        async _notify(method, params) {
+            if (!this.postUrl) return;
+            try { await fetch(this.postUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", method, params: params ?? {} }), signal: this.signal }); }
+            catch { /* best-effort */ }
+        }
+        async initialize() {
+            const result = await this._rpc("initialize", { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "goindia-excel-addin", version: "1.0.0" } });
+            await this._notify("notifications/initialized");
+            return result;
+        }
+        async listTools() {
+            const result = await this._rpc("tools/list", {});
+            this.tools = (result?.tools ?? []).map((t) => ({ name: t.name, description: t.description ?? "", input_schema: t.inputSchema ?? t.input_schema ?? { type: "object", properties: {} } }));
+            return this.tools;
+        }
+        async callTool(name, args) {
+            const result = await this._rpc("tools/call", { name, arguments: args ?? {} });
+            const raw = result?.content ?? "";
+            const text = typeof raw === "string" ? raw : Array.isArray(raw) ? raw.map((c) => (typeof c === "string" ? c : (c?.text ?? ""))).join("") : JSON.stringify(raw);
+            const isError = !!result?.isError || text.includes("Query execution failed") || text.includes("DatabaseError") || text.includes("Error:") || text.startsWith("❌");
+            return { text, isError };
+        }
+        async close() { this._closed = true; this.pending.clear(); }
+    }
+    const toOpenAITools = (mcpTools) => mcpTools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.input_schema } }));
+
+    // ── Excel-side tools ──
+    const TEXT_CAP = 3500;
     const capText = (s, n = TEXT_CAP) => {
         s = (s || "").trim();
         return s.length > n ? s.slice(0, n) + "\n…[truncated]" : s;
     };
-    const post = (url, body) => fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).catch(() => null);
-    const readBody = async (res) => { if (!res || !res.ok) return ""; const t = await res.text(); if (t.startsWith('"') && t.endsWith('"')) { try { return JSON.parse(t); } catch { return t; } } return t; };
-    const cached = async (key, fn) => {
-        if (toolCache.has(key)) return toolCache.get(key);
-        const v = await fn();
-        toolCache.set(key, v);
-        return v;
-    };
 
-    const TOOLS = [
-        { type: "function", function: { name: "search_company", description: "Search GoIndia's company database by (partial) name to find its fincode and sector. Call this whenever the user names a company that isn't already known.", parameters: { type: "object", properties: { query: { type: "string", description: "Company name to search for" } }, required: ["query"] } } },
-        { type: "function", function: { name: "get_financials", description: "Annual financial statement line items (revenue, EBITDA, PAT, etc. across years) for a company. Only the fincode is needed — its sector is looked up automatically.", parameters: { type: "object", properties: { fincode: { type: "integer" } }, required: ["fincode"] } } },
-        { type: "function", function: { name: "get_operational_dashboard", description: "Operational / business KPIs (volumes, capacity, unit economics, etc.) for a company, by quarter.", parameters: { type: "object", properties: { fincode: { type: "integer" } }, required: ["fincode"] } } },
-        { type: "function", function: { name: "get_earnings_call_summary", description: "AI-generated summaries of a company's recent quarterly earnings calls.", parameters: { type: "object", properties: { fincode: { type: "integer" } }, required: ["fincode"] } } },
-        { type: "function", function: { name: "get_earnings_call_qna", description: "Analyst Q&A transcript from a company's earnings calls for the most recent quarters.", parameters: { type: "object", properties: { fincode: { type: "integer" } }, required: ["fincode"] } } },
-        { type: "function", function: { name: "get_broker_report", description: "Latest broker / analyst research report summary for a company.", parameters: { type: "object", properties: { fincode: { type: "integer" } }, required: ["fincode"] } } },
-        { type: "function", function: { name: "get_management_interviews", description: "Recent management interview summaries for a company.", parameters: { type: "object", properties: { fincode: { type: "integer" } }, required: ["fincode"] } } },
-        { type: "function", function: { name: "get_order_book", description: "Order-book / backlog data for a company, by quarter.", parameters: { type: "object", properties: { fincode: { type: "integer" } }, required: ["fincode"] } } },
+    const EXCEL_TOOLS = [
         { type: "function", function: { name: "list_excel_sheets", description: "List the worksheet names currently in the user's open Excel workbook.", parameters: { type: "object", properties: {} } } },
         { type: "function", function: { name: "read_excel_sheet", description: "Read a worksheet's actual used-range layout (row numbers, column letters and cell text) from the user's open workbook. ALWAYS call this before writing a formula (e.g. a VLOOKUP) that references an existing sheet — never guess row/column positions.", parameters: { type: "object", properties: { sheet_name: { type: "string" } }, required: ["sheet_name"] } } },
         { type: "function", function: { name: "write_excel_sheet", description: "Create or overwrite a worksheet in the user's workbook with a title, headers and rows. Cells may be plain values or formula strings starting with \"=\" (e.g. a VLOOKUP into a sheet you've already read).", parameters: { type: "object", properties: { sheet: { type: "string" }, title: { type: "string" }, headers: { type: "array", items: { type: "string" } }, rows: { type: "array", items: { type: "array" } } }, required: ["sheet"] } } }
     ];
 
-    async function toolSearchCompany({ query }) {
-        const all = await ensureCompanyList();
-        const q = String(query || "").toLowerCase();
-        return { matches: all.filter(c => c.CompName.toLowerCase().includes(q)).slice(0, 8).map(c => ({ name: c.CompName, fincode: c.fincode, sector: c.sector_type })) };
-    }
-    async function toolGetFinancials({ fincode }) {
-        return cached(`fin:${fincode}`, async () => {
-            // sector_type must come from the same company list search_company/the pickers use —
-            // trusting a value the model guesses is what caused 422s (mismatched/empty sector_type).
-            const all = await ensureCompanyList();
-            const match = all.find(c => String(c.fincode) === String(fincode));
-            if (!match) return { error: `Unknown fincode ${fincode} — call search_company first to resolve it.` };
-            const fetchMode = (mode) => fetch("https://transcriptanalyser.com/goindiastock/actuals_forwards", {
-                method: "POST", headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ fincode: match.fincode, mode, sector_type: match.sector_type })
-            });
-            try {
-                // Consolidated (C) first; some companies (e.g. subsidiary-free ones like Gillette)
-                // only have standalone (S) financials and 400 on C — fall back and retry.
-                let res = await fetchMode("C");
-                let usedMode = "C";
-                if (!res.ok) { res = await fetchMode("S"); usedMode = "S"; }
-                if (!res.ok) return { error: `Financial data request failed (HTTP ${res.status})` };
-                const data = await res.json();
-                // The API returns { column: [{header, accessorKey}], value: [{Parameter, FY2020, ...}] }.
-                const rows = data?.value || data?.data || [];
-                if (!rows.length) return { text: "(No financial data)" };
-                const keys = (Array.isArray(data?.column) ? data.column.map(c => c.accessorKey) : Object.keys(rows[0]))
-                    .filter(k => k !== "child" && k !== "parent_id");
-                const label = usedMode === "S" ? "standalone" : "consolidated";
-                return { text: `(${label})\n` + keys.join("\t") + "\n" + rows.slice(0, 30).map(r => keys.map(k => r[k] ?? "").join("\t")).join("\n") };
-            } catch (e) { return { error: "Financial data unavailable" }; }
-        });
-    }
-    async function toolGetOperational({ fincode }) {
-        return cached(`op:${fincode}`, async () => {
-            const res = await post("https://transcriptanalyser.com/pms/get_dashboard", { fincode });
-            if (!res || !res.ok) return { error: "Operational data unavailable" };
-            const j = await res.json(); const lines = [];
-            for (const sec of (j.table_data || [])) {
-                const periods = sec.periods || [];
-                lines.push("## " + (sec.section_name || ""));
-                for (const row of (sec.rows || [])) lines.push([row.metric_name, row.unit, ...periods.map(p => row[p] ?? "")].join(" | "));
-            }
-            return { text: capText(lines.join("\n")) };
-        });
-    }
-    async function toolGetEarningsSummary({ fincode }) {
-        return cached(`ec:${fincode}`, async () => {
-            const t = await readBody(await post("https://goindiainvest.in/mcp/earning_call_summaries", { fincodes: [fincode], quarter_years: lastQuarterYears(2) }));
-            return { text: capText(t) || "(No earnings call summaries)" };
-        });
-    }
-    async function toolGetEarningsQna({ fincode }) {
-        return cached(`qna:${fincode}`, async () => {
-            let text = "";
-            for (const qy of lastQuarterYears(2)) {
-                const t = await readBody(await post("https://goindiainvest.in/mcp/fetch_transcript_ques_ans", { fincode, quarter_year: qy }));
-                if (t && t.trim()) text += t.trim() + "\n\n";
-            }
-            return { text: capText(text) || "(No Q&A transcripts)" };
-        });
-    }
-    async function toolGetBrokerReport({ fincode }) {
-        return cached(`br:${fincode}`, async () => {
-            const t = await readBody(await post("https://goindiainvest.in/mcp/broker_report_single_comp", { fincode }));
-            return { text: capText(t) || "(No broker report)" };
-        });
-    }
-    async function toolGetInterviews({ fincode }) {
-        return cached(`mi:${fincode}`, async () => {
-            const t = await readBody(await post("https://goindiainvest.in/mcp/comp_management_interviews", { fincode }));
-            return { text: capText(t) || "(No management interviews)" };
-        });
-    }
-    async function toolGetOrderBook({ fincode }) {
-        return cached(`ob:${fincode}`, async () => {
-            const t = await readBody(await post("https://goindiainvest.in/mcp/order_book_single_comp", { fincode, quarter_list: lastQuarterYears(2).map(String) }));
-            return { text: capText(t) || "(No order book data)" };
-        });
-    }
     async function toolListSheets() {
         let names = [];
         await Excel.run(async (ctx) => {
@@ -3738,16 +4068,7 @@ const CHAT_ENABLED = false; // TEMPORARY: hidden pre-deployment per request — 
     }
 
     function toolLabel(name, args) {
-        const fc = args?.fincode ? ` (fincode ${args.fincode})` : "";
         switch (name) {
-            case "search_company": return `Searching for "${args.query}"`;
-            case "get_financials": return `Fetching financials${fc}`;
-            case "get_operational_dashboard": return `Fetching operational data${fc}`;
-            case "get_earnings_call_summary": return `Fetching earnings call summary${fc}`;
-            case "get_earnings_call_qna": return `Fetching earnings call Q&A${fc}`;
-            case "get_broker_report": return `Fetching broker report${fc}`;
-            case "get_management_interviews": return `Fetching management interviews${fc}`;
-            case "get_order_book": return `Fetching order book${fc}`;
             case "list_excel_sheets": return "Listing workbook sheets";
             case "read_excel_sheet": return `Reading sheet "${args.sheet_name}"`;
             default: return name;
@@ -3756,14 +4077,6 @@ const CHAT_ENABLED = false; // TEMPORARY: hidden pre-deployment per request — 
 
     async function callTool(name, args) {
         switch (name) {
-            case "search_company": return toolSearchCompany(args);
-            case "get_financials": return toolGetFinancials(args);
-            case "get_operational_dashboard": return toolGetOperational(args);
-            case "get_earnings_call_summary": return toolGetEarningsSummary(args);
-            case "get_earnings_call_qna": return toolGetEarningsQna(args);
-            case "get_broker_report": return toolGetBrokerReport(args);
-            case "get_management_interviews": return toolGetInterviews(args);
-            case "get_order_book": return toolGetOrderBook(args);
             case "list_excel_sheets": return toolListSheets();
             case "read_excel_sheet": return toolReadSheet(args);
             default: return { error: `Unknown tool "${name}"` };
@@ -3837,28 +4150,58 @@ const CHAT_ENABLED = false; // TEMPORARY: hidden pre-deployment per request — 
         persistHistory();
         const thinking = addMsg("bot", "…");
         busy = true; sendBtn.disabled = true;
+        const abortController = new AbortController();
+        let mcpClient = null;
         try {
             const contextNote = primaryCo
                 ? `Selected in the add-in — primary: ${primaryCo.name} (fincode ${primaryCo.fincode}, sector ${primaryCo.sector || "unknown"})` +
                   (compareCo ? `; compare: ${compareCo.name} (fincode ${compareCo.fincode}, sector ${compareCo.sector || "unknown"}).` : ".")
-                : "No company is currently selected in the add-in — use search_company if the user names one.";
+                : "No company is currently selected in the add-in.";
+
+            // Connect to GoIndia's MCP server directly and pull its tool list in for this turn.
+            let mcpOpenAITools = [], mcpUnavailableReason = "";
+            const access = await ensureMcpAccess();
+            if (access.flag !== 3) {
+                mcpUnavailableReason = access.flag === 2 ? "MCP access has been revoked for this account."
+                    : access.flag === 1 ? "this account doesn't have an active MCP research subscription."
+                    : "couldn't verify MCP research access for this account.";
+            } else {
+                const mcpCard = addCard("Connecting to GoIndia MCP…", "run");
+                const mcpSt = mcpCard.querySelector(".chat-card-st");
+                try {
+                    const mcpUrl = `${MCP_SERVER_URL}?token=${encodeURIComponent(access.mcp_api_key)}&skills=false`;
+                    mcpClient = new McpClient(mcpUrl, abortController.signal);
+                    await mcpClient.open();
+                    await mcpClient.initialize();
+                    mcpOpenAITools = toOpenAITools(await mcpClient.listTools());
+                    mcpCard.className = "chat-card done"; mcpSt.textContent = "✓";
+                } catch (e) {
+                    mcpUnavailableReason = String(e.message || e);
+                    mcpCard.className = "chat-card err"; mcpSt.textContent = "✕";
+                }
+            }
+
             const system =
-                `You are GoIndia Stocks' in-Excel research analyst. You have no company data yet — call tools to fetch exactly what you need. ${contextNote}\n` +
+                `You are GoIndia Stocks' in-Excel research assistant. ${contextNote}\n` +
+                (mcpOpenAITools.length
+                    ? `You have direct tool access to GoIndia's research data platform (financials, earnings calls, sentiment, broker reports, sector/market data, and more) via the tools below, plus tools to read/write the user's open workbook. Never invent or guess figures — fetch them.\n`
+                    : `GoIndia's research data tools are unavailable this turn (${mcpUnavailableReason}) — you only have the Excel read/write tools below. If the user's request needs data you don't already have from this conversation, say so rather than inventing numbers.\n`) +
                 `Rules:\n` +
-                `- If the user names a company you don't have a fincode for, call search_company first.\n` +
+                `- If a data tool needs a company identifier you don't have, look it up via the available tools first — never guess.\n` +
                 `- Before writing any formula that references an existing worksheet (e.g. a VLOOKUP into "Key Financials"), call read_excel_sheet on it first — never guess row/column positions. Use list_excel_sheets if you're unsure what sheets exist.\n` +
-                `- Use write_excel_sheet to create or update sheets. Prefer live formulas (VLOOKUP/MATCH etc.) that reference a sheet you've already read; otherwise write the plain values you fetched from the data tools.\n` +
-                `- If data for something the user asked about isn't available from any tool, say so plainly rather than guessing or inventing numbers.\n` +
+                `- Use write_excel_sheet to create or update sheets. Prefer live formulas (VLOOKUP/MATCH etc.) that reference a sheet you've already read; otherwise write the plain values you fetched.\n` +
+                `- Every write is shown to the user for approval before it happens unless they've turned on auto-apply. If a write_excel_sheet result comes back with rejected: true, tell the user the write was skipped rather than assuming it happened — do not silently retry it.\n` +
                 `- Compute derived figures yourself (YoY growth, CAGR, margins, ratios, averages) from the numbers you fetch.\n` +
                 `- Be concise in your final answer.`;
 
+            const combinedTools = EXCEL_TOOLS.concat(mcpOpenAITools);
             const convo = [{ role: "system", content: system }, ...history.slice(-8)];
             let full = "";
             for (let iter = 0; iter < 6; iter++) {
                 const res = await fetch(OPENROUTER_URL, {
                     method: "POST",
                     headers: { "Content-Type": "application/json", "Authorization": `Bearer ${OPENROUTER_KEY}` },
-                    body: JSON.stringify({ model: AI_MODEL, messages: convo, tools: TOOLS, temperature: 0.2, max_tokens: 3000, usage: { include: true } })
+                    body: JSON.stringify({ model: AI_MODEL, messages: convo, tools: combinedTools, temperature: 0.2, max_tokens: 3000, usage: { include: true } })
                 });
                 if (!res.ok) throw new Error(`OpenRouter ${res.status}: ${(await res.text()).slice(0, 160)}`);
                 const data = await res.json();
@@ -3877,13 +4220,22 @@ const CHAT_ENABLED = false; // TEMPORARY: hidden pre-deployment per request — 
                     try { args = JSON.parse(call.function.arguments || "{}"); } catch (e) { /* leave empty */ }
                     let result;
                     if (call.function.name === "write_excel_sheet") {
-                        try { await writeAction(args); result = { ok: true, sheet: args.sheet }; } // writeAction renders its own card
+                        try { result = await maybeConfirmAndWrite(args); } // renders its own confirm/write card
                         catch (e) { result = { error: String(e.message || e) }; }
-                    } else {
+                    } else if (call.function.name === "list_excel_sheets" || call.function.name === "read_excel_sheet") {
                         const card = addCard(`${toolLabel(call.function.name, args)}…`, "run");
                         const st = card.querySelector(".chat-card-st");
                         try { result = await callTool(call.function.name, args); card.className = "chat-card done"; st.textContent = "✓"; }
                         catch (e) { result = { error: String(e.message || e) }; card.className = "chat-card err"; st.textContent = "✕"; }
+                    } else {
+                        // MCP-provided tool
+                        const card = addCard(`Running "${call.function.name}"…`, "run");
+                        const st = card.querySelector(".chat-card-st");
+                        try {
+                            const r = await mcpClient.callTool(call.function.name, args);
+                            result = r.isError ? { error: r.text } : { text: capText(r.text) };
+                            card.className = "chat-card " + (r.isError ? "err" : "done"); st.textContent = r.isError ? "✕" : "✓";
+                        } catch (e) { result = { error: String(e.message || e) }; card.className = "chat-card err"; st.textContent = "✕"; }
                     }
                     convo.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(result).slice(0, 6000) });
                 }
@@ -3896,7 +4248,7 @@ const CHAT_ENABLED = false; // TEMPORARY: hidden pre-deployment per request — 
             if (mm) {
                 try {
                     const parsed = JSON.parse(mm[1].trim());
-                    for (const a of (Array.isArray(parsed) ? parsed : [parsed])) await writeAction(a);
+                    for (const a of (Array.isArray(parsed) ? parsed : [parsed])) await maybeConfirmAndWrite(a);
                 } catch (e) { console.warn("[Chat] bad action JSON", e); }
                 shown = full.replace(/```excel[\s\S]*?```/i, "").trim();
             }
@@ -3908,6 +4260,8 @@ const CHAT_ENABLED = false; // TEMPORARY: hidden pre-deployment per request — 
             thinking.textContent = "⚠ " + e.message;
             console.error("[Chat] error", e);
         } finally {
+            if (mcpClient) { try { await mcpClient.close(); } catch (e) { /* already torn down */ } }
+            try { abortController.abort(); } catch (e) { /* no-op if already settled */ }
             busy = false; sendBtn.disabled = false;
         }
     }

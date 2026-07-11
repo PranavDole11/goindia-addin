@@ -1,10 +1,21 @@
 # Secrets — never commit real credentials
 .env
 
-# Build output — once the Netlify build step below is enabled, Netlify builds this
-# itself from source on every deploy; committing it defeats the purpose (it bakes in
-# the real OPENROUTER_KEY value) and is what triggered GitHub's secret scanning block.
-dist/
+# Build output — Netlify builds this itself from source on every deploy, so it normally
+# doesn't need to be committed at all.
+#
+# EXCEPTION: dist/v*/ — versioned release folders (see webpack.config.js). These DO get
+# committed, on purpose, once a release is confirmed working — that's what makes an
+# already-approved Partner Center manifest keep resolving correctly after future deploys,
+# since Netlify's build is a clean checkout every time and won't otherwise preserve them.
+#
+# WARNING before committing any dist/v*/ folder: unlike legacy-root/taskpane.js (which has
+# its real OPENROUTER_KEY redacted to a placeholder, re-injected at build time — see
+# RestoreLegacyRootPlugin), a normal dist/v*/ build goes through webpack's DefinePlugin
+# directly and WILL contain the real key in plain text. Redact it the same way before
+# committing, or you'll put the live production key into git history.
+dist/*
+!dist/v*/
 
 # Dependencies — regenerate with `npm install`
 node_modules/
