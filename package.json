@@ -22,7 +22,10 @@
     "signout": "office-addin-dev-settings m365-account logout",
     "start": "office-addin-debugging start manifest.xml",
     "stop": "office-addin-debugging stop manifest.xml",
+    "start:local": "office-addin-debugging start manifest_local.xml",
+    "stop:local": "office-addin-debugging stop manifest_local.xml",
     "validate": "office-addin-manifest validate manifest.xml",
+    "validate:local": "office-addin-manifest validate manifest_local.xml",
     "watch": "webpack --mode development --watch"
   },
   "dependencies": {

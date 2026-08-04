@@ -14,12 +14,14 @@ Steps
 6. Click "Download Data". Standard sheets (Key Financials, Quarterly Data, Annual Data, Index) populate first; if AI model was enabled, 7 more sheets appear prefixed "FM " (Assumptions, Operational, P&L, Balance Sheet, Capex & FCF, Valuation & DCF, Summary).
 7. Verify all sheets populate with correct data (and FM sheets are fully computed, not blank/error, if enabled).
 8. Confirm the Privacy Policy link in the manifest opens correctly.
+9. Note the wallet balance shown in the header (next to the AI Financial Model toggle) — for this test account it reads ₹0.00. This is expected: the test account is exempt from the balance check, so the AI Financial Model toggle stays available regardless of the ₹0.00 shown.
 
 Expected Results
 - Add-in loads without errors; login (credentials or Google) works.
 - Company selection fetches correct data.
 - AI Financial Model, if enabled, completes within ~2 minutes and populates all 7 FM sheets correctly; if left off, no AI call is made.
 - Privacy Policy link opens correctly.
+- Wallet balance pill shows ₹0.00 for this test account; AI Financial Model toggle remains usable regardless — ut@gmail.com is not a real wallet customer, so its balance always reads ₹0.00 and the toggle is deliberately kept enabled for it.
 
 Notes
 - Test in Excel desktop or Excel online. All backend calls use HTTPS.

@@ -771,6 +771,7 @@
                 <form id="loginForm">
                     <input required type="email" name="email" placeholder="Email ID">
                     <input required type="password" name="password" placeholder="Password">
+                    <div id="loginError" style="display:none; color:#b80000; font-size:12px; margin:6px 0 0;"></div>
                     <button type="submit" class="login-btn">
                         <span id="loginText">Login</span>
                         <div id="loginSpinner" class="spinner" style="display: none;"></div>
@@ -862,6 +863,20 @@
                         </div>
                         <div class="dz-footer">
                             <button id="walletHistoryClose" class="dz-agree">Close</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- AI Financial Model automated checks popup — dismissible, reopenable via
+                     #modelChecksBtn (see renderModelChecks in taskpane.js) -->
+                <div id="modelChecksModal" class="dz-overlay">
+                    <div class="dz-box">
+                        <div class="dz-header">AI Financial Model — Automated Checks</div>
+                        <div class="dz-body">
+                            <div id="modelChecksList" style="font-size:12.5px; color:#333;">No checks run yet.</div>
+                        </div>
+                        <div class="dz-footer">
+                            <button id="modelChecksClose" class="dz-agree">Close</button>
                         </div>
                     </div>
                 </div>
@@ -962,6 +977,10 @@
                 <!-- Warning message container -->
                 <div id="warningMsg" style="display:none; color:red; margin-top:10px;"></div>
 
+                <!-- Reopens the automated-checks popup for the last-built model — hidden until a
+                     build actually produces results (see renderModelChecks in taskpane.js) -->
+                <button id="modelChecksBtn" type="button" style="display:none; margin-top:8px; width:100%; background:#fff; color:#173760; border:1.5px solid #d6e5f5; border-radius:8px; padding:7px 10px; font-family:Arial,sans-serif; font-size:11px; font-weight:700; cursor:pointer;">View Model Checks</button>
+
                 <!-- Financial Model disclaimer gate (shown after Download Data when AI Model is on) -->
                 <style>
                     .dz-overlay {
@@ -1030,6 +1049,23 @@
                         </div>
                         <div class="dz-footer">
                             <button id="disclaimerInfoClose" class="dz-agree">Close</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Shown when downloading a new company while an AI Financial Model for a
+                     DIFFERENT company still exists — its historical cells are live-linked into Key
+                     Financials, so leaving it in place would silently start showing the new
+                     company's numbers under the old model's structure. -->
+                <div id="staleModelModal" class="dz-overlay">
+                    <div class="dz-box">
+                        <div class="dz-header">Existing AI Financial Model detected</div>
+                        <div class="dz-body">
+                            <div class="dz-warn">⚠ Your workbook has an AI Financial Model built for <b id="staleModelCompanyName">another company</b>. Downloading data for a different company will make that model show INCORRECT, mismatched figures, since its historical cells are linked to the Key Financials sheet you're about to overwrite.</div>
+                        </div>
+                        <div class="dz-footer">
+                            <button id="staleModelCancel" class="dz-cancel">Cancel</button>
+                            <button id="staleModelDelete" class="dz-agree">Delete Old Model &amp; Continue</button>
                         </div>
                     </div>
                 </div>
@@ -1424,6 +1460,20 @@
             });
             walletHistoryModal.addEventListener("click", (e) => {
                 if (e.target === walletHistoryModal) walletHistoryModal.style.display = "none";
+            });
+
+            // AI Financial Model automated-checks popup. renderModelChecks() (taskpane.js) opens
+            // this itself right after a build finishes; this wiring only handles closing it and
+            // reopening it later via #modelChecksBtn (which stays hidden until results exist).
+            const modelChecksModal = document.getElementById("modelChecksModal");
+            document.getElementById("modelChecksBtn").addEventListener("click", () => {
+                modelChecksModal.style.display = "flex";
+            });
+            document.getElementById("modelChecksClose").addEventListener("click", () => {
+                modelChecksModal.style.display = "none";
+            });
+            modelChecksModal.addEventListener("click", (e) => {
+                if (e.target === modelChecksModal) modelChecksModal.style.display = "none";
             });
         });
         
