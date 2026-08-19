@@ -1,30 +1,40 @@
-Testing Instructions – GoIndia Excel Add-in
+Testing Instructions - GoIndia Excel Add-in
 
 Overview
-Tests the GoIndia Excel Add-in, which authenticates users, populates Excel with company financial data, and optionally builds an AI financial model via a third-party AI service (OpenRouter).
+Authenticates users and populates Excel with company financial data. Two optional features call a third-party AI service (OpenRouter): an AI Financial Model builder, and DataGPT, a chat assistant that answers questions and can write to the sheet. Only company financial figures are sent - never credentials or personal data.
 
-Steps
-1. Insert Add-in: Excel → Insert → Get Add-ins → My Add-ins → Upload My Add-in → upload manifest.xml. Appears in HOME tab as Go India Stocks.
-2. Click Go India Stocks to open the taskpane.
-3. Sign in with test credentials (or Google):
+Setup
+1. Excel > Insert > Get Add-ins > My Add-ins > Upload My Add-in > upload manifest.xml.
+2. A "GoIndia Stocks" tab appears in the ribbon (not the Home tab). It has four buttons: Download Data, Ask DataGPT, Feedback, Profile.
+3. Click any button, then sign in:
    Username: ut@gmail.com
    Password: 123
-4. Select a company from the dropdown (e.g., "ACC Ltd."). Leave "Financial data format" (IndAS/Detailed) at its defaults.
-5. (Optional) AI Financial Model toggle — OFF by default. If turned ON, the add-in sends the company's downloaded financial/operational data to OpenRouter (third-party AI, using models like Gemini/GPT) to build a 5-year projected model (P&L, balance sheet, cash flow, DCF, ratios). Takes ~30-90+ seconds with a progress status shown. No account credentials or personal data are sent — only company financial figures.
-6. Click "Download Data". Standard sheets (Key Financials, Quarterly Data, Annual Data, Index) populate first; if AI model was enabled, 7 more sheets appear prefixed "FM " (Assumptions, Operational, P&L, Balance Sheet, Capex & FCF, Valuation & DCF, Summary).
-7. Verify all sheets populate with correct data (and FM sheets are fully computed, not blank/error, if enabled).
-8. Confirm the Privacy Policy link in the manifest opens correctly.
-9. Note the wallet balance shown in the header (next to the AI Financial Model toggle) — for this test account it reads ₹0.00. This is expected: the test account is exempt from the balance check, so the AI Financial Model toggle stays available regardless of the ₹0.00 shown.
+
+Test account note: this account is not a real wallet customer, so its balance always reads Rs 0.00. It is deliberately exempt from all balance checks - the AI Financial Model toggle and the DataGPT send button both stay enabled despite the Rs 0.00.
+
+A. Download Data
+4. Click Download Data. Select a company (e.g. "ACC Ltd."). Leave the data-format tickboxes at their defaults.
+5. Optional: turn ON the AI Financial Model card (OFF by default). This sends the downloaded financials to OpenRouter to build a 5-year projected model. Takes ~30-90+ seconds with a progress status.
+6. Click Download Data. Sheets Key Financials, Quarterly Data, Annual Data and Index populate. If the AI model was enabled, 7 more sheets prefixed "FM " appear (Assumptions, Operational, P&L, Balance Sheet, Capex & FCF, Valuation & DCF, Summary).
+7. Verify all sheets populate correctly and FM sheets are fully computed, not blank.
+
+B. DataGPT
+8. Click Ask DataGPT. Type a question, e.g. "What was ACC's revenue last year?" and press Enter.
+9. Progress steps appear while it works, then a formatted answer. Responses take ~10-60 seconds.
+10. The mode picker above the message box toggles between "Ask before writing" (default - prompts before editing the sheet) and "Write automatically". Test either.
+
+C. Feedback and Profile
+11. Click Feedback, enter any text, submit. A confirmation appears.
+12. Click Profile to view the username, wallet balance with recent charges, and the Disclaimer. Confirm the Privacy Policy link in the manifest opens correctly.
 
 Expected Results
-- Add-in loads without errors; login (credentials or Google) works.
-- Company selection fetches correct data.
-- AI Financial Model, if enabled, completes within ~2 minutes and populates all 7 FM sheets correctly; if left off, no AI call is made.
-- Privacy Policy link opens correctly.
-- Wallet balance pill shows ₹0.00 for this test account; AI Financial Model toggle remains usable regardless — ut@gmail.com is not a real wallet customer, so its balance always reads ₹0.00 and the toggle is deliberately kept enabled for it.
+- Add-in loads without errors; login via credentials or Google works.
+- Company selection fetches correct data; FM sheets compute fully if enabled.
+- DataGPT returns a relevant answer and respects the selected write mode.
+- Feedback submits; Profile shows Rs 0.00 with AI Financial Model and DataGPT both still usable.
 
 Notes
-- Test in Excel desktop or Excel online. All backend calls use HTTPS.
+- Test in Excel desktop or Excel on the web. All backend calls use HTTPS.
 - Test account is pre-configured to simulate customer use.
 
 Contact: help@goindiaadvisors.com
