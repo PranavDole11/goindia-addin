@@ -24,7 +24,6 @@
     <!-- Include Choices.js -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/choices.js/public/assets/styles/choices.min.css" />
     <script src="https://cdn.jsdelivr.net/npm/choices.js/public/assets/scripts/choices.min.js"></script>
-    <script src="https://accounts.google.com/gsi/client" async defer></script>
 
     <style>
         /* Container spacing */
@@ -233,6 +232,18 @@
             gap: 2px 7px;
             margin-top: 44px; /* clears the absolutely-positioned profile bar above it */
             font-family: Arial, sans-serif;
+        }
+        /* The ribbon's "download"-view (see applyRibbonView in taskpane.js) hides the profile/
+           wallet bar entirely — since that bar is position:absolute (out of normal flow), hiding
+           it doesn't reclaim the 44px .format-row otherwise reserves to clear it, leaving a bare
+           gap at the top. Collapse it back down to ordinary breathing room in that view only. */
+        body[data-view="download"] .format-row {
+            margin-top: 12px;
+        }
+        /* Shrinks the outer shell's own padding so the download-only module and its Download
+           Data button sit higher, closer to the top of the side panel — main view is untouched. */
+        body[data-view="download"] #loginWrapper {
+            padding-top: 0.5rem;
         }
 
         .format-label {
@@ -605,6 +616,31 @@
             align-items: center;
         }
 
+        /* Google Button */
+        #loginScreen .google-signin-btn {
+            width: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            padding: 0.55rem 0.9rem;
+            border-radius: 10px;
+            background: #fff;
+            color: #3c4043;
+            font-weight: 600;
+            font-size: 0.9rem;
+            font-family: inherit;
+            border: 1px solid #dadce0;
+            cursor: pointer;
+            margin: 0;
+            box-shadow: none;
+            transition: box-shadow 0.2s, background 0.2s;
+        }
+        #loginScreen .google-signin-btn:hover {
+            background: #f7f8f8;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+        }
+
         /* Apple Button */
         #loginScreen .apple-btn {
             display: flex;
@@ -783,8 +819,20 @@
                 </div>
 
                 <div class="social-buttons">
-                    <!-- Google Button -->
-                    <div id="googleSignInButton"></div>
+                    <!-- Google Button — a hand-built button rather than Google Identity Services'
+                         own rendered button (google.accounts.id.renderButton). GSI's button opens
+                         sign-in as a window.open() popup, which desktop Excel's WebView2 task-pane
+                         host kicks out to an external Chrome tab it can no longer talk back to —
+                         see startGoogleSignIn below, which uses the Office dialog API instead. -->
+                    <button type="button" id="googleSignInBtn" class="google-signin-btn">
+                        <svg width="18" height="18" viewBox="0 0 48 48" aria-hidden="true">
+                            <path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.9 29.3 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.9 1.2 8 3.1l5.7-5.7C34.6 6.1 29.6 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.7-.4-3.5z"/>
+                            <path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.6 15.9 18.9 13 24 13c3.1 0 5.9 1.2 8 3.1l5.7-5.7C34.6 6.1 29.6 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/>
+                            <path fill="#4CAF50" d="M24 44c5.5 0 10.4-1.9 14.3-5.1l-6.6-5.6C29.7 35.4 27 36 24 36c-5.3 0-9.7-3.1-11.3-7.5l-6.6 5.1C9.6 39.6 16.2 44 24 44z"/>
+                            <path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.3-2.3 4.3-4.2 5.7l6.6 5.6C40.5 36.7 44 30.9 44 24c0-1.3-.1-2.7-.4-3.5z"/>
+                        </svg>
+                        <span>Sign in with Google</span>
+                    </button>
                 </div>
 
                 <div class="signup">
@@ -854,15 +902,78 @@
                     </span>
                 </div>
 
-                <!-- Wallet history popup -->
+                <!-- Wallet balance + history popup — reachable from the small history icon next to
+                     the header balance pill (#walletSection). The ribbon's own Wallet access now
+                     lives in the consolidated Profile view (#profileExtras below) instead. -->
                 <div id="walletHistoryModal" class="dz-overlay">
                     <div class="dz-box">
-                        <div class="dz-header">Recent AI Model Charges</div>
+                        <div class="dz-header">Wallet</div>
                         <div class="dz-body">
-                            <div id="walletHistoryList" style="font-size:12.5px; color:#333;">Loading…</div>
+                            <div class="wallet-balance-row">
+                                <span>Current balance</span>
+                                <span class="wallet-balance-display">—</span>
+                            </div>
+                            <div class="wallet-history-label">Recent usage</div>
+                            <div id="walletHistoryList" class="wallet-history-list" style="font-size:12.5px; color:#333;">Loading…</div>
                         </div>
                         <div class="dz-footer">
                             <button id="walletHistoryClose" class="dz-agree">Close</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Wallet + Disclaimer cards for the ribbon's consolidated Profile view (view=profile,
+                     see applyRibbonView in taskpane.js) — sits below #profileSection so the whole
+                     thing reads as one evenly-spaced "Profile" page instead of three ribbon
+                     buttons/popups. Both cards are clickable and open the SAME modals the small
+                     in-panel wallet-history icon / disclaimer link already use elsewhere (see the
+                     click wiring in applyRibbonView) — the preview here is just a 5-entry teaser covering
+                     both AI-model and DataGPT charges. -->
+                <div id="profileExtras" style="display:none;">
+                    <button type="button" class="pv-card" id="profileWalletCard" title="View full wallet history">
+                        <div class="pv-card-row">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#2563eb" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 7V4a1 1 0 0 0-1-1H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v4h-3a2 2 0 0 0 0 4h3a1 1 0 0 0 1-1v-2a1 1 0 0 0-1-1"></path><path d="M3 5v14a2 2 0 0 0 2 2h15a1 1 0 0 0 1-1v-4"></path></svg>
+                            <span class="wallet-balance-display">—</span>
+                        </div>
+                        <div class="pv-card-sub">Last 5 charges</div>
+                        <div class="wallet-history-preview pv-card-preview">Loading…</div>
+                        <div class="pv-card-link">View full history →</div>
+                    </button>
+
+                    <button type="button" class="pv-card" id="profileDisclaimerCard">
+                        <div class="pv-card-row">
+                            <span class="pv-card-icon-badge">i</span>
+                            <span class="pv-card-title">Disclaimer</span>
+                        </div>
+                        <div class="pv-card-sub">Tap to read the full disclaimer</div>
+                    </button>
+                </div>
+
+                <!-- Ribbon's Feedback view (view=feedback, see applyRibbonView in taskpane.js) —
+                     a plain form in its own white box, not a modal (this IS the whole view, same
+                     pattern as #profileExtras above). Username is read-only, auto-filled from the
+                     logged-in user; company is deliberately free text, not a dropdown, so feedback
+                     isn't limited to companies already in the catalog. -->
+                <div id="feedbackSection" style="display:none;">
+                    <div class="fb-box">
+                        <div class="fb-header">Feedback</div>
+                        <div class="fb-body">
+                            <div class="fb-field">
+                                <span class="fb-label">Submitting as</span>
+                                <div class="fb-username" id="feedbackUsername">—</div>
+                            </div>
+                            <div class="fb-field">
+                                <label class="fb-label" for="feedbackCompany">Which company is this feedback about?</label>
+                                <input type="text" id="feedbackCompany" class="fb-input" placeholder="e.g. Reliance Industries — or leave blank if general" autocomplete="off">
+                            </div>
+                            <div class="fb-field">
+                                <label class="fb-label" for="feedbackText">Your feedback</label>
+                                <textarea id="feedbackText" class="fb-textarea" rows="6" placeholder="Describe the issue or suggestion…"></textarea>
+                            </div>
+                            <div class="fb-status" id="feedbackStatus" style="display:none;"></div>
+                        </div>
+                        <div class="fb-footer">
+                            <button type="button" class="fb-submit" id="feedbackSubmit">Submit Feedback</button>
                         </div>
                     </div>
                 </div>
@@ -953,7 +1064,7 @@
                             <span class="mc-title">AI Financial Model</span>
                         </span>
                         <span class="mc-desc">Generate a financial model for the selected company using AI.</span>
-                        <span class="mc-cost">₹10–25, depending on company</span>
+                        <span class="mc-cost">₹15–30, depending on company</span>
                         <span class="mc-insufficient">Insufficient balance</span>
                     </span>
                     <span class="mc-switch"><span class="mc-track"></span></span>
@@ -1005,6 +1116,89 @@
                     }
                     .dz-gen { font-size: 11px; color: #777; line-height: 1.5; }
                     .dz-gen b { color: #173760; }
+                    .wallet-balance-row {
+                        display: flex; align-items: center; justify-content: space-between;
+                        background: #f0f5ff; border: 1px solid #d6e5f5; border-radius: 8px;
+                        padding: 10px 12px; margin-bottom: 12px;
+                    }
+                    .wallet-balance-row span:first-child { font-size: 11.5px; color: #55606e; }
+                    .wallet-balance-display { font-size: 17px; font-weight: 700; color: #173760; }
+                    .wallet-history-label { font-size: 12.5px; font-weight: 700; color: #173760; margin: 0 0 8px; }
+
+                    /* Consolidated ribbon Profile view (#profileSection + #profileExtras) — the
+                       whole view is one flex column so every top-level piece shares an even gap
+                       and a common left edge, instead of each section carrying its own ad-hoc
+                       margin. #profileSection's actual `position: static` switch happens in JS
+                       (applyRibbonView) — its ORIGINAL markup sets position:absolute inline, and an
+                       inline style always beats a stylesheet rule no matter the selector here. */
+                    body[data-view="profile"] #loginWrapper {
+                        padding-top: 0; padding-left: 6px; padding-right: 6px;
+                    }
+                    body[data-view="profile"] #addinUI {
+                        display: flex; flex-direction: column; align-items: flex-start; gap: 30px;
+                        padding: 0 4px 18px;
+                    }
+                    body[data-view="profile"] #profileSection {
+                        display: flex; flex-direction: row; align-items: center;
+                        gap: 0.5rem; width: auto; max-width: 170px;
+                        background: #f0f5ff; border: 1px solid #d6e5f5; border-radius: 10px;
+                        padding: 8px 12px; margin: 0;
+                    }
+                    body[data-view="profile"] #profileIcon { width: 32px; height: 32px; font-size: 13px; flex-shrink: 0; }
+                    body[data-view="profile"] #username {
+                        font-size: 13px; font-weight: 700; color: #173760;
+                        min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+                    }
+
+                    #profileExtras { display: flex; flex-direction: column; gap: 14px; width: 100%; box-sizing: border-box; }
+                    .pv-card {
+                        display: block; width: 100%; box-sizing: border-box;
+                        background: #fff; border: 1.5px solid #e6eaf0; border-radius: 12px;
+                        padding: 12px 12px; margin: 0; text-align: left;
+                        font-family: Arial, sans-serif; color: #2c3744;
+                        cursor: pointer; box-shadow: none;
+                        transition: border-color .15s, box-shadow .15s;
+                    }
+                    .pv-card:hover { border-color: #b9cff0; box-shadow: 0 4px 14px rgba(23,55,96,0.12); }
+                    .pv-card-row { display: flex; align-items: center; gap: 9px; }
+                    .pv-card-icon-badge {
+                        display: inline-flex; align-items: center; justify-content: center;
+                        width: 18px; height: 18px; border-radius: 50%; border: 1.5px solid #2563eb;
+                        color: #2563eb; font-size: 11px; font-weight: 700; flex-shrink: 0;
+                    }
+                    .pv-card-title { font-size: 15px; font-weight: 700; color: #173760; }
+                    .pv-card-sub { font-size: 11px; color: #7a8494; margin-top: 6px; }
+                    .pv-card-preview { font-size: 11.5px; color: #333; margin-top: 8px; }
+                    .pv-card-link { font-size: 11px; color: #2f6fd0; font-weight: 700; margin-top: 10px; }
+
+                    /* Consolidated ribbon Feedback view (#feedbackSection) */
+                    body[data-view="feedback"] #loginWrapper { padding-left: 0.5rem; padding-right: 0.5rem; }
+                    body[data-view="feedback"] #addinUI { display: flex; flex-direction: column; padding: 18px 6px; }
+                    .fb-box { background: #fff; border: 1.5px solid #e6eaf0; border-radius: 12px; overflow: hidden; font-family: Arial, sans-serif; }
+                    .fb-header { background: #173760; color: #fff; padding: 12px 16px; font-weight: 700; font-size: 14px; border-bottom: 2px solid #d80404; }
+                    .fb-body { padding: 16px; display: flex; flex-direction: column; gap: 14px; }
+                    .fb-field { display: flex; flex-direction: column; gap: 6px; }
+                    .fb-label { font-size: 11.5px; font-weight: 700; color: #173760; }
+                    .fb-username { font-size: 13px; font-weight: 700; color: #173760; background: #f0f5ff; border: 1px solid #d6e5f5; border-radius: 8px; padding: 8px 10px; }
+                    .fb-input, .fb-textarea {
+                        border: 1.5px solid #d6e5f5; border-radius: 8px; padding: 8px 10px;
+                        font-size: 12.5px; font-family: inherit; color: #2c3744; outline: none;
+                        box-sizing: border-box; width: 100%;
+                    }
+                    .fb-input:focus, .fb-textarea:focus { border-color: #2f6fd0; }
+                    .fb-textarea { resize: vertical; min-height: 90px; line-height: 1.5; }
+                    .fb-footer { padding: 14px 16px; border-top: 1px solid #eee; }
+                    .fb-submit {
+                        display: block; width: 100%; box-sizing: border-box; margin: 0; box-shadow: none;
+                        background: #173760; color: #fff; border: none;
+                        border-radius: 8px; padding: 10px 14px; font-size: 13px; font-weight: 700;
+                        cursor: pointer; font-family: inherit;
+                    }
+                    .fb-submit:hover { background: #21497e; }
+                    .fb-submit:disabled { opacity: 0.6; cursor: default; }
+                    .fb-status { font-size: 11.5px; padding: 8px 10px; border-radius: 8px; }
+                    .fb-status.ok { background: #eafaf0; color: #1a7a3d; border: 1px solid #bfe8cf; }
+                    .fb-status.err { background: #fff0f0; color: #b80000; border: 1px solid #f3caca; }
                     .dz-footer {
                         display: flex; justify-content: flex-end; gap: 10px;
                         padding: 12px 16px; border-top: 1px solid #eee;
@@ -1203,7 +1397,7 @@
 
 
                 <!-- Data status container — width matches the dropdown (280px) for uniformity -->
-                <div style="margin-top:22px; width:280px; box-sizing:border-box; display:flex; padding:8px; align-items:center; gap:10px; border:1px solid #ccc; border-radius:5px;">
+                <div id="dataStatusRow" style="margin-top:22px; width:280px; box-sizing:border-box; display:flex; padding:8px; align-items:center; gap:10px; border:1px solid #ccc; border-radius:5px;">
                     <div id="dataStatus" style="font-size: small; flex: 1 1 auto; min-width: 0;">
                         Checking for new data...
                     </div>
@@ -1215,21 +1409,21 @@
                      or comment out this whole #chatFeature block + its style block below. -->
                 <style>
                     #chatFab {
-                        position: fixed; top: 8px; right: 14px; z-index: 1100;
-                        background: linear-gradient(135deg, #2f6fd0, #173760);
-                        color: #fff; cursor: pointer; border: 2px solid #d80404;
+                        display: block; margin: 14px 0 0 auto;
+                        background: linear-gradient(135deg, #173760, #d80404);
+                        color: #fff; cursor: pointer; border: none;
                         border-radius: 22px; padding: 9px 16px; font-size: 13px; font-weight: 700;
                         font-family: Arial, sans-serif;
-                        box-shadow: 0 0 14px rgba(47,111,208,0.65), 0 4px 12px rgba(0,0,0,0.28);
+                        box-shadow: 0 0 14px rgba(216,4,4,0.45), 0 0 14px rgba(23,55,96,0.55), 0 4px 12px rgba(0,0,0,0.28);
                         animation: chatFabGlow 2.4s ease-in-out infinite;
                     }
                     #chatFab:hover {
-                        background: linear-gradient(135deg, #3a7ee0, #1d4576);
-                        box-shadow: 0 0 22px rgba(47,111,208,0.95), 0 6px 16px rgba(0,0,0,0.32);
+                        background: linear-gradient(135deg, #1d4576, #ea1a1a);
+                        box-shadow: 0 0 22px rgba(216,4,4,0.65), 0 0 22px rgba(23,55,96,0.75), 0 6px 16px rgba(0,0,0,0.32);
                     }
                     @keyframes chatFabGlow {
-                        0%, 100% { box-shadow: 0 0 12px rgba(47,111,208,0.55), 0 4px 12px rgba(0,0,0,0.28); }
-                        50%      { box-shadow: 0 0 22px rgba(47,111,208,0.95), 0 4px 12px rgba(0,0,0,0.28); }
+                        0%, 100% { box-shadow: 0 0 12px rgba(216,4,4,0.35), 0 0 12px rgba(23,55,96,0.45), 0 4px 12px rgba(0,0,0,0.28); }
+                        50%      { box-shadow: 0 0 20px rgba(216,4,4,0.55), 0 0 20px rgba(23,55,96,0.65), 0 4px 12px rgba(0,0,0,0.28); }
                     }
                     #chatPanel {
                         position: fixed; top: 52px; right: 12px; z-index: 1100;
@@ -1239,17 +1433,33 @@
                         box-shadow: 0 12px 36px rgba(0,0,0,0.22);
                         flex-direction: column; overflow: hidden; font-family: Arial, sans-serif;
                     }
+                    /* DataGPT ribbon button opens straight into the chat, filling the whole side
+                       panel — no floating popup, no fab to click through. Scoped to this view only
+                       so the "Side Panel" button's normal in-page fab/popup chat is unaffected. */
+                    body[data-view="datagpt"] #chatFab {
+                        display: none !important;
+                    }
+                    body[data-view="datagpt"] #chatPanel {
+                        position: fixed; inset: 0; top: 0; right: 0;
+                        width: 100%; height: 100%; max-width: 100%; max-height: 100%;
+                        border-radius: 0; border: none; box-shadow: none;
+                    }
                     .chat-header {
                         display: flex; align-items: center; justify-content: space-between;
                         background: linear-gradient(135deg, #2f6fd0, #173760); color: #fff;
                         border-bottom: 2px solid #d80404; padding: 10px 14px; font-weight: 700; font-size: 13px;
                     }
-                    .chat-header small { font-weight: 400; opacity: .85; font-size: 10px; margin-left: 4px; }
                     .chat-header-actions { display: flex; align-items: center; gap: 12px; }
-                    .chat-clear { cursor: pointer; font-size: 11px; font-weight: 600; opacity: .85; text-decoration: underline; }
-                    .chat-clear:hover { opacity: 1; }
                     .chat-close { cursor: pointer; font-size: 20px; line-height: 1; }
                     .chat-ctx { padding: 7px 14px 9px; background: #f0f5ff; border-bottom: 1px solid #d6e5f5; font-size: 11px; color: #55606e; display: flex; flex-direction: column; gap: 6px; }
+                    .chat-clear {
+                        display: flex; align-items: center; justify-content: center;
+                        flex-shrink: 0; width: auto; box-sizing: border-box; margin: 0;
+                        cursor: pointer; font-size: 10.5px; font-weight: 700; color: #173760;
+                        background: #fff; border: 1px solid #d6e5f5; border-radius: 7px;
+                        padding: 4px 9px; font-family: inherit; box-shadow: none;
+                    }
+                    .chat-clear:hover { background: #eaf1ff; border-color: #b9cff0; }
                     .chat-ctx b { color: #173760; }
                     .chat-ctx-field { display: flex; align-items: center; gap: 6px; }
                     .chat-ctx-label { flex-shrink: 0; width: 72px; color: #55606e; }
@@ -1266,21 +1476,47 @@
                     .chat-msg { display: flex; max-width: 100%; }
                     .chat-msg.user { justify-content: flex-end; }
                     .chat-bubble { border-radius: 12px; padding: 8px 11px; font-size: 12.5px; line-height: 1.5; white-space: pre-wrap; max-width: 88%; }
-                    .chat-msg.bot .chat-bubble { background: #f5f7fa; color: #25303d; border: 1px solid #eceff3; border-top-left-radius: 3px; }
+                    .chat-msg.bot .chat-bubble { background: #f5f7fa; color: #25303d; border: 1px solid #eceff3; border-top-left-radius: 3px; white-space: normal; }
                     .chat-msg.user .chat-bubble { background: #173760; color: #fff; border-top-right-radius: 3px; }
-                    .chat-card { display: flex; align-items: center; gap: 8px; background: #fff; border: 1px solid #e6eaf0; border-left: 3px solid #275b9f; border-radius: 8px; padding: 7px 10px; font-size: 11.5px; color: #2c3744; }
-                    .chat-card.run { border-left-color: #2f6fd0; }
-                    .chat-card.done { border-left-color: #4b9f27; }
-                    .chat-card.err { border-left-color: #b80000; }
+                    .chat-bubble p { margin: 0 0 6px; }
+                    .chat-bubble p:last-child { margin-bottom: 0; }
+                    .chat-bubble ul, .chat-bubble ol { margin: 2px 0 6px; padding-left: 18px; }
+                    .chat-bubble li { margin: 2px 0; }
+                    .chat-bubble li:last-child { margin-bottom: 0; }
+                    .chat-bubble hr { border: none; border-top: 1px solid #dfe4ea; margin: 8px 0; }
+                    .chat-bubble code { background: #e9edf3; border-radius: 4px; padding: 1px 4px; font-size: 11px; font-family: Consolas, "Courier New", monospace; }
+                    .chat-bubble .md-h { font-weight: 700; color: #173760; margin: 2px 0 4px; }
+                    .chat-bubble .md-h:first-child { margin-top: 0; }
+                    .chat-bubble .md-h1 { font-size: 13.5px; }
+                    .chat-bubble .md-h2 { font-size: 13px; }
+                    .chat-bubble .md-h3 { font-size: 12.5px; }
+                    .chat-bubble .md-h4 { font-size: 12px; }
+                    .chat-card { display: flex; align-items: center; gap: 6px; padding: 1px 2px; font-size: 10.5px; font-weight: 600; color: #8a94a3; }
+                    .chat-card.run { animation: chatCardPulse 0.85s ease-in-out infinite; }
+                    .chat-card.done { color: #4b9f27; }
+                    .chat-card.err { color: #b80000; }
                     .chat-card .chat-card-st { margin-left: auto; font-weight: 700; }
-                    .chat-autoapply-row { justify-content: space-between; }
-                    .chat-toggle { position: relative; display: inline-block; width: 32px; height: 17px; flex-shrink: 0; }
-                    .chat-toggle input { opacity: 0; width: 0; height: 0; }
-                    .chat-toggle-slider { position: absolute; inset: 0; cursor: pointer; background: #cddbef; border-radius: 18px; transition: background .15s; }
-                    .chat-toggle-slider::before { content: ""; position: absolute; height: 13px; width: 13px; left: 2px; top: 2px; background: #fff; border-radius: 50%; transition: transform .15s; box-shadow: 0 1px 2px rgba(0,0,0,0.25); }
-                    .chat-toggle input:checked + .chat-toggle-slider { background: #2f6fd0; }
-                    .chat-toggle input:checked + .chat-toggle-slider::before { transform: translateX(15px); }
-                    .chat-autoapply-label { font-size: 10.5px; color: #55606e; flex: 1; text-align: right; }
+                    @keyframes chatCardPulse {
+                        0%, 100% { opacity: 0.42; }
+                        50% { opacity: 1; }
+                    }
+                    @media (prefers-reduced-motion: reduce) {
+                        .chat-card.run { animation: none; opacity: 0.75; }
+                    }
+                    .chat-mode-wrap { position: relative; padding: 6px 10px; flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+                    .chat-mode-btn { display: inline-flex; align-items: center; gap: 6px; background: #f5f7fa; border: 1px solid #e6eaf0; border-radius: 8px; padding: 5px 10px; margin: 0; font-size: 11.5px; font-weight: 600; color: #2c3744; cursor: pointer; font-family: inherit; }
+                    .chat-mode-btn:hover { background: #eef1f5; }
+                    .chat-mode-caret { font-size: 9px; opacity: .6; margin-left: 1px; }
+                    .chat-mode-menu { display: none; position: absolute; bottom: calc(100% + 4px); left: 10px; min-width: 240px; background: #fff; border: 1px solid #d6e5f5; border-radius: 10px; box-shadow: 0 10px 28px rgba(0,0,0,0.18); overflow: hidden; z-index: 1300; }
+                    .chat-mode-menu.open { display: block; }
+                    .chat-mode-item { display: flex; align-items: center; gap: 8px; padding: 8px 10px; cursor: pointer; }
+                    .chat-mode-item:hover { background: #f0f5ff; }
+                    .chat-mode-item-icon { font-size: 14px; flex-shrink: 0; }
+                    .chat-mode-item-text { flex: 1; display: flex; flex-direction: column; line-height: 1.3; }
+                    .chat-mode-item-text b { font-size: 11.5px; color: #173760; }
+                    .chat-mode-item-text small { font-size: 10px; color: #7a8494; }
+                    .chat-mode-tick { font-size: 12px; color: #2f6fd0; font-weight: 700; visibility: hidden; }
+                    .chat-mode-tick.active { visibility: visible; }
                     .chat-confirm { display: flex; flex-direction: column; gap: 8px; background: #fffaf0; border: 1px solid #f0dfae; border-left: 3px solid #b8860e; border-radius: 8px; padding: 9px 11px; font-size: 11.5px; color: #2c3744; }
                     .chat-confirm .cf-text { line-height: 1.4; }
                     .chat-confirm .cf-actions { display: flex; gap: 8px; }
@@ -1291,25 +1527,28 @@
                     .chat-confirm .cf-reject:hover { background: #e1e6ec; }
                     .chat-confirm.cf-done { border-left-color: #4b9f27; background: #fff; }
                     .chat-confirm.cf-skipped { border-left-color: #999; background: #fff; }
-                    .chat-suggest { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 12px; }
-                    .chat-chip { border: 1px solid #d6e5f5; background: #f0f5ff; color: #173760; border-radius: 14px; padding: 5px 10px; font-size: 10.5px; font-weight: 600; cursor: pointer; }
-                    .chat-composer { border-top: 1px solid #eef1f5; padding: 8px 10px; display: flex; align-items: flex-end; gap: 8px; }
-                    .chat-composer textarea { flex: 1; border: 2px solid #d6e5f5; border-radius: 10px; outline: none; resize: none; font-family: inherit; font-size: 12.5px; color: #2c3744; max-height: 96px; line-height: 1.4; padding: 7px 9px; }
-                    .chat-composer button { width: 34px; height: 34px; padding: 0; border-radius: 9px; border: none; background: linear-gradient(135deg, #2f6fd0, #173760); color: #fff; font-size: 14px; line-height: 1; cursor: pointer; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; }
+                    .chat-composer { border-top: 1px solid #eef1f5; padding: 8px 10px; }
+                    .chat-input-wrap { position: relative; display: flex; }
+                    .chat-composer textarea { flex: 1; border: 2px solid #d6e5f5; border-radius: 10px; outline: none; resize: none; font-family: inherit; font-size: 12.5px; color: #2c3744; max-height: 96px; line-height: 1.4; padding: 8px 38px 8px 9px; }
+                    .chat-composer textarea:focus { border-color: #2f6fd0; }
+                    .chat-composer button:disabled { background: #c3ccd8; cursor: not-allowed; }
+                    .chat-balance-notice { display: none; margin-bottom: 6px; padding: 6px 8px; border-radius: 8px; background: #fdecec; border: 1px solid #f5c2c2; color: #a12626; font-size: 11px; line-height: 1.35; }
+                    .chat-composer button { position: absolute; right: 4px; bottom: 4px; margin: 0; width: 28px; height: 28px; padding: 0; border-radius: 8px; border: none; background: linear-gradient(135deg, #2f6fd0, #173760); color: #fff; font-size: 13px; line-height: 1; cursor: pointer; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; box-shadow: none; }
                 </style>
                 <div id="chatFeature">
-                    <button id="chatFab" title="Ask DataGPT">✦ Ask</button>
+                    <button id="chatFab" title="Ask DataGPT">✦ Ask DataGPT</button>
                     <div id="chatPanel" style="display:none;">
                         <div class="chat-header">
-                            <span>✦ Ask DataGPT <small>experimental</small></span>
+                            <span>✦ Ask DataGPT</span>
                             <span class="chat-header-actions">
-                                <span class="chat-clear" id="chatClear" title="Clear chat history">Clear</span>
                                 <span class="chat-close" id="chatClose">&times;</span>
                             </span>
                         </div>
-                        <div class="chat-ctx">
-                            <!-- TEMPORARY: company/compare selection hidden for now per request —
-                                 re-enable by removing the display:none on these two fields. -->
+                        <!-- TEMPORARY: company/compare selection hidden for now per request —
+                             re-enable by removing the display:none below (on this wrapper too,
+                             not just the two fields — it's hidden itself now that Clear Chat,
+                             its only other visible content, moved down into #chatModeWrap). -->
+                        <div class="chat-ctx" style="display:none;">
                             <div class="chat-ctx-field" style="display:none;">
                                 <span class="chat-ctx-label">Acting on</span>
                                 <div class="chat-co-wrap">
@@ -1325,23 +1564,34 @@
                                     <span id="chatCompareClear" class="chat-co-clear" style="display:none;" title="Remove">&times;</span>
                                 </div>
                             </div>
-                            <div class="chat-ctx-field chat-autoapply-row">
-                                <label class="chat-toggle" title="When off, DataGPT asks before writing anything to the workbook">
-                                    <input type="checkbox" id="chatAutoApply">
-                                    <span class="chat-toggle-slider"></span>
-                                </label>
-                                <span id="chatAutoApplyLabel" class="chat-autoapply-label">Ask before writing to sheets</span>
-                            </div>
                         </div>
                         <div class="chat-stream" id="chatStream"></div>
-                        <div class="chat-suggest">
-                            <span class="chat-chip">Add a sheet with quarterly revenue</span>
-                            <span class="chat-chip">What is the 3-year revenue CAGR?</span>
-                            <span class="chat-chip">Summarise the latest earnings call</span>
+                        <div class="chat-mode-wrap" id="chatModeWrap">
+                            <button type="button" class="chat-mode-btn" id="chatModeBtn" title="Choose write mode">
+                                <span id="chatModeIcon">✋</span>
+                                <span id="chatModeBtnLabel">Ask before writing</span>
+                                <span class="chat-mode-caret">▾</span>
+                            </button>
+                            <button type="button" class="chat-clear" id="chatClear" title="Clear chat history">Clear Chat</button>
+                            <div class="chat-mode-menu" id="chatModeMenu">
+                                <div class="chat-mode-item" data-mode="ask">
+                                    <span class="chat-mode-item-icon">✋</span>
+                                    <span class="chat-mode-item-text"><b>Ask before writing</b><small>DataGPT confirms before editing the sheet</small></span>
+                                    <span class="chat-mode-tick" data-tick="ask">✓</span>
+                                </div>
+                                <div class="chat-mode-item" data-mode="auto">
+                                    <span class="chat-mode-item-icon">⚡</span>
+                                    <span class="chat-mode-item-text"><b>Write automatically</b><small>DataGPT edits the sheet without asking first</small></span>
+                                    <span class="chat-mode-tick" data-tick="auto">✓</span>
+                                </div>
+                            </div>
                         </div>
                         <div class="chat-composer">
-                            <textarea id="chatInput" rows="1" placeholder="Ask to fetch or edit your sheet…"></textarea>
-                            <button id="chatSend">➤</button>
+                            <div class="chat-balance-notice" id="chatBalanceNotice">Insufficient balance, please recharge your wallet</div>
+                            <div class="chat-input-wrap">
+                                <textarea id="chatInput" rows="1" placeholder="Ask to fetch or edit your sheet…"></textarea>
+                                <button id="chatSend">➤</button>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -1415,7 +1665,43 @@
         </div>-->
     </div>
 
-    
+    <!-- ── One-time "we've moved to the ribbon" notice ──────────────────────────────────────
+         The side-panel-first layout has been retired: the Home tab's GoIndia button is gone from
+         the manifest, and every feature now lives on the "GoIndia Stocks" ribbon tab. Users
+         upgrading from the old build would otherwise just find their familiar Home-tab icon
+         missing with no explanation.
+         Deliberately placed OUTSIDE #loginWrapper: applyRibbonView() hides every child of #addinUI
+         that isn't in the current view's allowlist, and the login flow toggles #loginWrapper's own
+         children — sitting outside both means this shows identically on every ?view= and whether
+         or not the user is signed in. Reuses the existing .dz-overlay/.dz-box modal styling. -->
+    <div id="ribbonMoveModal" class="dz-overlay">
+        <div class="dz-box">
+            <div class="dz-header">We've moved to the ribbon</div>
+            <div class="dz-body">
+                <div class="dz-warn">
+                    Everything now lives on the <b>GoIndia Stocks</b> tab in the ribbon along the top of
+                    Excel — next to Home, Insert, Draw and Data.
+                </div>
+                <div class="dz-gen">
+                    <b>What changed</b><br>
+                    The old Go India button on the <b>Home</b> tab has been removed. Instead of one side
+                    panel holding everything, each feature now has its own ribbon button:<br><br>
+                    • <b>Download Data</b> — pick a company, choose data sources, build the AI model<br>
+                    • <b>Ask DataGPT</b> — the research chat, opens full-width<br>
+                    • <b>Feedback</b> — tell us about a company's data<br>
+                    • <b>Profile</b> — your account, wallet balance and usage history<br>
+                    • <b>Log Out</b><br><br>
+                    Nothing has been removed from the product — it's the same features, reached from the
+                    ribbon instead of a single panel.
+                </div>
+            </div>
+            <div class="dz-footer">
+                <button id="ribbonMoveClose" class="dz-agree">Got it</button>
+            </div>
+        </div>
+    </div>
+
+
 
     
 
@@ -1424,8 +1710,25 @@
         // The "replace data" reminder is only shown until the user dismisses it once;
         // after that it stays hidden and is reachable via the "Disclaimer" link instead.
         const INFO_BANNER_SEEN_KEY = "goia_infoBannerSeen";
+        // Shown once per user, the first time they open the taskpane on a build where the Home-tab
+        // button no longer exists (see the comment on #ribbonMoveModal above, and the removed
+        // OfficeTab block in manifest.xml). Versioned key so a future layout change can re-notify
+        // without colliding with this one.
+        const RIBBON_MOVE_SEEN_KEY = "goia_ribbonMoveNoticeSeen_v1";
 
         document.addEventListener("DOMContentLoaded", () => {
+            const ribbonMoveModal = document.getElementById("ribbonMoveModal");
+            const ribbonMoveClose = document.getElementById("ribbonMoveClose");
+            if (ribbonMoveModal && ribbonMoveClose && !localStorage.getItem(RIBBON_MOVE_SEEN_KEY)) {
+                const dismissRibbonMove = () => {
+                    ribbonMoveModal.style.display = "none";
+                    try { localStorage.setItem(RIBBON_MOVE_SEEN_KEY, "1"); } catch (e) { /* storage unavailable — it'll just show again next time */ }
+                };
+                ribbonMoveModal.style.display = "flex";
+                ribbonMoveClose.addEventListener("click", dismissRibbonMove);
+                ribbonMoveModal.addEventListener("click", (e) => { if (e.target === ribbonMoveModal) dismissRibbonMove(); });
+            }
+
             const infoBox = document.getElementById("infoBox");
             if (localStorage.getItem(INFO_BANNER_SEEN_KEY)) {
                 infoBox.style.display = "none";
@@ -1478,21 +1781,47 @@
         });
         
 
-        window.onload = function () {
-            if (google && google.accounts && google.accounts.id) {
-                google.accounts.id.initialize({
-                    client_id: "588713186952-isq15ehjattbfce2hhhqnuffdfln3nco.apps.googleusercontent.com",
-                    callback: handleCredentialResponse
-                });
+        // Sign-in runs through an Office dialog (google-signin-dialog.html → Google's own OAuth
+        // consent screen → google-signin-callback.html → messageParent) instead of Google Identity
+        // Services' rendered button. GSI's button opens sign-in as a window.open() popup; on
+        // desktop Excel the task pane is hosted in a WebView2 control, which kicks that popup out
+        // to an external Chrome tab it can no longer talk back to (confirmed via Microsoft's own
+        // docs: https://learn.microsoft.com/office/dev/add-ins/develop/auth-with-office-dialog-api
+        // — "the sign-in page must open in a separate browser or webview control instance" — the
+        // Office dialog IS exactly that, a real separate instance Office itself manages). The
+        // dialog's two pages are plain static files copied to the unversioned root (see
+        // webpack.config.js) — Google's OAuth client has google-signin-callback.html registered as
+        // an Authorized redirect URI.
+        document.getElementById("googleSignInBtn").addEventListener("click", startGoogleSignIn);
 
-                google.accounts.id.renderButton(
-                    document.getElementById("googleSignInButton"),
-                    { theme: "outline", size: "large", width: 250 }
-                );
-            } else {
-                console.error("Google Identity Services not loaded yet.");
-            }
-        };
+        function startGoogleSignIn() {
+            Office.context.ui.displayDialogAsync(
+                `${location.origin}/google-signin-dialog.html`,
+                { height: 60, width: 40, displayInIframe: false },
+                (asyncResult) => {
+                    if (asyncResult.status === Office.AsyncResultStatus.Failed) {
+                        console.error("Failed to open Google sign-in dialog:", asyncResult.error.message);
+                        alert("Couldn't open the Google sign-in window. Please try again.");
+                        return;
+                    }
+                    const dialog = asyncResult.value;
+                    dialog.addEventHandler(Office.EventType.DialogMessageReceived, (arg) => {
+                        dialog.close();
+                        let payload = null;
+                        try { payload = JSON.parse(arg.message); } catch (e) { /* malformed message */ }
+                        if (!payload || !payload.ok || !payload.id_token) {
+                            console.error("Google sign-in failed:", payload && payload.error);
+                            return;
+                        }
+                        handleCredentialResponse({ credential: payload.id_token });
+                    });
+                    dialog.addEventHandler(Office.EventType.DialogEventReceived, (arg) => {
+                        // 12006 = user closed the dialog window themselves — not an error.
+                        if (arg.error !== 12006) console.warn("Google sign-in dialog closed unexpectedly:", arg.error);
+                    });
+                }
+            );
+        }
 
         function parseJwt(token) {
             const base64Url = token.split('.')[1];
@@ -1533,11 +1862,14 @@
                     localStorage.setItem("user", JSON.stringify(user));
                     localStorage.setItem("membership", JSON.stringify(membership));
 
-                    // Show UI
+                    // Show UI — showAddinUI/updateLogoutBtnVisibility (taskpane.js, exposed onto
+                    // window since this inline script can't see module-scoped functions directly)
+                    // pick the right display value for whatever ribbon view is currently loaded,
+                    // instead of unconditionally forcing "block" the way this used to.
                     document.getElementById("loginContainer").style.display = "none";
                     document.getElementById("memberContent").style.display = "block";
-                    document.getElementById("addinUI").style.display = "block";
-                    document.getElementById("logoutBtn").style.display = "block";
+                    if (typeof showAddinUI === "function") showAddinUI();
+                    if (typeof updateLogoutBtnVisibility === "function") updateLogoutBtnVisibility();
 
                     const profileIcon = document.getElementById("profileIcon");
                     const username = document.getElementById("username");

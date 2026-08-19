@@ -47,6 +47,41 @@ class RestoreLegacyRootPlugin {
   }
 }
 
+// Copies specific build outputs from this version's folder up to the TRUE dist/ root. Needed for
+// the Google sign-in pages: google-signin-dialog.html builds its redirect_uri as
+// `${location.origin}/google-signin-callback.html` — root-absolute, not relative — and that exact
+// unversioned path is what is registered in Google Cloud as an Authorized redirect URI. If those
+// two files only ever landed in dist/v{VERSION}/, the OAuth redirect would 404 on every release,
+// and pointing them at a versioned path instead would mean re-registering a new redirect URI in
+// Google Cloud for every single release.
+//
+// Deliberately NOT a CopyWebpackPlugin pattern with an absolute `to`: that escapes output.path and
+// hits the asset-registry collision documented on RestoreLegacyRootPlugin above. Same fs.cpSync
+// after emit approach, for the same reason.
+//
+// Must be registered AFTER RestoreLegacyRootPlugin — that one recursively copies the frozen
+// snapshot over dist/ root, and these files have to survive it. (It wouldn't actually clobber them
+// today, since legacy-root contains no google-signin*.html, but ordering shouldn't depend on that.)
+// No-op when output.path already IS distRoot, i.e. every dev build.
+class CopyToDistRootPlugin {
+  constructor({ files, from, to }) {
+    this.files = files;
+    this.from = from;
+    this.to = to;
+  }
+  apply(compiler) {
+    compiler.hooks.afterEmit.tap("CopyToDistRootPlugin", () => {
+      if (path.resolve(this.from) === path.resolve(this.to)) return;
+      fs.mkdirSync(this.to, { recursive: true });
+      for (const file of this.files) {
+        const src = path.join(this.from, file);
+        if (!fs.existsSync(src)) continue;
+        fs.cpSync(src, path.join(this.to, file));
+      }
+    });
+  }
+}
+
 // Both legacy-root/taskpane.js AND every finalized dist/v*/ release folder are git-tracked (so they
 // survive every future clean CI checkout), which means none of them can ever contain the real
 // OPENROUTER_KEY committed in plain text — that would put the live production key into git history.
@@ -169,6 +204,19 @@ module.exports = async (env, options) => {
             to: "[name][ext]",
           },
           {
+            // Google sign-in dialog pages (Office.context.ui.displayDialogAsync from
+            // taskpane.html's startGoogleSignIn). This `to` is relative to output.path, so on a
+            // production build these land in dist/v{VERSION}/ along with everything else —
+            // CopyToDistRootPlugin below is what additionally lifts them to the unversioned dist/
+            // root, which is where Google's registered Authorized redirect URI actually points.
+            from: "google-signin-dialog.html",
+            to: "[name][ext]",
+          },
+          {
+            from: "google-signin-callback.html",
+            to: "[name][ext]",
+          },
+          {
             from: "manifest*.xml",
             to: "[name]" + "[ext]",
             transform(content) {
@@ -198,6 +246,11 @@ module.exports = async (env, options) => {
         : [
             new RestoreLegacyRootPlugin({
               from: path.resolve(__dirname, "legacy-root"),
+              to: distRoot,
+            }),
+            new CopyToDistRootPlugin({
+              files: ["google-signin-dialog.html", "google-signin-callback.html"],
+              from: outputPath,
               to: distRoot,
             }),
             new ReinjectSecretsPlugin({

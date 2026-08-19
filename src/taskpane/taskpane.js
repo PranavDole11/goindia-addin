@@ -37,7 +37,7 @@ export async function run() {
 
 async function checkAccessStatus(userId) {
     try {
-        const res = await fetch(`http://localhost:8000/addin/access_status?user_id=${userId}`);
+        const res = await fetch(`https://transcriptanalyser.com/addin/access_status?user_id=${userId}`);
         const data = await res.json();
 
         const container = document.getElementById("enterpriseRequestContainer");
@@ -115,7 +115,7 @@ async function checkAccessStatus(userId) {
         if (!(membership.is_giin_pro === true || membership.is_admin === true || membership.is_enterprise_member === true)) {
             // First, check if user has already been approved in access requests
             try {
-                const resStatus = await fetch(`http://localhost:8000/addin/access_status?user_id=${user.UserId}`);
+                const resStatus = await fetch(`https://transcriptanalyser.com/addin/access_status?user_id=${user.UserId}`);
                 const data = await resStatus.json();
 
                 if (data.status === "Approved") {
@@ -124,8 +124,8 @@ async function checkAccessStatus(userId) {
                     localStorage.setItem("membership", JSON.stringify(membership));
 
                     document.getElementById("memberContent").style.display = "block";
-                    document.getElementById("addinUI").style.display = "block";
-                    document.getElementById("logoutBtn").style.display = "block";
+                    showAddinUI();
+                    updateLogoutBtnVisibility();
 
                     const profileIcon = document.getElementById("profileIcon");
                     const username = document.getElementById("username");
@@ -149,7 +149,7 @@ async function checkAccessStatus(userId) {
 
             requestBtn.onclick = async () => {
                 try {
-                    const res = await fetch("http://localhost:8000/addin/request_access", {
+                    const res = await fetch("https://transcriptanalyser.com/addin/request_access", {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
                         body: JSON.stringify({
@@ -174,7 +174,7 @@ async function checkAccessStatus(userId) {
                 e.preventDefault();  // Prevent default link behavior
 
                 try {
-                    const resStatus = await fetch(`http://localhost:8000/addin/access_status?user_id=${user.UserId}`);
+                    const resStatus = await fetch(`https://transcriptanalyser.com/addin/access_status?user_id=${user.UserId}`);
                     const data = await resStatus.json();
 
                     if (data.status === "Approved") {
@@ -204,8 +204,8 @@ async function checkAccessStatus(userId) {
 
             // Show member-related content
             document.getElementById("memberContent").style.display = "block";
-            document.getElementById("addinUI").style.display = "block";
-            document.getElementById("logoutBtn").style.display = "block";
+            showAddinUI();
+            updateLogoutBtnVisibility();
 
             // Update profile display
             const profileIcon = document.getElementById("profileIcon");
@@ -256,8 +256,8 @@ document.getElementById("loginForm").addEventListener("submit", async (e) => {
             document.getElementById("blockedContainer").style.display = "none";
 
             document.getElementById("memberContent").style.display = "block";
-            document.getElementById("addinUI").style.display = "block";
-            document.getElementById("logoutBtn").style.display = "block";
+            showAddinUI();
+            updateLogoutBtnVisibility();
 
             const profileIcon = document.getElementById("profileIcon");
             const usernameEl = document.getElementById("username");
@@ -309,8 +309,8 @@ document.getElementById("loginForm").addEventListener("submit", async (e) => {
 
             // Show relevant UI
             document.getElementById("memberContent").style.display = "block";
-            document.getElementById("addinUI").style.display = "block";
-            document.getElementById("logoutBtn").style.display = "block";
+            showAddinUI();
+            updateLogoutBtnVisibility();
 
             const profileIcon = document.getElementById("profileIcon");
             const usernameEl = document.getElementById("username");
@@ -375,7 +375,7 @@ document.getElementById("loginForm").addEventListener("submit", async (e) => {
             // If not enterprise member, check AddinAccessRequests
             if (!isApproved) {
                 try {
-                    const resStatus = await fetch(`http://localhost:8000/addin/access_status?user_id=${user.UserId}`);
+                    const resStatus = await fetch(`https://transcriptanalyser.com/addin/access_status?user_id=${user.UserId}`);
                     const statusData = await resStatus.json();
                     if (statusData.status === "Approved") {
                         isApproved = true;
@@ -391,8 +391,8 @@ document.getElementById("loginForm").addEventListener("submit", async (e) => {
                 localStorage.setItem("membership", JSON.stringify(membership));
 
                 document.getElementById("memberContent").style.display = "block";
-                document.getElementById("addinUI").style.display = "block";
-                document.getElementById("logoutBtn").style.display = "block";
+                showAddinUI();
+                updateLogoutBtnVisibility();
 
                 const profileIcon = document.getElementById("profileIcon");
                 const username = document.getElementById("username");
@@ -422,7 +422,7 @@ document.getElementById("loginForm").addEventListener("submit", async (e) => {
     document.getElementById("loginScreen").style.display = "flex";
 });*/
 
-const MAX_MODEL_COST_INR = 25; // matches the AI Financial Model card's own displayed cost ceiling
+const MAX_MODEL_COST_INR = 30; // matches the AI Financial Model card's own displayed cost ceiling
 const TEST_BYPASS_USER_ID = "test123"; // ut@gmail.com certification account — see refreshWalletBalance
 
 // Detects an empty/all-zero financial-statement response — a Consolidated-less company doesn't
@@ -833,6 +833,29 @@ function setAiModelAvailability(sufficientBalance) {
     if (!sufficientBalance) check.checked = false;
 }
 
+// Minimum wallet balance needed to START a DataGPT query. Unlike the financial model — whose
+// worst case is bounded by MAX_MODEL_COST_INR, so we can require the full amount up front — a
+// chat turn is open-ended (cost depends on how many tool iterations the model needs), so this is
+// a floor rather than a reservation: enough that a typical query is covered, not a guarantee.
+const MIN_CHAT_BALANCE_INR = 3;
+
+// Read back by the chat panel's send() so a query that finishes AFTER the balance ran dry does
+// not re-enable the button in its finally block. Starts true so the composer is not dead in the
+// window before the first balance fetch resolves; from then on refreshWalletBalance() fails CLOSED
+// exactly like the AI-model toggle does.
+let chatBalanceSufficient = true;
+
+// Disables the DataGPT send button and reveals the notice above the composer. The textarea stays
+// usable on purpose — a half-typed question should not be lost just because the balance dipped,
+// and the notice already explains why the button is dead.
+function setChatAvailability(sufficientBalance) {
+    chatBalanceSufficient = !!sufficientBalance;
+    const btn = document.getElementById("chatSend");
+    const notice = document.getElementById("chatBalanceNotice");
+    if (btn) btn.disabled = !chatBalanceSufficient;
+    if (notice) notice.style.display = chatBalanceSufficient ? "none" : "block";
+}
+
 // Fetches the current user's wallet balance (sum of all three credit buckets, per backend
 // convention), updates the pill in the header, and gates the AI Financial Model toggle on it.
 // Fails CLOSED: a real account with an unverifiable balance (network error, non-200, etc.) gets
@@ -840,16 +863,21 @@ function setAiModelAvailability(sufficientBalance) {
 // generate a model we don't know they can afford. The one exemption is the ut@gmail.com
 // certification bypass (UserId "test123"), which always fails this fetch since it isn't a real
 // wallet user — it stays enabled unconditionally so Microsoft's reviewers can test the feature.
+// Mirrors the balance onto every place it's shown — the header pill (#walletBalance) and, since
+// the ribbon's Wallet button (view=wallet) opens the history modal directly, the balance row now
+// embedded inside it too (see #walletHistoryModal in taskpane.html).
+function setWalletBalanceText(text) {
+    document.querySelectorAll("#walletBalance, .wallet-balance-display").forEach(el => { el.textContent = text; });
+}
 async function refreshWalletBalance() {
-    const walletBalanceEl = document.getElementById("walletBalance");
-    if (!walletBalanceEl) return;
+    if (!document.getElementById("walletBalance")) return;
     let userId = null;
     try {
         const user = JSON.parse(localStorage.getItem("user") || "{}");
         userId = user.UserId || null;
-        if (!userId) { walletBalanceEl.textContent = "—"; setAiModelAvailability(false); return; }
+        if (!userId) { setWalletBalanceText("—"); setAiModelAvailability(false); setChatAvailability(false); return; }
         const isTestAccount = userId === TEST_BYPASS_USER_ID;
-        if (isTestAccount) setAiModelAvailability(true);
+        if (isTestAccount) { setAiModelAvailability(true); setChatAvailability(true); }
 
         const res = await fetch("https://transcriptanalyser.com/wallet/user_credit_balance", {
             method: "POST",
@@ -857,19 +885,20 @@ async function refreshWalletBalance() {
             body: JSON.stringify({ user_id: String(userId) })
         });
         if (!res.ok) {
-            walletBalanceEl.textContent = "—";
-            if (!isTestAccount) setAiModelAvailability(false);
+            setWalletBalanceText("—");
+            if (!isTestAccount) { setAiModelAvailability(false); setChatAvailability(false); }
             return;
         }
         const data = await res.json();
         const c = data.credits || {};
         const total = (c.whatsapp_credit || 0) + (c.stockgpt_credit || 0) + (c.balance_credit || 0);
-        walletBalanceEl.textContent = `₹${total.toFixed(2)}`;
+        setWalletBalanceText(`₹${total.toFixed(2)}`);
         setAiModelAvailability(isTestAccount || total >= MAX_MODEL_COST_INR);
+        setChatAvailability(isTestAccount || total >= MIN_CHAT_BALANCE_INR);
     } catch (e) {
         console.warn("Wallet balance fetch failed:", e);
-        walletBalanceEl.textContent = "—";
-        if (userId !== TEST_BYPASS_USER_ID) setAiModelAvailability(false);
+        setWalletBalanceText("—");
+        if (userId !== TEST_BYPASS_USER_ID) { setAiModelAvailability(false); setChatAvailability(false); }
     }
 }
 
@@ -879,6 +908,7 @@ async function refreshWalletBalance() {
 //const WALLET_BASE_URL = "https://transcriptanalyser.com/wallet";
 const WALLET_BASE_URL = "https://transcriptanalyser.com/wallet";
 const WALLET_DEDUCT_URL = `${WALLET_BASE_URL}/excel_deduct_model_cost`;
+const WALLET_DEDUCT_CHAT_URL = `${WALLET_BASE_URL}/excel_deduct_chat_cost`;
 
 // Pure usage tracking (login / download-data clicks) — SQL-only, never shown in the add-in's own
 // UI, queried directly for usage analysis. Fire-and-forget on purpose: a logging failure must never
@@ -953,24 +983,111 @@ async function deductModelCost({ fincode, companyName, costUsd, usedFallback }) 
     }
 }
 
-// ── Wallet history popup ──
-// Reads /wallet/excel_cost_history (fincode + cost only), then resolves each unique fincode to a
-// company name via the existing company_search endpoint (passing a fincode as searchtxt returns
-// that company as a match, same as passing a name) — cached per-open so repeat fincodes in the
-// list don't refetch.
-async function fetchWalletHistory() {
-    const listEl = document.getElementById("walletHistoryList");
-    if (!listEl) return;
-    listEl.textContent = "Loading…";
+// Same idea as deductModelCost above, for DataGPT chat queries — deducts the SUMMED OpenRouter
+// cost across every turn a single question took (tool-calling round trips included) and logs it
+// against the question asked instead of a fincode (see excel_deduct_chat_cost/excel_chat_cost_log
+// in backend/routers/wallet.py). Called once per chat turn, after the model's final answer is in
+// (see send() below). Fire-and-forget from the caller, same as deductModelCost.
+async function deductChatCost({ question, costUsd }) {
     try {
         const { userId, isEnterprise, enterpriseId } = getWalletIdentity();
-        if (!userId) { listEl.textContent = "Not logged in."; return; }
+        if (!userId) return;
+        const res = await fetch(WALLET_DEDUCT_CHAT_URL, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                user_id: isEnterprise ? null : (Number(userId) || null),
+                enterprise_id: enterpriseId,
+                question,
+                cost_usd: costUsd,
+            }),
+        });
+        if (!res.ok) {
+            console.warn("[Wallet] excel_deduct_chat_cost failed:", res.status, await res.text().catch(() => ""));
+            return;
+        }
+        await refreshWalletBalance();
+    } catch (e) {
+        console.warn("[Wallet] excel_deduct_chat_cost request failed:", e);
+    }
+}
+
+// ── Wallet history ──
+// Two logs feed the wallet: /wallet/excel_cost_history (AI financial models, keyed by fincode)
+// and /wallet/excel_cost_history's DataGPT counterpart /wallet/excel_chat_cost_history (chat
+// queries, keyed by the question text). They're separate endpoints because their rows have
+// different shapes, so we fetch both in parallel, normalise each into a common {kind,label,...}
+// record, then merge and sort by timestamp so the user sees one chronological spend list.
+// Model rows additionally resolve their fincode to a company name via company_search (passing a
+// fincode as searchtxt returns that company, same as passing a name), cached per-call so repeat
+// fincodes don't refetch. Renders into every element matching `selector` — defaults to the full
+// 20-entry list (.wallet-history-list, used by the in-panel history popup and, once clicked open,
+// the Profile view's own wallet card); pass (5, ".wallet-history-preview") for the Profile view's
+// upfront 5-entry teaser instead, so opening that view doesn't fetch 20 rows just to show 5.
+async function fetchWalletHistory(limit = 20, selector = ".wallet-history-list") {
+    const listEls = Array.from(document.querySelectorAll(selector));
+    if (!listEls.length) return;
+    const setAll = (html) => listEls.forEach(el => { el.innerHTML = html; });
+    setAll("Loading…");
+
+    const esc = (s) => String(s == null ? "" : s)
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+    try {
+        const { userId, isEnterprise, enterpriseId } = getWalletIdentity();
+        if (!userId) { setAll("Not logged in."); return; }
         const qs = isEnterprise ? `enterprise_id=${enterpriseId}` : `user_id=${encodeURIComponent(userId)}`;
-        const res = await fetch(`${WALLET_BASE_URL}/excel_cost_history?${qs}&limit=20`);
-        if (!res.ok) { listEl.textContent = "Couldn't load history."; return; }
-        const data = await res.json();
-        const entries = data.entries || [];
-        if (!entries.length) { listEl.textContent = "No AI model charges yet."; return; }
+
+        // Each fetch is independently guarded: a missing/failing chat log shouldn't blank out the
+        // model history (or vice versa) — we just show whichever side came back.
+        const grab = async (path) => {
+            try {
+                const res = await fetch(`${WALLET_BASE_URL}/${path}?${qs}&limit=${limit}`);
+                if (!res.ok) return null;
+                const data = await res.json();
+                return data.entries || [];
+            } catch (e) {
+                console.warn(`[Wallet] ${path} fetch failed:`, e);
+                return null;
+            }
+        };
+        const [modelEntries, chatEntries] = await Promise.all([
+            grab("excel_cost_history"),
+            grab("excel_chat_cost_history"),
+        ]);
+
+        if (modelEntries === null && chatEntries === null) { setAll("Couldn't load history."); return; }
+
+        const merged = [
+            ...(modelEntries || []).map(e => ({
+                kind: "model",
+                fincode: e.fincode,
+                label: null,                       // filled in below once the fincode resolves
+                costInr: e.cost_inr,
+                createdUtc: e.created_utc,
+                note: e.used_fallback ? "fallback model" : "",
+            })),
+            ...(chatEntries || []).map(e => ({
+                kind: "chat",
+                fincode: null,
+                label: e.question || "(no question recorded)",
+                costInr: e.cost_inr,
+                createdUtc: e.created_utc,
+                note: "",
+            })),
+        ];
+        if (!merged.length) { setAll("No charges yet."); return; }
+
+        // Both endpoints already return newest-first, but interleaving two lists needs a real sort.
+        // Rows with no timestamp sink to the bottom rather than jumping to the top as epoch 0.
+        merged.sort((a, b) => {
+            const ta = a.createdUtc ? new Date(a.createdUtc).getTime() : -Infinity;
+            const tb = b.createdUtc ? new Date(b.createdUtc).getTime() : -Infinity;
+            return tb - ta;
+        });
+        // Each side was capped at `limit`, so the merge can hold up to 2×limit — re-cap so "last 5"
+        // means the 5 most recent charges overall, not 5 of each.
+        const entries = merged.slice(0, limit);
 
         const nameCache = new Map();
         const resolveCompanyName = async (fincode) => {
@@ -990,33 +1107,46 @@ async function fetchWalletHistory() {
             return name;
         };
 
-        listEl.innerHTML = "";
+        let rowsHtml = "";
         for (const entry of entries) {
-            const name = await resolveCompanyName(entry.fincode);
-            const row = document.createElement("div");
-            row.style.cssText = "padding:8px 0; border-bottom:1px solid #eee;";
-            const dt = entry.created_utc ? new Date(entry.created_utc) : null;
-            row.innerHTML = `
-                <div style="display:flex; justify-content:space-between; gap:8px;">
-                    <span>${name}</span>
-                    <span style="font-weight:700; color:#173760; white-space:nowrap;">₹${Number(entry.cost_inr).toFixed(2)}</span>
+            const isChat = entry.kind === "chat";
+            const raw = isChat ? entry.label : await resolveCompanyName(entry.fincode);
+            // Questions are free text and can run long; clamp the visible label but keep the full
+            // text on hover. Company names are short enough to pass through untouched.
+            const shown = raw.length > 90 ? `${raw.slice(0, 90)}…` : raw;
+            const dt = entry.createdUtc ? new Date(entry.createdUtc) : null;
+            const meta = [dt ? dt.toLocaleString() : "", entry.note].filter(Boolean).join(" · ");
+            const tag = isChat
+                ? `<span style="flex:none; font-size:9.5px; font-weight:700; letter-spacing:.03em; text-transform:uppercase; color:#5b7fa6; background:#eef3f8; border-radius:3px; padding:1px 5px;">DataGPT</span>`
+                : `<span style="flex:none; font-size:9.5px; font-weight:700; letter-spacing:.03em; text-transform:uppercase; color:#7a6a3c; background:#f6f1e4; border-radius:3px; padding:1px 5px;">Model</span>`;
+            rowsHtml += `
+                <div style="padding:8px 0; border-bottom:1px solid #eee;">
+                    <div style="display:flex; justify-content:space-between; gap:8px;">
+                        <span style="display:flex; align-items:baseline; gap:6px; min-width:0;">
+                            ${tag}
+                            <span style="min-width:0; overflow-wrap:anywhere;" title="${esc(raw)}">${esc(shown)}</span>
+                        </span>
+                        <span style="font-weight:700; color:#173760; white-space:nowrap;">₹${Number(entry.costInr).toFixed(2)}</span>
+                    </div>
+                    <div style="font-size:10.5px; color:#999; margin-top:2px;">${esc(meta)}</div>
                 </div>
-                <div style="font-size:10.5px; color:#999; margin-top:2px;">${dt ? dt.toLocaleString() : ""}${entry.used_fallback ? " · fallback model" : ""}</div>
             `;
-            listEl.appendChild(row);
         }
+        setAll(rowsHtml);
     } catch (e) {
-        console.warn("[Wallet] excel_cost_history fetch failed:", e);
-        listEl.textContent = "Couldn't load history.";
+        console.warn("[Wallet] history fetch failed:", e);
+        setAll("Couldn't load history.");
     }
 }
 
 // webpack scopes top-level functions inside its own module wrapper, not onto window — so
 // taskpane.html's separate inline <script> can't see these by bare name even though a
 // `typeof x === "function"` guard makes that failure silent instead of throwing. Explicitly
-// exposing the two functions taskpane.html actually calls across that boundary.
+// exposing the functions taskpane.html actually calls across that boundary.
 window.refreshWalletBalance = refreshWalletBalance;
 window.fetchWalletHistory = fetchWalletHistory;
+window.showAddinUI = showAddinUI;
+window.updateLogoutBtnVisibility = updateLogoutBtnVisibility;
 
 async function checkLocalSession() {
     const savedUser = localStorage.getItem("user");
@@ -1048,8 +1178,8 @@ async function checkLocalSession() {
 
                 // Show member content
                 document.getElementById("memberContent").style.display = "block";
-                document.getElementById("addinUI").style.display = "block";
-                document.getElementById("logoutBtn").style.display = "block";
+                showAddinUI();
+                updateLogoutBtnVisibility();
 
                 // Update profile display
                 const profileIcon = document.getElementById("profileIcon");
@@ -1297,8 +1427,180 @@ Office.onReady(() => {
 
 
 
+// ── Ribbon view-switching ──────────────────────────────────────────────────────────────────
+// The ribbon's Download Data / Ask DataGPT / Side Panel buttons are all plain ShowTaskpane
+// actions (see manifest.xml) pointing at this same taskpane.html with a different ?view= query
+// string. ShowTaskpane always re-navigates the pane to its target URL — confirmed even when the
+// pane is already open — so this script runs fresh on every one of those clicks; the query
+// string alone is enough state, no roamingSettings or live in-memory flag needed.
+//
+// "download" and "datagpt" both narrow #addinUI down to an ALLOWLIST of its own direct-child
+// sections (verified against the actual DOM — every section below really is a direct child, not
+// nested inside a shared wrapper), hiding everything else. "main" (the default — no ?view= at
+// all, or an unrecognized value) leaves everything exactly as it already renders today.
+const RIBBON_VIEW_ALLOWLIST = {
+    datagpt: ["chatFeature"],
+    download: [
+        "companyDataControls", "companyDropdownWrap", "includeOptions", "buttons",
+        "walletDeductBanner", "aiStatusBox", "warningMsg", "infoBox",
+        "disclaimerModal", "staleModelModal",
+    ],
+    profile: ["profileSection", "profileExtras"],
+    feedback: ["feedbackSection"],
+};
+// Several login-success paths below unconditionally reveal #logoutBtn once #addinUI itself
+// becomes visible — this runs that reveal through the current ribbon view's allowlist instead,
+// so a "download"/"datagpt" view stays free of it even after an async login check resolves
+// later than applyRibbonView() already did.
+function updateLogoutBtnVisibility() {
+    const btn = document.getElementById("logoutBtn");
+    if (!btn) return;
+    btn.style.display = RIBBON_VIEW_ALLOWLIST[document.body.dataset.view] ? "none" : "block";
+}
+
+// Same problem as updateLogoutBtnVisibility above, on #addinUI itself: several login-success paths
+// unconditionally set it to display:block once login is confirmed — which runs through this
+// instead, since the "profile" view needs #addinUI to be a flex column (for its even gap between
+// the profile/wallet/disclaimer cards, see the scoped CSS in taskpane.html) rather than plain block.
+function showAddinUI() {
+    const el = document.getElementById("addinUI");
+    if (!el) return;
+    el.style.display = document.body.dataset.view === "profile" ? "flex" : "block";
+}
+
+function applyRibbonView() {
+    let view = "main";
+    try { view = new URLSearchParams(location.search).get("view") || "main"; } catch (e) { /* malformed query string */ }
+    document.body.dataset.view = view;
+    const keep = RIBBON_VIEW_ALLOWLIST[view];
+    if (!keep) return view; // "main" (or anything unrecognized) — show everything, as today
+
+    const addinUI = document.getElementById("addinUI");
+    if (!addinUI) return view;
+    Array.from(addinUI.children).forEach(child => {
+        if (!child.id || !keep.includes(child.id)) child.style.display = "none";
+    });
+
+    if (view === "download") {
+        // Search bar reads first, data-source checkboxes sit below it — download view only,
+        // the default "main" view keeps its original checkboxes-above-search order untouched.
+        const dropdownWrap = document.getElementById("companyDropdownWrap");
+        const dataControls = document.getElementById("companyDataControls");
+        if (dropdownWrap && dataControls) dropdownWrap.insertAdjacentElement("afterend", dataControls);
+        // companyDropdownWrap's own margin-top:12px (inline, set in HTML) exists to clear the
+        // checkboxes that used to sit above it — now that it's the first visible element in this
+        // view, that reserved gap is dead space; zero it (inline style, so only JS can override
+        // it — a stylesheet rule can't win against an inline declaration).
+        if (dropdownWrap) dropdownWrap.style.marginTop = "0";
+    }
+
+    // The ribbon's Profile button consolidates the old separate Wallet/Disclaimer/Profile buttons
+    // into one view: #profileSection (the existing name/avatar pill, restyled into a small centered
+    // card by the scoped CSS above) plus #profileExtras, a clickable wallet card and disclaimer
+    // card (hidden by default so they don't leak into the main view). Each card opens the SAME
+    // .dz-overlay modal the small in-panel wallet-history icon / disclaimer link already use
+    // elsewhere in this file, so there's only one place that actually renders the full content.
+    // refreshWalletBalance/fetchWalletHistory are declared further down but hoisted, so they're
+    // safe to call here.
+    if (view === "profile") {
+        // #profileSection's markup sets position:absolute inline (it floats over the header in
+        // every other view) — a stylesheet rule can never beat that, only re-setting the same
+        // inline property can, same fix as companyDropdownWrap's margin above. Without this it
+        // stays out of #addinUI's normal flow and visually overlaps #profileExtras below it.
+        const profileSection = document.getElementById("profileSection");
+        if (profileSection) profileSection.style.position = "static";
+
+        const extras = document.getElementById("profileExtras");
+        if (extras) extras.style.display = "flex"; // activates #profileExtras's flex-column gap
+        if (typeof refreshWalletBalance === "function") refreshWalletBalance();
+        if (typeof fetchWalletHistory === "function") fetchWalletHistory(5, ".wallet-history-preview");
+
+        const walletCard = document.getElementById("profileWalletCard");
+        const walletModal = document.getElementById("walletHistoryModal");
+        if (walletCard && walletModal) {
+            walletCard.addEventListener("click", () => {
+                walletModal.style.display = "flex";
+                if (typeof fetchWalletHistory === "function") fetchWalletHistory();
+            });
+        }
+        const disclaimerCard = document.getElementById("profileDisclaimerCard");
+        const disclaimerModal = document.getElementById("disclaimerInfoModal");
+        if (disclaimerCard && disclaimerModal) {
+            disclaimerCard.addEventListener("click", () => {
+                disclaimerModal.style.display = "flex";
+            });
+        }
+    }
+
+    // Ribbon's Feedback view — a plain form (see #feedbackSection in taskpane.html), not a modal.
+    // Username is read-only, auto-filled from the same localStorage "user" entry every other
+    // profile/account display reads from; company is deliberately free text (not tied to the
+    // company catalog), since feedback may be about something not in it, or general.
+    if (view === "feedback") {
+        const section = document.getElementById("feedbackSection");
+        if (section) section.style.display = "block";
+
+        const usernameEl = document.getElementById("feedbackUsername");
+        let currentUser = {};
+        try { currentUser = JSON.parse(localStorage.getItem("user") || "{}"); } catch (e) { /* not logged in */ }
+        if (usernameEl) usernameEl.textContent = currentUser.FullName || "—";
+
+        const submitBtn = document.getElementById("feedbackSubmit");
+        const statusEl = document.getElementById("feedbackStatus");
+        const companyEl = document.getElementById("feedbackCompany");
+        const textEl = document.getElementById("feedbackText");
+        if (submitBtn && statusEl && companyEl && textEl) {
+            submitBtn.addEventListener("click", async () => {
+                const feedback = textEl.value.trim();
+                if (!feedback) {
+                    statusEl.className = "fb-status err";
+                    statusEl.textContent = "Please enter your feedback before submitting.";
+                    statusEl.style.display = "block";
+                    return;
+                }
+                submitBtn.disabled = true;
+                statusEl.style.display = "none";
+                try {
+                    // Same one-or-the-other branching every wallet endpoint uses (excel_deduct_model_cost,
+                    // excel_deduct_chat_cost) — an enterprise member's feedback should be attributed to
+                    // enterprise_id, not their own user_id, consistent with how their usage is billed.
+                    const { userId, isEnterprise, enterpriseId } = getWalletIdentity();
+                    const res = await fetch(`${WALLET_BASE_URL}/excel_submit_feedback`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            user_id: isEnterprise ? null : (Number(userId) || null),
+                            enterprise_id: enterpriseId,
+                            username: currentUser.FullName || "Unknown",
+                            company: companyEl.value.trim() || "General",
+                            feedback,
+                        }),
+                    });
+                    if (!res.ok) throw new Error(`Server returned ${res.status}`);
+                    statusEl.className = "fb-status ok";
+                    statusEl.textContent = "Thanks — your feedback has been submitted.";
+                    statusEl.style.display = "block";
+                    companyEl.value = "";
+                    textEl.value = "";
+                } catch (e) {
+                    console.warn("[Feedback] submit failed:", e);
+                    statusEl.className = "fb-status err";
+                    statusEl.textContent = "Couldn't submit feedback — please try again.";
+                    statusEl.style.display = "block";
+                } finally {
+                    submitBtn.disabled = false;
+                }
+            });
+        }
+    }
+
+    return view;
+}
+
 Office.onReady(async (info) => {
     if (info.host !== Office.HostType.Excel) return;
+
+    const ribbonView = applyRibbonView();
 
     // Resume live current_price polling for whatever model (if any) already exists in this
     // workbook — e.g. the taskpane/workbook was just reopened. No-ops harmlessly (and self-stops)
@@ -2114,6 +2416,24 @@ Office.onReady(async (info) => {
             // Honour the user's selection: skip entirely if unchecked, and keep only the
             // chosen sections when a subset was picked in the modal.
             let operationalText = "";
+            // Deduplicated, code-derived candidate segment names (section_name from the SAME
+            // dashboard payload) — NOT a judgment call, just a raw list of the distinct section
+            // labels the API actually returned (confirmed live, e.g. for a real conglomerate this
+            // comes back as clean labels like "Airports (Adani Airport Holdings Ltd)", "Data Centers
+            // (AdaniConneX)", "Mining Services" — genuine business verticals, not generic metric
+            // categories). The SAME section_name repeats across multiple rows/metric groupings for
+            // one segment (volumes vs. capacity vs. project counts, etc.), so this dedupes by name
+            // rather than pushing one entry per section object. Feeds the "Segment Drivers" call
+            // below as CANDIDATES only — that call still decides which of these are genuinely
+            // distinct P&L segments (vs. a generic "Portfolio Overview"-style section, or two
+            // candidates that are really the same business), the one judgment call that can't be
+            // removed from the loop, mirroring holding_discount's own existing test.
+            const operationalSegments = [];
+            // Structured mirror of the SAME rows that get flattened into operationalText below —
+            // kept alongside it so the segment-revenue recovery pass further down can read real
+            // per-year figures out of the dashboard payload directly, instead of regex-scraping the
+            // pipe-delimited text back apart (the text is built for an LLM to read, not to reparse).
+            const operationalSections = [];
             if (selection.operational.include) {
                 aiStatus("Fetching operational data...");
                 const wantedMetrics = selection.operational.metrics; // null = all metrics
@@ -2126,6 +2446,7 @@ Office.onReady(async (info) => {
                     if (opRes.ok) {
                         const opJson = await opRes.json();
                         const opLines = [];
+                        const seenSegments = new Set();
                         for (const section of (opJson.table_data || [])) {
                             const rows = (section.rows || []).filter(row =>
                                 !Array.isArray(wantedMetrics) || wantedMetrics.includes(row.metric_name));
@@ -2137,6 +2458,19 @@ Office.onReady(async (info) => {
                                 opLines.push([row.metric_name, row.unit, ...periods.map(p => row[p] ?? "")].join(" | "));
                             }
                             opLines.push("");
+                            operationalSections.push({
+                                name: section.section_name || "Section",
+                                periods,
+                                rows: rows.map(row => ({
+                                    metric: row.metric_name || "",
+                                    unit: row.unit || "",
+                                    byPeriod: Object.fromEntries(periods.map(p => [p, row[p]])),
+                                })),
+                            });
+                            if (section.section_name && !seenSegments.has(section.section_name)) {
+                                seenSegments.add(section.section_name);
+                                operationalSegments.push(section.section_name);
+                            }
                         }
                         operationalText = opLines.join("\n").trim();
                     }
@@ -2626,17 +2960,40 @@ The sheet is laid out ACROSS YEARS (columns ${periodLabels.join(", ")}). Other s
             // shrinks the dynamic call's output (was 35-60 rows citing all of Assumptions; now ~15-20)
             // and its input (trimmed finBlock, capped qualBlock), which directly reduces the "thinking"
             // token spend that was driving both the cost and the timeout risk on this call.
-            const [structJson, judgJson] = await Promise.all([
+            // "Segment Drivers" — a THIRD, narrowly-scoped call running in true parallel with the two
+            // below (not a sequential extra step: it needs operationalSegments, which is code-derived
+            // from the SAME operational fetch already awaited above, and doesn't depend on either of
+            // this Promise.all's other two outputs). Fires ONLY when there are at least 2 candidate
+            // segment names to consider at all — the vast majority of single-business companies never
+            // even attempt this call. Exists because asking the already-overloaded Judgment call above
+            // to BOTH invent correct segment names from scratch AND size them proved unreliable in
+            // practice (a real run on Adani Enterprises set holding_discount>0 — correctly recognizing
+            // a conglomerate — but never emitted a single revenue_growth_<tag> pair, silently falling
+            // back to the fully-blended model this whole SOTP path exists to avoid). Handing this call
+            // a code-derived candidate list removes that specific failure mode: it only has to DECIDE
+            // (from real candidates) and SIZE, never invent a name from raw text.
+            const wantSegmentDriversCall = operationalSegments.length >= 2;
+            const segmentDriversPrompt = wantSegmentDriversCall
+                ? `${periodsNote}\n\n${GRAMMAR}\n\n${assumSchema}\n\n${operationalText ? `OPERATIONAL DATA:\n${operationalText}\n\n` : ""}${qualBlock}${valuationChartNote}\nCANDIDATE SEGMENTS (from ${companyName}'s own reported operational/business-segment breakdown): ${operationalSegments.map(s => `"${s}"`).join(", ")}.\nYour ONLY job is to decide which of these candidates are genuinely DISTINCT BUSINESSES an investor would value separately (the SAME test used elsewhere for a conglomerate holding-company discount: different segments of ONE coherent business — e.g. different product lines, or domestic vs export sales of the same business — do NOT count; only substantially UNRELATED businesses do, each better benchmarked against its own pure-play peers), and for EACH ONE you select, provide its own growth/margin/capex/valuation-multiple assumptions.\nIf FEWER THAN 2 candidates are genuinely distinct businesses (including if ALL of them are really facets of one business, or this turns out to be a single-business company after all), return {"rows":[]} — an empty array, nothing else. Do NOT force a segment split that isn't real just because candidates were listed above.\nFor each segment you DO select, use a short snake_case tag derived from its name (e.g. "Airports (Adani Airport Holdings Ltd)" -> "airports", "Data Centers (AdaniConneX)" -> "data_centers") and provide FOUR rows keyed EXACTLY: revenue_growth_<tag>, ebitda_margin_<tag>, capex_pct_revenue_<tag>, target_ev_ebitda_<tag> — all four together, no gaps. revenue_growth_<tag>, ebitda_margin_<tag>, and capex_pct_revenue_<tag> are decimal fractions (e.g. 0.12 for 12%), each needing its OWN genuine multi-year trajectory (a tapering growth curve, a margin path, easing capex intensity as a build-out completes) grounded in whatever the qualitative sources or operational KPIs above actually say about THAT SPECIFIC segment — do NOT just copy one flat number across all ${HIST_YEARS + FC_YEARS} year cells unless the evidence genuinely supports a flat path, and do NOT copy another segment's trajectory. target_ev_ebitda_<tag> is a multiple (e.g. 12.0), one considered judgment held constant across the years like the company-level target_ev_ebitda, anchored to THAT segment's own peer set — a mature commodity/trading segment should get a materially different multiple than an infrastructure or early-growth segment, not the same multiple as the rest of the company. EVERY row requires "source" AND "rationale" citing the SPECIFIC evidence behind it (an earnings-call figure, a stated capacity/ramp-up plan, a named peer's multiple) — "general growth optimism" is not sufficient.\nDo NOT provide the plain company-wide revenue_growth/ebitda_margin/capex_pct_revenue/target_ev_ebitda keys (no <tag> suffix) — a separate call already owns those; this call ONLY provides the <tag>-suffixed segment-specific versions, one full set of four per segment selected.`
+                : "";
+            const [structJson, judgJson, segDriversJson] = await Promise.all([
                 callLLM("Assumptions (Structural)",
                     `${periodsNote}\n\n${GRAMMAR}\n\n${assumSchema}\n\n${finBlock}\nBuild PART of a DETAILED ASSUMPTIONS / DRIVER SCHEDULE for ${companyName} — ONLY these sections (a separate call handles WACC/growth/margin/capex/working-capital-day assumptions, so do NOT include those here): SHARE CAPITAL (shares outstanding — key=shares_out; face value, as ITS OWN separate row — key=face_value; see COMPANY BASIC INFO above for the real fetched figures for both, if given), RESERVES & DEBT (reserves, secured/unsecured debt balances), FIXED ASSETS ROLL-FORWARD (gross block beginning/additions/ending, accumulated depreciation, net block, CWIP, depreciation as % of avg gross block — key=depreciation_pct_gross_block: give this as a PLAIN POSITIVE DECIMAL VALUE (NOT a formula), computed EXACTLY as this company's OWN annual depreciation charge / average reported gross block, using ITS actual reported figures — do NOT force it toward a generic "typical" range; the correct ratio varies enormously by industry (asset-heavy, long-asset-life businesses like refining, oil & gas, power, telecom towers legitimately run well under 3%, while asset-light services businesses can run well over 8% — trust this company's own historical arithmetic, not a rule of thumb), and repeat that SAME value in all ${HIST_YEARS + FC_YEARS} year cells. Do NOT compute it with a same-sheet formula that divides by a "gross block ending" roll-forward row — that roll-forward starts unanchored and can collapse to ~0, which makes this ratio 0 and SILENTLY ZEROES the entire forecast depreciation → EBIT → PAT chain on the P&L. It MUST be a non-zero positive decimal in every cell. Also make the "gross block ending" display row anchor correctly as beginning + additions using same-year {R:} references (e.g. "{R:gross_block_beginning}+{R:capex}"), never rolled off only the prior-year ending. CONTINUITY SELF-CHECK — before finalizing, multiply your depreciation_pct_gross_block by the projected average gross block for the FIRST forecast year and confirm the result is reasonably close to (not a multi-x jump from) the LAST historical year's actual depreciation charge, since gross block does not change overnight; if your ratio produces a first-forecast-year figure several times larger or smaller than the last actual, you have the wrong ratio — recompute it directly from the historical annual-charge ÷ average-gross-block arithmetic instead. The P&L sheet references this EXACT key to forecast the annual depreciation charge), INVESTMENTS, WORKING CAPITAL BALANCES (inventories, debtors, cash, loans & advances, payables, provisions — the ACTUAL reported rupee amounts; do NOT include the days/ratio assumptions for these, that's the other call). This is pure transcription/linking from the data, no forward-looking judgment needed here.\nHISTORICAL-ONLY ROWS — every row you produce in THIS ENTIRE CALL, in EVERY section (SHARE CAPITAL, RESERVES & DEBT, FIXED ASSETS ROLL-FORWARD, INVESTMENTS, and WORKING CAPITAL BALANCES alike — this explicitly includes gross_block_beginning, the additions/capex row, and accumulated_depreciation_beginning under FIXED ASSETS ROLL-FORWARD, not only the 3 sections that happen to be named in this sentence), EXCEPT shares_out and depreciation_pct_gross_block, is a REFERENCE/DISPLAY snapshot only — no other sheet reads it. Give these rows ONLY "link"/"historical" (numbers straight from the data). Do NOT give them a "forecast" array or a "formula", and above all do NOT invent a growth-rate key like "{A:long_term_debt_growth}" or a cross-sheet pull like "{S:pnl.dividends}"/"{S:pnl.revenue}"/"{S:pnl.cogs}"/"{S:capex.capex_total}" for them — none of those keys exist anywhere (the real ones are net_revenue, not revenue; capex, not capex_total; there is no separate "cf" sheet at all, cash flow lives on capex; and there is no "cogs" or "dividends" row exposed by any sheet), and referencing an invented one resolves to a visible #MISSING error. The Balance Sheet sheet is the ACTUAL, correctly-forecast source for every one of these line items (receivables, inventory, payables, provisions, borrowings, investments) — leaving these rows historical-only here causes them to display a sensible flat continuation automatically, which is the correct behavior for a reference snapshot.\nSHARES OUTSTANDING UNIT — shares_out MUST be expressed in CRORES OF SHARES, consistent with every other figure in this model being in Rs Crores (e.g. a company with 676 crore shares outstanding — 6.76 billion / 6,760 million shares — must show shares_out = 676, NOT 6760000000, NOT 6760, NOT 6.76). If the source data reports the share count in millions or as a raw absolute count, CONVERT it yourself (crore = raw_count / 1e7 = million_count / 10) before writing shares_out. Only ONE row may describe share count (key="shares_out") — do not also add a separate informational "shares outstanding" row.\nYou MUST include rows keyed EXACTLY, with a value in every one of the ${HIST_YEARS + FC_YEARS} year cells: shares_out (source citation REQUIRED), depreciation_pct_gross_block (no source citation needed, this comes from the fixed-asset roll-forward, not market data). You MUST ALSO include face_value as its OWN row (key=face_value, source citation REQUIRED) — do NOT fold it into shares_out or omit it; if COMPANY BASIC INFO above gave you a real fetched face value, use it EXACTLY (never default to a generic value like Rs 10 without checking — that is frequently wrong). Be thorough (20-30 rows including section headers).`,
                     STATIC_MODEL),
                 callLLM("Assumptions (Judgment)",
-                    `${periodsNote}\n\n${GRAMMAR}\n\n${assumSchema}\n\n${finBlockJudgment}${qualBlock}${wcDaysNote}${valuationChartNote}\nYou are the equity analyst responsible for forecasting ${companyName}. You have the company's financial history, its qualitative disclosures (earnings calls, broker research, management commentary), and its recent operational data. Form a genuine, evidence-based view on where this business is headed, and translate that view into the specific rows below — read the qualitative sources the way an analyst actually would: weigh what management is guiding against what the numbers already show, note where guidance seems optimistic or conservative relative to the company's own recent trend, and let that judgment show up in the shape of your forecast (a tapering growth curve, a margin path reflecting a stated cost initiative, a WACC that reflects the company's actual risk profile). For every row that reflects a real judgment call — not a plain transcription — fill "rationale" with the specific evidence behind it: this becomes a note on the cell for whoever reviews the model, so write it for that reader, not as a formality.\nThis call covers ONLY these sections (a separate call handles share capital/debt/fixed-asset/investment/working-capital-balance transcription, so do NOT include those here): CAPEX (capex-as-%-of-revenue as a RATIO driver ONLY — key=capex_pct_revenue; do NOT put an absolute-rupee "capex" amount on this sheet — this sheet has no revenue row to multiply against, so a same-sheet reference for it would silently resolve to 0; the Capex & FCF sheet computes the actual rupee capex from this ratio via {S:pnl.net_revenue}), WORKING CAPITAL DRIVERS (debtor_days, inventory_days, payable_days, min_cash_pct_revenue — a minimum operating-cash buffer as a decimal fraction of revenue), OTHER INCOME, P&L DRIVERS (revenue growth, EBITDA margin, tax rate, dividend payout), VALUATION & WACC INPUTS, and HOLDING/CONGLOMERATE STRUCTURE (key=holding_discount — see below).\nHOLDING_DISCOUNT — a decimal fraction (e.g. 0.15 for a 15% discount) applied later to the DCF's equity value, reflecting the market's tendency to value a genuinely diversified conglomerate (e.g. a single listed entity spanning steel, power, oil, and other substantially UNRELATED businesses, each better benchmarked against its own pure-play peers) below the sum of its parts. Decide this from the Operational data's own segment breakdown and the qualitative sources — do NOT apply a discount just because a company has multiple product lines within ONE coherent business (e.g. different steel products, or domestic vs export sales of the same business), only when the segments are genuinely DIFFERENT businesses an investor would otherwise value separately. Set holding_discount to EXACTLY 0 (not blank) for a single-business company — this key must always have a value, never left out. Typical range when it does apply: 0.10-0.30. Requires "source" AND "rationale" explaining WHY (e.g. "Diversified steel/power/oil conglomerate — no pure-play peer spans all three segments" or "Single-business steel producer — no holding discount applicable").${brokerReportText ? `\nBROKER TARGET PRICE — the BROKER / ANALYST REPORTS section above contains real broker commentary. If it states an explicit numeric target price (if multiple are given, use their AVERAGE), include an ADDITIONAL row key=broker_target_price with that value (repeated across every cell, same convention as any other constant global input) and a "source" citation identifying the broker/report. If no explicit numeric target price is stated anywhere in that material, OMIT this row entirely — do NOT guess, estimate, or derive one yourself.\n` : ""}\nWORKING-CAPITAL DAYS — HISTORICALS ARE REAL DATA, NOT A GUESS — unlike most rows on this sheet, debtor_days/inventory_days/payable_days are REPORTED facts for past years (see WORKING CAPITAL DAYS above, if given) — treat them the same way you'd treat Revenue or PAT: transcribe the real historical figure, don't derive or estimate it. Give each of the three a genuine "historical" array for every year listed above, not a flat guess.\nWORKING-CAPITAL DAYS MUST ANCHOR TO THE LAST ACTUAL — debtor_days/inventory_days/payable_days each drive a Balance Sheet formula of days/365*revenue starting in the FIRST forecast year, but the Balance Sheet's LAST HISTORICAL year uses the REAL reported receivables/inventory/payables figure — a different basis. If your first forecast value ignores what the last reported balance sheet implies, that year's receivables/inventory/payables JUMPS discontinuously, producing an artificial one-off working-capital swing that distorts FCFF and the DCF — this has actually happened (a bogus ~₹69,000 Cr working-capital "change" flipped FCFF and value per share negative). Set each driver's FIRST forecast value to (very close to) its own LAST HISTORICAL day-count, THEN taper across the remaining years per the reasoning below. NOTE: this anchor is also enforced in code afterward as a safety net when live sc_year_data is available for this company — but get it right here too. Express percentages as decimals.\nOPERATING DRIVER PATHS — revenue_growth, ebitda_margin, capex_pct_revenue, debtor_days, inventory_days, and payable_days genuinely change year to year as a business matures or executes on stated plans. For each, decide from the qualitative evidence whether it should accelerate, decelerate, or hold steady, and let your 5-year forecast array reflect that reasoning (e.g. growth tapering from a higher near-term rate toward a sustainable long-run rate; margins drifting toward a normalized level; capex intensity easing as a build-out completes). A single flat value repeated across all 5 cells is essentially never the right answer for these six drivers — if you find yourself writing the same number five times, you haven't actually reasoned through the trajectory yet. WACC, beta, risk_free_rate, equity_risk_premium, cost_of_debt, terminal_growth, tax_rate, target_pe, and target_ev_ebitda are different: those are one considered judgment, held constant across the years, not a path.\nYour analysis needs to produce a considered view on: tax_rate, pat_retention, wacc, terminal_growth, risk_free_rate, equity_risk_premium, beta, cost_of_debt, target_pe (see HISTORICAL TRADING MULTIPLES above if given — anchor to this company's own real trading range, not a generic multiple), target_ev_ebitda (same — anchor to HISTORICAL TRADING MULTIPLES above if given), holding_discount (see above — 0 is a valid, common value, but the row and its citation are still required) — constant global inputs, so repeat the same value in every one of the ${HIST_YEARS + FC_YEARS} year cells, each with a "source" citation. You must ALSO produce: capex_pct_revenue (decimal fraction of revenue, e.g. 0.14 for 14%), debtor_days, inventory_days, payable_days (in DAYS, e.g. 45, not decimals), min_cash_pct_revenue (decimal fraction of revenue, e.g. 0.03 for 3% — set from the company's own historical average cash/revenue ratio), revenue_growth (see REVENUE GROWTH GROUNDING below), ebitda_margin (the TOTAL-COMPANY forward call, as decimals — the Operational Model references these EXACT keys for every segment's forecast since it has no way to know segment-specific splits; one blended company-wide rate is the deliberate, honest simplification here, not a bug). Use these EXACT keys so the rest of the model can find your work.\nREVENUE GROWTH GROUNDING — the Key Financials table above includes the company's own actual historical "% Change YoY" revenue growth row for every reported year. Read that real trajectory before setting revenue_growth's forecast path: note the underlying trend once you look past one-off spikes or drops (e.g. a low base year mechanically inflating the next year's % change, or a demerger/acquisition step-change that doesn't represent organic growth), and anchor your forecast near that trend rather than a generic industry-average growth rate. If a forecast year deliberately departs from the historical trend (e.g. tapering down from an unsustainable recent spike, or stepping up on a stated capacity expansion), say so explicitly in "rationale" — cite the actual historical % Change YoY figures you're comparing against.\nMARGIN / TAX / PAYOUT GROUNDING — the same real-history-first approach applies to ebitda_margin, tax_rate, and pat_retention: the Key Financials table gives you the raw historical rows needed to compute each one's actual trend for every reported year — EBITDA and Revenue (or an EBITDA Margin % row, if the sheet already provides one directly) for ebitda_margin; PBT and Tax (or an effective tax rate row) for tax_rate; PAT and DPS/dividend (or a payout ratio row) for pat_retention = 1 − payout ratio. Work out that historical ratio yourself for each reported year, identify the real trend (stable, expanding, normalizing toward a stated statutory rate for tax_rate, etc.), and anchor your forecast path near it rather than picking a generic sector-typical figure. Where a forecast value deliberately departs from the historical trend (e.g. margin expansion from a stated cost initiative, tax_rate stepping toward the statutory rate as a tax holiday expires), say so explicitly in "rationale" — cite the actual historical figures/ratio you derived.\nCONSENSUS ESTIMATE COLUMNS — the Key Financials table above frequently extends a few years PAST the last actual year with columns labelled "FYxxxxE" (e.g. FY2027E, FY2028E) — these are the data vendor's OWN already-computed analyst/consensus estimates for Revenue, EBITDA, PAT, EPS etc., not something you need to derive from scratch, and not your own historical transcription. For every forecast year these columns cover, treat the implied consensus growth/margin path as a genuine data point to weigh — the same way you'd weigh a broker report — alongside the historical trend and the qualitative sources, rather than deriving revenue_growth/ebitda_margin/tax_rate/pat_retention as if this consensus view didn't exist. You are not required to match consensus exactly (your own read of the qualitative evidence may reasonably differ), but if your own forecast diverges MEANINGFULLY from what these columns imply for the same year, say so explicitly in "rationale" and give the specific reason (e.g. "Consensus FY2027E implies ~18% revenue growth; held to 22% given the qualitative sources' more specific guidance on the new segment's ramp-up" or "Broadly in line with the FY2027E consensus column implying a ~15.5% EBITDA margin"). Silently ignoring an available consensus figure that contradicts your own estimate is a bigger red flag than disagreeing with it for a stated reason.\nThree hard constraints, regardless of the judgment above — these aren't about realism, they break the model mechanically if violated:\n1. wacc MUST exceed terminal_growth by at least 1.5 percentage points (typical: wacc approx 0.11-0.14, terminal_growth approx 0.03-0.05) — otherwise the DCF terminal-value division approaches zero.\n2. min_cash_pct_revenue must be a positive decimal in every one of the ${HIST_YEARS + FC_YEARS} year cells, never 0 or blank — the Balance Sheet's revolver formula divides the whole forecast's cash-balancing logic on this key, and a 0/blank here silently disables the safeguard against negative forecast cash.\n3. Sanity-check scale before finalizing: if any per-share-driven figure is off by an order of magnitude from what the company's size implies, you have a unit mismatch — fix it. Also don't let a genuinely capex-heavy, debt-carrying company deleverage all the way to NET CASH within the forecast window unless the data clearly supports it (that unrealistically collapses forecast interest expense toward zero) — if the company is guiding continued heavy investment, keep capex_pct_revenue and payout high enough that net debt stays realistic.\nBe thorough (15-20 rows including section headers).`,
-                    DYNAMIC_MODEL, 40000)
+                    `${periodsNote}\n\n${GRAMMAR}\n\n${assumSchema}\n\n${finBlockJudgment}${qualBlock}${wcDaysNote}${valuationChartNote}\nYou are the equity analyst responsible for forecasting ${companyName}. You have the company's financial history, its qualitative disclosures (earnings calls, broker research, management commentary), and its recent operational data. Form a genuine, evidence-based view on where this business is headed, and translate that view into the specific rows below — read the qualitative sources the way an analyst actually would: weigh what management is guiding against what the numbers already show, note where guidance seems optimistic or conservative relative to the company's own recent trend, and let that judgment show up in the shape of your forecast (a tapering growth curve, a margin path reflecting a stated cost initiative, a WACC that reflects the company's actual risk profile). For every row that reflects a real judgment call — not a plain transcription — fill "rationale" with the specific evidence behind it: this becomes a note on the cell for whoever reviews the model, so write it for that reader, not as a formality.\nThis call covers ONLY these sections (a separate call handles share capital/debt/fixed-asset/investment/working-capital-balance transcription, so do NOT include those here): CAPEX (capex-as-%-of-revenue as a RATIO driver ONLY — key=capex_pct_revenue; do NOT put an absolute-rupee "capex" amount on this sheet — this sheet has no revenue row to multiply against, so a same-sheet reference for it would silently resolve to 0; the Capex & FCF sheet computes the actual rupee capex from this ratio via {S:pnl.net_revenue}), WORKING CAPITAL DRIVERS (debtor_days, inventory_days, payable_days, min_cash_pct_revenue — a minimum operating-cash buffer as a decimal fraction of revenue), OTHER INCOME, P&L DRIVERS (revenue growth, EBITDA margin, tax rate, dividend payout), VALUATION & WACC INPUTS, and HOLDING/CONGLOMERATE STRUCTURE (key=holding_discount — see below).\nHOLDING_DISCOUNT — a decimal fraction (e.g. 0.15 for a 15% discount) applied later to the DCF's equity value, reflecting the market's tendency to value a genuinely diversified conglomerate (e.g. a single listed entity spanning steel, power, oil, and other substantially UNRELATED businesses, each better benchmarked against its own pure-play peers) below the sum of its parts. Decide this from the Operational data's own segment breakdown and the qualitative sources — do NOT apply a discount just because a company has multiple product lines within ONE coherent business (e.g. different steel products, or domestic vs export sales of the same business), only when the segments are genuinely DIFFERENT businesses an investor would otherwise value separately. Set holding_discount to EXACTLY 0 (not blank) for a single-business company — this key must always have a value, never left out. Typical range when it does apply: 0.10-0.30. Requires "source" AND "rationale" explaining WHY (e.g. "Diversified steel/power/oil conglomerate — no pure-play peer spans all three segments" or "Single-business steel producer — no holding discount applicable"). NOTE: a separate, dedicated pass (not this call) may ALSO derive genuine segment-specific growth/margin/capex/multiple assumptions from the company's real reported segment breakdown when one exists — if that happens, this discount is layered on TOP of an already-correct sum-of-the-parts valuation, so it should reflect only a genuine RESIDUAL (illiquidity, governance/related-party complexity, cross-holding structure) rather than trying to correct for a blending distortion — set it using your own best judgment as described above regardless; you do not need to predict whether that separate pass will fire for this company.${brokerReportText ? `\nBROKER TARGET PRICE — the BROKER / ANALYST REPORTS section above contains real broker commentary. If it states an explicit numeric target price (if multiple are given, use their AVERAGE), include an ADDITIONAL row key=broker_target_price with that value (repeated across every cell, same convention as any other constant global input) and a "source" citation identifying the broker/report. If no explicit numeric target price is stated anywhere in that material, OMIT this row entirely — do NOT guess, estimate, or derive one yourself.\n` : ""}\nWORKING-CAPITAL DAYS — HISTORICALS ARE REAL DATA, NOT A GUESS — unlike most rows on this sheet, debtor_days/inventory_days/payable_days are REPORTED facts for past years (see WORKING CAPITAL DAYS above, if given) — treat them the same way you'd treat Revenue or PAT: transcribe the real historical figure, don't derive or estimate it. Give each of the three a genuine "historical" array for every year listed above, not a flat guess.\nWORKING-CAPITAL DAYS MUST ANCHOR TO THE LAST ACTUAL — debtor_days/inventory_days/payable_days each drive a Balance Sheet formula of days/365*revenue starting in the FIRST forecast year, but the Balance Sheet's LAST HISTORICAL year uses the REAL reported receivables/inventory/payables figure — a different basis. If your first forecast value ignores what the last reported balance sheet implies, that year's receivables/inventory/payables JUMPS discontinuously, producing an artificial one-off working-capital swing that distorts FCFF and the DCF — this has actually happened (a bogus ~₹69,000 Cr working-capital "change" flipped FCFF and value per share negative). Set each driver's FIRST forecast value to (very close to) its own LAST HISTORICAL day-count, THEN taper across the remaining years per the reasoning below. NOTE: this anchor is also enforced in code afterward as a safety net when live sc_year_data is available for this company — but get it right here too. Express percentages as decimals.\nOPERATING DRIVER PATHS — revenue_growth, ebitda_margin, capex_pct_revenue, debtor_days, inventory_days, and payable_days genuinely change year to year as a business matures or executes on stated plans. For each, decide from the qualitative evidence whether it should accelerate, decelerate, or hold steady, and let your 5-year forecast array reflect that reasoning (e.g. growth tapering from a higher near-term rate toward a sustainable long-run rate; margins drifting toward a normalized level; capex intensity easing as a build-out completes). A single flat value repeated across all 5 cells is essentially never the right answer for these six drivers — if you find yourself writing the same number five times, you haven't actually reasoned through the trajectory yet. WACC, beta, risk_free_rate, equity_risk_premium, cost_of_debt, terminal_growth, tax_rate, target_pe, and target_ev_ebitda are different: those are one considered judgment, held constant across the years, not a path.\nYour analysis needs to produce a considered view on: tax_rate, pat_retention, wacc, terminal_growth, risk_free_rate, equity_risk_premium, beta, cost_of_debt, target_pe (see HISTORICAL TRADING MULTIPLES above if given — anchor to this company's own real trading range, not a generic multiple), target_ev_ebitda (same — anchor to HISTORICAL TRADING MULTIPLES above if given), holding_discount (see above — 0 is a valid, common value, but the row and its citation are still required) — constant global inputs, so repeat the same value in every one of the ${HIST_YEARS + FC_YEARS} year cells, each with a "source" citation. You must ALSO produce: capex_pct_revenue (decimal fraction of revenue, e.g. 0.14 for 14%), debtor_days, inventory_days, payable_days (in DAYS, e.g. 45, not decimals), min_cash_pct_revenue (decimal fraction of revenue, e.g. 0.03 for 3% — set from the company's own historical average cash/revenue ratio), revenue_growth (see REVENUE GROWTH GROUNDING below), ebitda_margin (the TOTAL-COMPANY forward call, as decimals — the Operational Model references this EXACT key for the total and for any segment that a separate segment-driver pass (see NOTE above) did not size individually; one blended company-wide rate is the deliberate, honest simplification here, not a bug). Use these EXACT keys so the rest of the model can find your work.\nREVENUE GROWTH GROUNDING — the Key Financials table above includes the company's own actual historical "% Change YoY" revenue growth row for every reported year. Read that real trajectory before setting revenue_growth's forecast path: note the underlying trend once you look past one-off spikes or drops (e.g. a low base year mechanically inflating the next year's % change, or a demerger/acquisition step-change that doesn't represent organic growth), and anchor your forecast near that trend rather than a generic industry-average growth rate. If a forecast year deliberately departs from the historical trend (e.g. tapering down from an unsustainable recent spike, or stepping up on a stated capacity expansion), say so explicitly in "rationale" — cite the actual historical % Change YoY figures you're comparing against.\nMARGIN / TAX / PAYOUT GROUNDING — the same real-history-first approach applies to ebitda_margin, tax_rate, and pat_retention: the Key Financials table gives you the raw historical rows needed to compute each one's actual trend for every reported year — EBITDA and Revenue (or an EBITDA Margin % row, if the sheet already provides one directly) for ebitda_margin; PBT and Tax (or an effective tax rate row) for tax_rate; PAT and DPS/dividend (or a payout ratio row) for pat_retention = 1 − payout ratio. Work out that historical ratio yourself for each reported year, identify the real trend (stable, expanding, normalizing toward a stated statutory rate for tax_rate, etc.), and anchor your forecast path near it rather than picking a generic sector-typical figure. Where a forecast value deliberately departs from the historical trend (e.g. margin expansion from a stated cost initiative, tax_rate stepping toward the statutory rate as a tax holiday expires), say so explicitly in "rationale" — cite the actual historical figures/ratio you derived.\nCONSENSUS ESTIMATE COLUMNS — the Key Financials table above frequently extends a few years PAST the last actual year with columns labelled "FYxxxxE" (e.g. FY2027E, FY2028E) — these are the data vendor's OWN already-computed analyst/consensus estimates for Revenue, EBITDA, PAT, EPS etc., not something you need to derive from scratch, and not your own historical transcription. For every forecast year these columns cover, treat the implied consensus growth/margin path as a genuine data point to weigh — the same way you'd weigh a broker report — alongside the historical trend and the qualitative sources, rather than deriving revenue_growth/ebitda_margin/tax_rate/pat_retention as if this consensus view didn't exist. You are not required to match consensus exactly (your own read of the qualitative evidence may reasonably differ), but if your own forecast diverges MEANINGFULLY from what these columns imply for the same year, say so explicitly in "rationale" and give the specific reason (e.g. "Consensus FY2027E implies ~18% revenue growth; held to 22% given the qualitative sources' more specific guidance on the new segment's ramp-up" or "Broadly in line with the FY2027E consensus column implying a ~15.5% EBITDA margin"). Silently ignoring an available consensus figure that contradicts your own estimate is a bigger red flag than disagreeing with it for a stated reason.\nThree hard constraints, regardless of the judgment above — these aren't about realism, they break the model mechanically if violated:\n1. wacc MUST exceed terminal_growth by at least 1.5 percentage points (typical: wacc approx 0.11-0.14, terminal_growth approx 0.03-0.05) — otherwise the DCF terminal-value division approaches zero.\n2. min_cash_pct_revenue must be a positive decimal in every one of the ${HIST_YEARS + FC_YEARS} year cells, never 0 or blank — the Balance Sheet's revolver formula divides the whole forecast's cash-balancing logic on this key, and a 0/blank here silently disables the safeguard against negative forecast cash.\n3. Sanity-check scale before finalizing: if any per-share-driven figure is off by an order of magnitude from what the company's size implies, you have a unit mismatch — fix it. Also don't let a genuinely capex-heavy, debt-carrying company deleverage all the way to NET CASH within the forecast window unless the data clearly supports it (that unrealistically collapses forecast interest expense toward zero) — if the company is guiding continued heavy investment, keep capex_pct_revenue and payout high enough that net debt stays realistic.\nBe thorough (15-20 rows including section headers).`,
+                    DYNAMIC_MODEL, 40000),
+                // Skipped entirely (no network call) when there weren't even 2 candidate segments to
+                // consider — Promise.resolve keeps this slot's shape identical either way, so the
+                // destructuring below doesn't need its own branch.
+                wantSegmentDriversCall
+                    ? callLLM("Segment Drivers", segmentDriversPrompt, DYNAMIC_MODEL, 20000)
+                    : Promise.resolve({ rows: [] }),
             ]);
             const assumRows = [
                 ...(Array.isArray(structJson.rows) ? structJson.rows : []),
-                ...(Array.isArray(judgJson.rows) ? judgJson.rows : [])
+                ...(Array.isArray(judgJson.rows) ? judgJson.rows : []),
+                ...(Array.isArray(segDriversJson.rows) ? segDriversJson.rows : [])
             ];
             // target_ev_ebitda is one of the mandatory "constant global input" keys the
             // Assumptions (Judgment) prompt already asks for explicitly — but compliance isn't
@@ -2661,6 +3018,117 @@ The sheet is laid out ACROSS YEARS (columns ${periodLabels.join(", ")}). Other s
                     });
                 } else {
                     console.warn("[AI Model] target_ev_ebitda was not provided by the model and no reported EV/EBITDA figure was found to derive a fallback from — val.target_price_ev_ebitda (and the blended target_price averaging it) will be left blank. Verify manually.");
+                }
+            }
+            // ── Percent-row unit guard — whole-number percentage written where a DECIMAL was asked for ──
+            // Every %-formatted row in this model is supposed to hold a DECIMAL FRACTION (0.22 for
+            // 22%) — the row schema, the Assumptions prompt, and DATA_BASIS_NOTE all state that
+            // explicitly ("0.069 for 6.9%, never 6.9"). The model still periodically writes the
+            // whole-number form anyway, and since the cell carries a "0.0%" number format, Excel
+            // then renders it ×100. Observed live: a revenue_growth the model had correctly reasoned
+            // to 22% in its own rationale text was written as 22 and displayed as 2200%, which then
+            // compounded through every forecast year of the model.
+            // Detected PER ROW (the slip is systematic across a row, never a single stray cell) and
+            // only above a threshold where the two readings can't be confused: 1.5 = 150%, which no
+            // margin, tax rate, retention, WACC or terminal-growth figure can legitimately reach,
+            // and which a sustained revenue-growth assumption essentially never does — while a
+            // genuine decimal (≤1.0, i.e. ≤100%) is never touched. Deliberately conservative: it
+            // would rather miss an exotic 120%-growth row than corrupt a correct one.
+            const PERCENT_UNIT_THRESHOLD = 1.5;
+            const normalizePercentRows = (sheetLabel, rows) => {
+                for (const item of rows) {
+                    if (!item || item.section || !/%/.test(item.fmt || "")) continue;
+                    const arrays = [item.historical, item.forecast].filter(Array.isArray);
+                    const hasScalar = typeof item.value === "number" && isFinite(item.value);
+                    const values = arrays.flat().filter(v => typeof v === "number" && isFinite(v));
+                    if (hasScalar) values.push(item.value);
+                    if (!values.length) continue; // pure-formula row (roe/roce/margins) — nothing hardcoded to fix
+                    const peak = Math.max(...values.map(Math.abs));
+                    if (peak < PERCENT_UNIT_THRESHOLD) continue;
+                    for (const arr of arrays) {
+                        for (let i = 0; i < arr.length; i++) {
+                            if (typeof arr[i] === "number" && isFinite(arr[i])) arr[i] = arr[i] / 100;
+                        }
+                    }
+                    if (hasScalar) item.value = item.value / 100;
+                    console.warn(`[AI Model] ${sheetLabel}.${item.key || item.label} looks like a WHOLE-NUMBER percentage on a %-formatted row (largest |value| was ${peak}) — divided every cell by 100 so it reads as the decimal fraction the schema requires. Left as-is, Excel's "%" format would have rendered it ×100 (e.g. 22 → "2200%") and fed that into every downstream forecast.`);
+                }
+            };
+            normalizePercentRows("assum", assumRows);
+            // ── SOTP (sum-of-the-parts) segment detection ──
+            // Segment-specific driver rows (revenue_growth_<tag>, ebitda_margin_<tag>, etc.) now come
+            // from the dedicated "Segment Drivers" call above (segDriversJson, merged into assumRows
+            // already) — NOT from the Assumptions (Judgment) prompt, which no longer asks for them at
+            // all (see its NOTE on holding_discount). This scan just picks up whatever tags actually
+            // landed in assumRows, from whichever call(s) contributed rows to it, so nothing here
+            // needed to change when the segment-driver source moved. Consumed by the Operational
+            // Model / Capex / Valuation & DCF calls below. Every consumer of segmentTags/
+            // isSotpCompany MUST fall back to today's single-blended-DCF behavior when isSotpCompany
+            // is false — that fallback is what keeps every non-conglomerate company's model
+            // byte-identical to before this existed.
+            //
+            // Requires BOTH a matching revenue_growth_<tag> AND ebitda_margin_<tag> pair before
+            // trusting a tag as real — the Segment Drivers prompt asks for all four <tag> keys
+            // together, but LLM compliance with "always provide X" instructions is never guaranteed
+            // (see the target_ev_ebitda fallback immediately above, needed for exactly this reason),
+            // and a half-present segment (growth key but no margin key, or vice versa) is worse than
+            // no segment data at all — the downstream formula would resolve to #MISSING or silently 0.
+            const SEGMENT_KEY_RE = /^revenue_growth_(.+)$/;
+            const segmentTags = assumRows
+                .filter(r => r && typeof r.key === "string" && SEGMENT_KEY_RE.test(r.key))
+                .map(r => r.key.match(SEGMENT_KEY_RE)[1])
+                .filter(tag => assumRows.some(r => r && r.key === `ebitda_margin_${tag}`));
+            const holdingDiscountRow = assumRows.find(r => r && r.key === "holding_discount");
+            const holdingDiscountVal = holdingDiscountRow
+                ? Number((Array.isArray(holdingDiscountRow.forecast) && holdingDiscountRow.forecast[0])
+                    ?? (Array.isArray(holdingDiscountRow.historical) && holdingDiscountRow.historical[0])
+                    ?? holdingDiscountRow.value ?? 0)
+                : 0;
+            // Require BOTH signals to agree before treating this as a genuine SOTP company — either
+            // one alone being "wrong" (holding_discount>0 but no usable segment keys emitted, or
+            // segment keys present despite holding_discount=0) falls back to the safe default
+            // instead of attempting a partial/inconsistent segment build.
+            const isSotpCompany = segmentTags.length >= 2 && holdingDiscountVal > 0;
+            if (holdingDiscountVal > 0 && segmentTags.length < 2) {
+                console.warn(`[AI Model] holding_discount=${holdingDiscountVal} (genuine conglomerate) but fewer than 2 usable segment-keyed driver pairs were provided (found: ${segmentTags.join(", ") || "none"}) — falling back to the single blended DCF for this run.`);
+            }
+            if (isSotpCompany) console.log(`[AI Model] SOTP segments detected: ${segmentTags.join(", ")}`);
+            // Per-segment fallbacks for capex_pct_revenue_<tag> and target_ev_ebitda_<tag> — unlike
+            // revenue_growth_<tag>/ebitda_margin_<tag> (which GATE whether a tag counts as a real
+            // segment at all, see segmentTags above), these two are only referenced by ONE row each
+            // (buildSegmentCapexRows' capex_<tag>, and the Valuation sheet's sotp_ev_<tag>) — a
+            // segment missing just one of these shouldn't take the whole segment (or, worse, the
+            // whole capex/SOTP-EV SUM formula, which would inherit a #MISSING from any one term)
+            // down with it. Falls back to the already-guaranteed company-wide blended value for
+            // that ONE key on that ONE segment, same reasoning as the company-level target_ev_ebitda
+            // fallback above.
+            if (isSotpCompany) {
+                const companyCapexPct = assumRows.find(r => r && r.key === "capex_pct_revenue");
+                const companyTargetEvEbitda = assumRows.find(r => r && r.key === "target_ev_ebitda");
+                const scalarLikeValue = (row) => row && ((row.scalar ? row.value : null)
+                    ?? (Array.isArray(row.forecast) && row.forecast[0])
+                    ?? (Array.isArray(row.historical) && row.historical[0]));
+                for (const tag of segmentTags) {
+                    const capexKey = `capex_pct_revenue_${tag}`;
+                    if (!assumRows.some(r => r && r.key === capexKey)) {
+                        const val = scalarLikeValue(companyCapexPct);
+                        if (typeof val === "number" && isFinite(val)) {
+                            assumRows.push({ key: capexKey, label: `Capex / Revenue — ${tag} (%)`, fmt: "0.0%", input: true, historical: new Array(HIST_YEARS).fill(val), forecast: new Array(FC_YEARS).fill(val), source: "Fallback — Segment Drivers call did not size this segment's own capex intensity; using the company-wide capex_pct_revenue instead" });
+                            console.warn(`[AI Model] ${capexKey} was not provided — falling back to the company-wide capex_pct_revenue (${val}) for this segment.`);
+                        } else {
+                            console.warn(`[AI Model] ${capexKey} was not provided and no company-wide capex_pct_revenue fallback value was available either — this segment's capex row will show #MISSING.`);
+                        }
+                    }
+                    const evKey = `target_ev_ebitda_${tag}`;
+                    if (!assumRows.some(r => r && r.key === evKey)) {
+                        const val = scalarLikeValue(companyTargetEvEbitda);
+                        if (typeof val === "number" && isFinite(val)) {
+                            assumRows.push({ key: evKey, label: `Target EV/EBITDA — ${tag} (x)`, fmt: "0.00", scalar: true, value: val, source: "Fallback — Segment Drivers call did not provide this segment's own target multiple; using the company-wide target_ev_ebitda instead" });
+                            console.warn(`[AI Model] ${evKey} was not provided — falling back to the company-wide target_ev_ebitda (${val}) for this segment's SOTP EV term.`);
+                        } else {
+                            console.warn(`[AI Model] ${evKey} was not provided and no company-wide target_ev_ebitda fallback value was available either — this segment's SOTP EV term will show #MISSING.`);
+                        }
+                    }
                 }
             }
             // Single-fact market/valuation inputs (tax rate, WACC, beta, target multiples, etc.)
@@ -2811,6 +3279,87 @@ PURE-FORMULA ROWS — when this prompt gives you the COMPLETE formula for a row 
                 return { link: entry.label, historical };
             };
 
+            // ── Deterministic per-segment revenue/EBITDA lookup from the operational dashboard ──
+            // Same spirit as lookupHistoricalByLabel above (resolve real historicals in code rather
+            // than trust an LLM transcription), but against operationalSections instead of Key
+            // Financials — segment revenue only exists in the dashboard's own segment disclosures,
+            // never as a financial-statement line item.
+            //
+            // The candidate set has to be filtered hard before matching, because a single segment
+            // carries many rows whose label contains "revenue" but which are NOT its rupee revenue
+            // (verified against real Piramal Pharma data): percentage splits ("CDMO Revenue by
+            // Customer Type (FY26) — Generics", unit "%"), foreign-currency figures ("Revenue from
+            // ADC services", unit "US$Mn"), and quarterly prints ("CHG Revenue (Quarterly)",
+            // periods "Q1 FY26"). Requiring unit=Cr + a non-quarterly label + clean annual FY
+            // period labels narrows it to the handful of genuine segment revenue rows.
+            const normSeg = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
+            // Annual fiscal-year column labels ONLY. Deliberately strict: the same sections also
+            // carry "Q1 FY26", "9MFY25", "H2 FY26", "FY24-26", "Mar'24", "31-Mar-25" and
+            // "5 Years Ago", none of which are a full-year figure this model can use.
+            const parseAnnualFY = (label) => {
+                const m = /^fy\s*(\d{2}|\d{4})$/i.exec(String(label || "").trim());
+                if (!m) return null;
+                const y = parseInt(m[1], 10);
+                return y < 100 ? 2000 + y : y;
+            };
+            // Strips the boilerplate off a metric label so "CDMO Revenue — None" reduces to just
+            // "cdmo" — the segment's own name — which is what gets compared against the tag. The
+            // trailing "— None"/"— Total" is how this feed marks an unsplit total row.
+            const revenueSubject = (metric) => normSeg(metric)
+                .replace(/\bquarterly\b/g, " ")
+                .replace(/\brevenues?\b/g, " ")
+                .replace(/\b(none|total)\b/g, " ")
+                .replace(/\s+/g, " ").trim();
+            const segmentAnnualSeries = (tag, kind) => {
+                if (!operationalSections.length) return null;
+                const tagNorm = normSeg(tag);
+                if (!tagNorm) return null;
+                const tagWords = tagNorm.split(" ").filter(Boolean);
+                const kindRe = kind === "ebitda" ? /\bebitda\b/i : /\brevenues?\b/i;
+                let best = null;
+                for (const section of operationalSections) {
+                    const fyByPeriod = new Map();
+                    for (const p of section.periods) {
+                        const fy = parseAnnualFY(p);
+                        if (fy != null) fyByPeriod.set(p, fy);
+                    }
+                    if (!fyByPeriod.size) continue; // quarterly/derived-period section — not usable here
+                    const sectionNorm = normSeg(section.name);
+                    for (const row of section.rows) {
+                        if (!kindRe.test(row.metric)) continue;
+                        if (/\bquarterly\b/i.test(row.metric)) continue;
+                        // Rupee-crore only — "%" splits and "US$Mn" figures are a different unit and
+                        // would be silently wrong if written into a Rs-Crore model.
+                        if (!/^(rs\.?\s*)?cr\.?$/i.test(String(row.unit || "").trim())) continue;
+                        const subject = revenueSubject(row.metric);
+                        // Tiering matters: a segment's own total ("CHG Revenue — None" -> subject
+                        // "chg") must outrank both a sibling brand row in the same section ("Power
+                        // Brands Revenue", subject "power brands") and any partial-label collision.
+                        let score = 0;
+                        if (subject === tagNorm) score = 100;                                   // exact: "chg" === "chg"
+                        else if (tagWords.every(w => subject.split(" ").includes(w))) score = 70; // every tag word present as a word
+                        else if (tagWords.every(w => sectionNorm.includes(w))) score = 40;        // tag identifies the SECTION, label differs
+                        else continue;
+                        // Prefer the row covering the most years this model actually needs.
+                        const values = HIST.map((fy) => {
+                            let v = null;
+                            for (const [p, pfy] of fyByPeriod) {
+                                if (pfy !== fy) continue;
+                                const raw = row.byPeriod[p];
+                                const n = parseNum(raw);
+                                if (n != null) { v = n; break; }
+                            }
+                            return v;
+                        });
+                        const covered = values.filter(v => v != null && v !== 0).length;
+                        if (!covered) continue;
+                        const rank = score * 1000 + covered;
+                        if (!best || rank > best.rank) best = { rank, values, covered, label: row.metric, section: section.name };
+                    }
+                }
+                return best;
+            };
+
             // Capex & FCF, generated entirely in code — first sheet converted this way. Every one of
             // its forecast formulas was ALREADY being dictated to the LLM verbatim (see the prompt
             // text this replaced), with no judgment call involved anywhere in it; only 2 of its 8
@@ -2849,20 +3398,110 @@ PURE-FORMULA ROWS — when this prompt gives you the COMPLETE formula for a row 
                 ];
             };
 
+            // SOTP variant of buildCapexRows above — ONLY called when isSotpCompany AND the
+            // Operational Model call actually delivered every expected segment revenue row (see
+            // opDeliveredSegments at the call site below). buildCapexRows itself is completely
+            // untouched, still the code path every non-SOTP company (and any SOTP company whose
+            // Operational output didn't come back as expected) runs through unchanged.
+            // Allocates capex PER SEGMENT off that segment's own capex_pct_revenue_<tag> against
+            // its own op.<tag>_revenue — replacing the single capex_pct_revenue applied to total
+            // consolidated revenue, which smeared a capex-heavy growth segment's intensity evenly
+            // across a mature segment that doesn't need anywhere near that much reinvestment. Total
+            // capex is DICTATED as the sum of the segment rows (never computed independently), so it
+            // can never silently diverge from the sum of its own parts — same principle as the
+            // Operational Model's net_revenue/ebitda totals above.
+            const buildSegmentCapexRows = () => {
+                const capexLink = lookupHistoricalByLabel(/capital\s*expenditure|purchase of (fixed|tangible) assets|^capex$/i);
+                const gbLink = lookupHistoricalByLabel(/gross\s*block|gross\s*fixed\s*assets/i);
+                if (!capexLink) console.warn("[AI Model] Capex & FCF (code-generated, SOTP): could not find a 'Capital Expenditure' label in Key Financials/Annual Data — capex historicals left blank; the forecast still computes correctly from the segment capex_pct_revenue_<tag> rows regardless.");
+                if (!gbLink) console.warn("[AI Model] Capex & FCF (code-generated, SOTP): could not find a 'Gross Block' label in Key Financials/Annual Data — gross_block historicals left blank, so its roll-forward forecast will start from 0 in the first forecast year until this is fixed manually.");
+
+                const capexSegKey = (tag) => `capex_${tag}`;
+                const allTags = [...segmentTags, "other_segments"];
+                const segmentCapexRows = allTags.map(tag => ({
+                    key: capexSegKey(tag),
+                    label: `Capex — ${tag === "other_segments" ? "Other Segments" : tag} (Rs Cr)`,
+                    fmt: "#,##0",
+                    // "other_segments" has no dedicated capex_pct_revenue_<tag> key (the Assumptions
+                    // call only tags genuinely distinct segments, not the catch-all) — it uses the
+                    // plain blended capex_pct_revenue key instead, same convention as its revenue/
+                    // EBITDA rows on the Operational Model sheet.
+                    formula: tag === "other_segments"
+                        ? `{A:capex_pct_revenue}*{S:op.other_segments_revenue}`
+                        : `{A:capex_pct_revenue_${tag}}*{S:op.${tag}_revenue}`,
+                }));
+                const capexSumFormula = allTags.map(t => `{R:${capexSegKey(t)}}`).join("+");
+
+                return [
+                    { section: "CAPEX & FREE CASH FLOW" },
+                    ...segmentCapexRows,
+                    {
+                        key: "capex", label: "Total Capex (Rs Cr)", fmt: "#,##0", cagr: true,
+                        link: capexLink ? capexLink.link : null,
+                        historical: capexLink ? capexLink.historical : new Array(HIST_YEARS).fill(null),
+                        formula: capexSumFormula,
+                    },
+                    { key: "capex_pct_revenue_actual", label: "Capex / Revenue (%)", fmt: "0.0%", formula: "{R:capex}/{S:pnl.net_revenue}" },
+                    { key: "ocf", label: "Operating Cash Flow (Rs Cr)", fmt: "#,##0", formula: "{S:pnl.ebitda}-{S:pnl.interest}-{S:pnl.tax}" },
+                    { key: "wc_change", label: "Change in Net Working Capital (Rs Cr)", fmt: "#,##0", formula: "{S:bs.net_working_capital}-{PS:bs.net_working_capital}" },
+                    { key: "fcf", label: "Free Cash Flow (levered) (Rs Cr)", fmt: "#,##0", cagr: true, formula: "{R:ocf}-{R:capex}" },
+                    {
+                        key: "gross_block", label: "Gross Block (Rs Cr)", fmt: "#,##0", cagr: true,
+                        link: gbLink ? gbLink.link : null,
+                        historical: gbLink ? gbLink.historical : new Array(HIST_YEARS).fill(null),
+                        formula: "{P:gross_block}+{R:capex}",
+                    },
+                    { key: "depreciation", label: "Depreciation (Rs Cr)", fmt: "#,##0", formula: "{S:pnl.depreciation}" },
+                ];
+            };
+
+            // SOTP-aware Operational Model prompt — ONLY for a genuine multi-segment conglomerate
+            // (isSotpCompany, see the segment-detection block above). Each detected segment gets its
+            // OWN revenue_growth_<tag>/ebitda_margin_<tag> keys (already resolved by the Assumptions
+            // (Judgment) call) instead of every segment sharing one blended rate, and net_revenue/
+            // ebitda are DICTATED as the exact sum of the segment rows (never left for the model to
+            // compute independently) so the total can never silently diverge from the sum of its own
+            // parts. Non-SOTP companies (the common case) get operationalModelPrompt assigned the
+            // EXACT SAME string this call has always sent — see the `:` branch below, copied
+            // verbatim — so nothing about their model changes.
+            const segRevKey = (tag) => `${tag}_revenue`;
+            const segEbitdaKey = (tag) => `${tag}_ebitda`;
+            const sotpRevenueSumFormula = [...segmentTags.map(segRevKey), "other_segments_revenue"].map(k => `{R:${k}}`).join("+");
+            const sotpEbitdaSumFormula = [...segmentTags.map(segEbitdaKey), "other_segments_ebitda"].map(k => `{R:${k}}`).join("+");
+            const sotpMandatoryKeys = ["net_revenue", "ebitda", ...segmentTags.flatMap(t => [segRevKey(t), segEbitdaKey(t)]), "other_segments_revenue", "other_segments_ebitda"].join(", ");
+            const operationalModelPrompt = isSotpCompany
+                ? `${periodsNote}\n\n${GRAMMAR}\n\n${CANON}\n\n${rowSchemaDoc}\n\nASSUMPTION KEYS:\n${assumKeyList}\n\n${finBlock}\nBuild the OPERATIONAL MODEL for ${companyName} as a SUM-OF-THE-PARTS segment breakdown — this company was determined to be a genuine multi-segment conglomerate (holding_discount > 0), so each segment below is forecast off its OWN dedicated growth/margin assumption instead of one company-wide blended rate.\nSEGMENTS AND THEIR DEDICATED KEYS — create ONE segment revenue/EBITDA row pair for EACH of these tags, using EXACTLY these row keys and formulas (do not rename, do not invent your own segment keys):\n${segmentTags.map(t => `- Segment "${t}": revenue row key="${segRevKey(t)}" (HISTORICAL: real reported figures for this segment from the OPERATIONAL DATA/segment disclosures above; FORECAST formula EXACTLY "{P:${segRevKey(t)}}*(1+{A:revenue_growth_${t}})"). EBITDA row key="${segEbitdaKey(t)}" (FORECAST formula EXACTLY "{R:${segRevKey(t)}}*{A:ebitda_margin_${t}}").`).join("\n")}\nOTHER SEGMENTS CATCH-ALL — the tagged segments above may not cover 100% of consolidated revenue (a residual/unallocated/corporate segment, or a minor business the Assumptions call didn't tag). You MUST ALSO include exactly ONE catch-all pair: revenue row key="other_segments_revenue" (HISTORICAL = total consolidated revenue for that year MINUS the sum of the tagged segments' revenue that same year — a small or near-zero number is fine if the tagged segments cover nearly everything; FORECAST formula EXACTLY "{P:other_segments_revenue}*(1+{A:revenue_growth})" — this ONE catch-all row uses the BLENDED company-wide keys, unlike every tagged segment above), EBITDA row key="other_segments_ebitda" (FORECAST formula EXACTLY "{R:other_segments_revenue}*{A:ebitda_margin}").\nTOTAL ROWS — the canonical TOTAL rows MUST use these EXACT dictated formulas, which SUM the segment rows above (do NOT invent your own, do NOT grow the total independently off the blended revenue_growth/ebitda_margin — that would let the total silently diverge from the sum of its own parts): net_revenue forecast = "${sotpRevenueSumFormula}", ebitda forecast = "${sotpEbitdaSumFormula}".\nOTHER DISCLOSURE ROWS — capacity, utilisation, volumes/throughput, realisations/ASP per segment, and cost-per-unit remain informational KPIs that do NOT feed revenue or EBITDA, same as always: each one's forecast MUST be a FLAT carry-forward of its last actual, written EXACTLY as "{P:<this row's own key>}". Do NOT attach a growth rate, and do NOT reference an invented assumption key — the ONLY {A:...} keys you may use are those in the ASSUMPTION KEYS list above. If you have no real driver for a KPI, a flat carry-forward IS the correct, honest forecast.\nNO BLANK FORECASTS — every assumption you reference via {A:...} must itself have a value in ALL ${HIST_YEARS + FC_YEARS} year columns, never left blank — a blank/missing forecast cell is read as ZERO by Excel and silently zeroes out everything downstream that multiplies by it.\nYou MUST include rows keyed exactly: ${sotpMandatoryKeys}.`
+                : `${periodsNote}\n\n${GRAMMAR}\n\n${CANON}\n\n${rowSchemaDoc}\n\nASSUMPTION KEYS:\n${assumKeyList}\n\n${finBlock}\nBuild the OPERATIONAL MODEL for ${companyName}, including a per-segment/product-line breakdown where the company reports one (e.g. by business segment). Capacity, utilisation, volumes/throughput, realisations/ASP per segment, and cost-per-unit are DISCLOSURE rows — informational KPIs that do NOT feed revenue or EBITDA. Each disclosure row's forecast MUST be a FLAT carry-forward of its last actual, written EXACTLY as "{P:<this row's own key>}". Do NOT attach a growth rate, and above all do NOT reference an invented assumption key such as "{A:jio_arpu_growth}" or "{A:o2c_production_growth}" — those keys do not exist (the ONLY {A:...} keys you may use are those in the ASSUMPTION KEYS list), so they render as a #MISSING error. If you have no real driver for a KPI, a flat carry-forward IS the correct, honest forecast.\nFORECASTING SEGMENT/TOTAL REVENUE AND EBITDA — do NOT compute forecast revenue by multiplying a forecast "volume" row by a forecast "realisation/ASP" row: those two drivers' units have repeatedly ended up mismatched (observed real failures: a 10x, a 100x, and a 1000x understatement on three different segments of the same company in one run, because volume and realisation were each forecast independently and their product no longer matched revenue's own actual unit scale). Instead, forecast each segment's (and the total's) revenue as a GROWTH-RATE recurrence anchored to its OWN historical actual level, which is unit-safe by construction since it only ever multiplies a real linked/historical figure by a dimensionless growth rate — e.g. segment revenue: "{P:segment_key}*(1+{A:revenue_growth})". Forecast segment EBITDA the same way, off a margin assumption applied to that segment's OWN revenue row: "{R:segment_key_revenue}*{A:ebitda_margin}". The canonical TOTAL rows MUST use these EXACT dictated formulas (do NOT invent your own): net_revenue forecast = "{P:net_revenue}*(1+{A:revenue_growth})", and ebitda forecast = "{R:net_revenue}*{A:ebitda_margin}" (revenue times the margin assumption — this equals the sum of the segments, since the SAME company-wide margin is applied to every segment). NEVER write a growth-style recurrence for the total EBITDA row such as "{P:ebitda}*(1+{A:ebitda_growth})" — there is NO "ebitda_growth" assumption key, so it resolves to a #MISSING error that poisons pnl.ebitda, the DCF, and every sheet pulling op.ebitda.\nUSE THE EXACT ASSUMPTION KEYS "revenue_growth" AND "ebitda_margin" FROM THE ASSUMPTION KEYS LIST ABOVE for every segment revenue/EBITDA row. The ONLY growth/margin keys that exist are revenue_growth and ebitda_margin; do NOT invent "segment_x_growth", "ebitda_growth", or any other {A:...} key — an invented key exists nowhere and resolves to a #MISSING error. Applying the SAME company-wide growth/margin to every segment is the correct, deliberate simplification here.\nNO BLANK FORECASTS — every assumption you reference via {A:...} (growth rates, EBITDA margins, etc.) must itself have a value in ALL ${HIST_YEARS + FC_YEARS} year columns, never left blank — a blank/missing forecast cell is read as ZERO by Excel and silently zeroes out everything downstream that multiplies by it (e.g. an EBITDA margin left blank makes segment EBITDA compute to 0 even though revenue is fine).\nYou MUST include rows keyed exactly: net_revenue, ebitda (and volume if applicable, informational only — not used to derive net_revenue).`;
+
+            // SOTP cross-check section for the Valuation & DCF prompt — ADDITIVE only: every row and
+            // formula in the existing DCF/target-price/WACC sections stays completely untouched for
+            // EVERY company (including SOTP ones — the blended DCF's value_per_share is left exactly
+            // as it's always been computed, so nothing existing changes meaning). For a genuine
+            // conglomerate this ONLY splices in one new section (3b) pricing each segment separately
+            // by its own target_ev_ebitda_<tag> multiple against its own forward EBITDA, summed to a
+            // sotp_value_per_share the user can compare against the blended DCF figure — this is the
+            // properly-priced sum-of-the-parts number Adani-style companies were missing. Nothing
+            // downstream (Summary Dashboard, sensitivity table) reads these new sotp_* keys, so if
+            // the model doesn't fully comply, the worst case is just a missing cross-check row — no
+            // cascading #MISSING risk into the DCF chain, unlike the Operational/Capex changes above.
+            const sotpSegEvKey = (tag) => `sotp_ev_${tag}`;
+            const sotpEvSumFormula = [...segmentTags.map(sotpSegEvKey), sotpSegEvKey("other_segments")].map(k => `{R:${k}}`).join("+");
+            const sotpValuationSection = isSotpCompany
+                ? `\n(3b) "SUM-OF-THE-PARTS VALUATION (segment cross-check)" — this company has genuinely distinct segments (see SEGMENT-SPECIFIC DRIVERS on Assumptions). The blended DCF above already reflects segment-level growth/margin/capex under the hood (via the Operational Model and Capex sheets), but THIS section prices the segments the way an equity analyst actually would for a conglomerate — separately, by segment-appropriate multiple — as a cross-check against the DCF's value_per_share, NOT a replacement for it. SCALAR rows:\n${segmentTags.map(t => `Segment EV — ${t} key=${sotpSegEvKey(t)} ("{FWD1:op.${segEbitdaKey(t)}}*{A:target_ev_ebitda_${t}}", fmt "#,##0" — this segment's own NEXT-YEAR EBITDA times ITS OWN target multiple, never the blended target_ev_ebitda).`).join("\n")}\nSegment EV — Other Segments key=${sotpSegEvKey("other_segments")} ("{FWD1:op.other_segments_ebitda}*{A:target_ev_ebitda}", fmt "#,##0" — this ONE catch-all uses the blended target_ev_ebitda, matching its Operational/Capex rows).\nSum-of-parts enterprise value key=sotp_ev ("${sotpEvSumFormula}", fmt "#,##0" — the SUM of every segment EV row above; do NOT compute this any other way).\nSum-of-parts equity value key=sotp_equity_value ("{R:sotp_ev}+{R:non_operating_assets}-{R:net_debt_last}" — reuse the SAME non_operating_assets/net_debt_last rows from section (3) above, do not recompute them).\nSum-of-parts value per share key=sotp_value_per_share ("{R:sotp_equity_value}/{CUR:assum.shares_out}", emphasis:"highlight").\nSum-of-parts upside key=sotp_upside ("{R:sotp_value_per_share}/{R:current_price}-1", fmt 0.0%).`
+                : "";
+            const valuationPrompt = `${periodsNote}\n\n${GRAMMAR}\n\n${VAL_GRAMMAR}\n\n${CANON}\n\nASSUMPTION KEYS:\n${assumKeyList}\n\n${finBlock}\nBuild a detailed VALUATION & DCF sheet for ${companyName}. Return JSON {"rows":[...]} with these sections (use {"section":"NAME"} dividers):\n(1) "RELATIVE VALUATION" — per-year live ratios: EPS key=eps ("{S:pnl.eps}"), BVPS key=bvps ("{S:bs.equity}/{A:shares_out}"), PER ("{SCALAR:current_price}/{R:eps}", fmt 0.0), P/BV ("{SCALAR:current_price}/{R:bvps}", 0.0), EV/EBITDA ("(({SCALAR:current_price}*{A:shares_out})+{S:bs.net_debt})/{S:pnl.ebitda}", 0.0), RoE ("{S:pnl.pat}/{S:bs.equity}", 0.0%), RoCE ("{S:pnl.ebit}/{S:bs.capital_employed}", 0.0%), Net debt/EBITDA ("{S:bs.net_debt}/{S:pnl.ebitda}", 0.00). current_price MUST be referenced via {SCALAR:current_price} here (a per-year row reading a single fixed fact), NEVER {A:current_price} — current_price is a scalar row on THIS sheet (see section 3), not a per-year row on Assumptions.\n(2) "DCF — FREE CASH FLOW TO FIRM" (every row "forecast_only":true): EBIT key=ebit ("{S:pnl.ebit}"), NOPAT key=nopat ("{R:ebit}*(1-{A:tax_rate})"), Add depreciation key=dep ("{S:pnl.depreciation}"), Less change in working capital key=wc_change ("{S:capex.wc_change}" — pull the SAME figure the Capex & FCF sheet computes; do NOT leave this without a formula or default it to zero), FCFF key=fcff ("{R:nopat}+{R:dep}-{R:wc_change}-{S:capex.capex}"), Discount factor key=discount_factor ("1/(1+{A:wacc})^{N}", fmt 0.000), PV of FCFF key=pv_fcff ("{R:fcff}*{R:discount_factor}").\n(3) "DCF VALUATION" — SCALAR rows: Sum of PV key=sum_pv ("{SUM:pv_fcff}"), Terminal value key=tv — use this EXACT dictated formula, copied verbatim (do not redesign it): "MAX(0,({LAST:nopat}-{A:terminal_growth}*{LAST:bs.net_working_capital})*(1+{A:terminal_growth})/({A:wacc}-{A:terminal_growth}))". Do NOT build this off {LAST:fcff} (the raw final explicit-year FCFF) — for a still-investing, capex-heavy company the LAST explicit forecast year's FCFF can itself be depressed or even negative (heavy capex, a working-capital step-up, etc.), and extrapolating THAT into a perpetuity produces a nonsensical negative terminal value (this has actually happened — a real run's terminal FCFF was negative, making equity value collapse to a large negative per-share figure). The dictated formula instead uses a NORMALIZED steady-state terminal cash flow: terminal NOPAT (which excludes capex/working-capital entirely, so it stays sensible even in a buildout year) less a working-capital investment that grows at the terminal growth rate (g × the terminal year's own net working capital LEVEL, not the raw year-over-year change row, which is more robust to any residual basis discontinuity in an early forecast year) — implicitly assuming steady-state maintenance capex equals depreciation, the standard textbook simplification — wrapped in MAX(0,...) so a structurally unprofitable terminal NOPAT can never produce a negative terminal value. PV of terminal value key=pv_tv ("{R:tv}/(1+{A:wacc})^5"), Enterprise value key=ev ("{R:sum_pv}+{R:pv_tv}"), Less net debt key=net_debt_last — use this EXACT dictated formula: "{CUR:bs.net_debt}" (the LAST HISTORICAL/ACTUAL year's net debt — today's real, reported figure — NOT {LAST:bs.net_debt}, which is 5 years OUT, a projection. Enterprise Value from a DCF is a value AS OF TODAY (all future cash flows discounted back to the present), so the EV-to-equity bridge must subtract TODAY'S actual net debt, not some future projected net debt — mixing a present-day EV with a future net debt double-counts/mismatches the time basis and distorts equity value), Add back non-operating assets key=non_operating_assets — use this EXACT dictated formula: "{CUR:bs.cwip}+{CUR:bs.investments}" (fmt "#,##0"). This row is REQUIRED and must never be omitted or set to zero. Rationale: FCFF above charges 100% of capex as a cash outflow, but NOPAT is built off EBIT, which earns NOTHING on either of these two asset classes — CWIP is still under construction (not commissioned, so zero revenue/EBIT during the whole forecast even though its cost has already been fully deducted from FCFF), and long-term investments in associates/JVs return via OTHER INCOME, which sits BELOW EBIT and therefore never enters NOPAT or FCFF at all. Both are textbook non-operating assets: the correct EV-to-equity bridge is "EV + non-operating assets − net debt". Omitting them makes the model pay for these assets in full and then value them at exactly zero, which systematically understates value per share for capital-intensive companies (a real run left ~₹28,800 Cr of CWIP — 11% of total assets — valued at nil). Use {CUR:} (the last HISTORICAL/actual year) for the same time-basis reason net_debt_last does: a DCF enterprise value is a value AS OF TODAY, so every other item in the bridge must be today's real reported balance, never a projection), Equity value key=equity_value ("{R:ev}+{R:non_operating_assets}-{R:net_debt_last}"), Holding company discount key=holding_discount_pct ("{A:holding_discount}", fmt 0.0% — a DISPLAY row showing the discount being applied below, so it's visible rather than buried inside the next row's formula), Equity value (post holding discount) key=equity_value_discounted ("{R:equity_value}*(1-{A:holding_discount})" — for a single-business company holding_discount is 0, so this equals equity_value unchanged), Value per share key=value_per_share ("{R:equity_value_discounted}/{CUR:assum.shares_out}", emphasis:"highlight" — MUST use {CUR:assum.shares_out} (today's/latest actual share count), NEVER {A:shares_out}: this is a SCALAR row (one fixed column), and shares_out is now a genuine PER-YEAR row (share count changes over time), so {A:shares_out} here would silently pick up whichever column this scalar row happens to sit in — likely the OLDEST historical year — instead of the current count — MUST reference equity_value_discounted, NOT the pre-discount equity_value, so the conglomerate discount actually reaches the headline number), Current price key=current_price (${currentPriceValueNote}a single fact — today's actual trading price, NOT a per-year series; every other row in THIS sheet that needs it references it via {SCALAR:current_price} or, from another scalar row, {R:current_price} — current_price itself must NEVER use {A:...} since it does not live on the Assumptions sheet), DCF upside key=upside ("{R:value_per_share}/{R:current_price}-1", fmt 0.0%).${sotpValuationSection}\n(4) "TARGET PRICE (relative, NEAR-TERM FY+1 basis)" — SCALAR rows, built off the FIRST forecast year via {FWD1:} (NOT {LAST:}, which is 5 years out and undiscounted — using it overstates the target price versus the DCF): P/E-based key=target_price_pe ("{FWD1:pnl.eps}*{A:target_pe}"), EV/EBITDA-based key=target_price_ev_ebitda ("(({FWD1:pnl.ebitda}*{A:target_ev_ebitda})-{FWD1:bs.net_debt})/{CUR:assum.shares_out}" — {CUR:}, not {A:}: this is a SCALAR row, and shares_out is a PER-YEAR row now, so {A:shares_out} would silently resolve to whatever column this scalar row sits in rather than the current share count), Blended target price key=target_price (average of the two, emphasis:"highlight"), Upside to target ("{R:target_price}/{R:current_price}-1", fmt 0.0%). Use these EXACT keys (target_price_pe, target_price_ev_ebitda) — not a paraphrase — every other row in this schema dictates a "key" for exactly this reason: a row with no fixed key gives you no reliable way to reference or verify it afterward.\n(5) "WACC BUILD-UP" — SCALAR rows: risk free ("{A:risk_free_rate}", 0.0%), equity risk premium ("{A:equity_risk_premium}", 0.0%), beta ("{A:beta}", 0.00), cost of equity ("{A:risk_free_rate}+{A:beta}*{A:equity_risk_premium}", 0.0%), cost of debt ("{A:cost_of_debt}", 0.0%), tax rate ("{A:tax_rate}", 0.0%), WACC ("{A:wacc}", 0.0%).\nYou MUST emit scalar keys: current_price, value_per_share, target_price, target_price_pe, target_price_ev_ebitda, upside (plus helpers sum_pv, pv_tv, tv, ev, net_debt_last, non_operating_assets, equity_value, holding_discount_pct, equity_value_discounted)${isSotpCompany ? ", plus (this is a SOTP company) sotp_ev, sotp_equity_value, sotp_value_per_share, sotp_upside" : ""}. Use fmt "#,##0" for currency rows. Be thorough.`;
+
             // 3b–3g — generate the remaining sheets IN PARALLEL.
             aiStatus("AI (step 2/2): building all model sheets in parallel...");
             const [opJson, pnlJson, bsJson, valJson, sumJson] = await Promise.all([
-                callLLM("Operational Model",
-                    `${periodsNote}\n\n${GRAMMAR}\n\n${CANON}\n\n${rowSchemaDoc}\n\nASSUMPTION KEYS:\n${assumKeyList}\n\n${finBlock}\nBuild the OPERATIONAL MODEL for ${companyName}, including a per-segment/product-line breakdown where the company reports one (e.g. by business segment). Capacity, utilisation, volumes/throughput, realisations/ASP per segment, and cost-per-unit are DISCLOSURE rows — informational KPIs that do NOT feed revenue or EBITDA. Each disclosure row's forecast MUST be a FLAT carry-forward of its last actual, written EXACTLY as "{P:<this row's own key>}". Do NOT attach a growth rate, and above all do NOT reference an invented assumption key such as "{A:jio_arpu_growth}" or "{A:o2c_production_growth}" — those keys do not exist (the ONLY {A:...} keys you may use are those in the ASSUMPTION KEYS list), so they render as a #MISSING error. If you have no real driver for a KPI, a flat carry-forward IS the correct, honest forecast.\nFORECASTING SEGMENT/TOTAL REVENUE AND EBITDA — do NOT compute forecast revenue by multiplying a forecast "volume" row by a forecast "realisation/ASP" row: those two drivers' units have repeatedly ended up mismatched (observed real failures: a 10x, a 100x, and a 1000x understatement on three different segments of the same company in one run, because volume and realisation were each forecast independently and their product no longer matched revenue's own actual unit scale). Instead, forecast each segment's (and the total's) revenue as a GROWTH-RATE recurrence anchored to its OWN historical actual level, which is unit-safe by construction since it only ever multiplies a real linked/historical figure by a dimensionless growth rate — e.g. segment revenue: "{P:segment_key}*(1+{A:revenue_growth})". Forecast segment EBITDA the same way, off a margin assumption applied to that segment's OWN revenue row: "{R:segment_key_revenue}*{A:ebitda_margin}". The canonical TOTAL rows MUST use these EXACT dictated formulas (do NOT invent your own): net_revenue forecast = "{P:net_revenue}*(1+{A:revenue_growth})", and ebitda forecast = "{R:net_revenue}*{A:ebitda_margin}" (revenue times the margin assumption — this equals the sum of the segments, since the SAME company-wide margin is applied to every segment). NEVER write a growth-style recurrence for the total EBITDA row such as "{P:ebitda}*(1+{A:ebitda_growth})" — there is NO "ebitda_growth" assumption key, so it resolves to a #MISSING error that poisons pnl.ebitda, the DCF, and every sheet pulling op.ebitda.\nUSE THE EXACT ASSUMPTION KEYS "revenue_growth" AND "ebitda_margin" FROM THE ASSUMPTION KEYS LIST ABOVE for every segment revenue/EBITDA row. The ONLY growth/margin keys that exist are revenue_growth and ebitda_margin; do NOT invent "segment_x_growth", "ebitda_growth", or any other {A:...} key — an invented key exists nowhere and resolves to a #MISSING error. Applying the SAME company-wide growth/margin to every segment is the correct, deliberate simplification here.\nNO BLANK FORECASTS — every assumption you reference via {A:...} (growth rates, EBITDA margins, etc.) must itself have a value in ALL ${HIST_YEARS + FC_YEARS} year columns, never left blank — a blank/missing forecast cell is read as ZERO by Excel and silently zeroes out everything downstream that multiplies by it (e.g. an EBITDA margin left blank makes segment EBITDA compute to 0 even though revenue is fine).\nYou MUST include rows keyed exactly: net_revenue, ebitda (and volume if applicable, informational only — not used to derive net_revenue).`,
-                    STATIC_MODEL),
+                callLLM("Operational Model", operationalModelPrompt, STATIC_MODEL),
                 callLLM("P&L Model",
                     `${periodsNote}\n\n${GRAMMAR}\n\n${CANON}\n\n${rowSchemaDoc}\n\nASSUMPTION KEYS:\n${assumKeyList}\n\n${finBlock}\nBuild a DETAILED P&L MODEL for ${companyName}.\nCANONICAL EBITDA — key=ebitda, formula = "{S:op.ebitda}" (pulled DIRECTLY from Operational; this is the single source of truth, per CANON above). Do NOT compute EBITDA as net_revenue minus the expense lines below — that makes EBITDA depend on four fragile disclosure rows instead of the one already-correct canonical figure, and if any one of those breaks, EBITDA silently breaks with it.\nDISCLOSURE expense build (informational detail only, does NOT feed EBITDA): cost of materials/COGS, power & fuel, employee cost, other expenses (for EACH of these four: FORECAST formula = "{P:<this row's own key>}/{P:net_revenue}*{R:net_revenue}" — holds that expense's ratio-to-revenue constant at its last historical/prior-year level. Use {P:net_revenue}, NOT {PS:pnl.net_revenue} — net_revenue is a row on THIS SAME sheet, so it's addressed the same-sheet way ({P:}/{R:}), never with a sheet-qualified {PS:sheet.key}/{S:sheet.key} reference to your own sheet. Do NOT invent a new assumption key like "cogs_pct_revenue" for these — none exists in the ASSUMPTION KEYS list above, and referencing one that doesn't exist resolves to a visible #MISSING error, not a usable number. This ratio-preserving formula needs no assumption key at all), total expenditure (key=total_expenditure, formula = "{R:net_revenue}-{R:ebitda}" — a DERIVED memo line computed from the two authoritative figures, NOT a sum of the four disclosure lines above, so it can never disagree with EBITDA even if a disclosure line is off), EBITDA margin (0.0%), depreciation (key=depreciation — the ANNUAL depreciation CHARGE for the year; if the data has both a P&L-style annual figure and a Balance-Sheet-style "Accumulated/Cumulative Depreciation" balance, link the ANNUAL one — never the cumulative one. PLAUSIBILITY CHECK: annual depreciation is typically 3-10% of average gross block per year, and should NOT be a monotonically-increasing-by-similar-amounts series across historical years (that pattern is a signature of an accumulated/cumulative balance, not an annual charge) — if your linked figure fails this check, you linked the WRONG (cumulative) row; either find the correct annual-charge label, or — if only the cumulative balance is available in the data — compute the annual figure yourself as this year's cumulative balance MINUS last year's (do this for every historical year using the raw source numbers, then put the resulting 5 numbers directly in "historical", not a link). This row's FORECAST formula is REQUIRED and must NOT be left blank — a blank forecast is read as 0 by Excel, which silently makes EBIT equal EBITDA and inflates every line below it. Tie it to the gross block build using the EXACT key "depreciation_pct_gross_block" from the ASSUMPTION KEYS list: "{A:depreciation_pct_gross_block}*({S:capex.gross_block}+{PS:capex.gross_block})/2"), EBIT, EBIT margin, other income, finance cost (key=interest — charge it on OPENING (prior-year) net debt ONLY, e.g. "MAX(0,{A:cost_of_debt}*{PS:bs.net_debt})" — do NOT average current-year and prior-year net debt: current-year net debt depends on the cash plug, which depends on retained earnings, which depends on PAT, which depends on this interest figure, so including current-year net debt here creates a genuine circular reference that silently evaluates to 0 across the whole PBT/tax/PAT/EPS chain once it closes the loop. Opening-balance-only breaks the loop by construction, since the prior year's net debt is already fully resolved before this year is computed. Also floor it at zero so it can never go negative even if net debt turns negative/net-cash in later forecast years), PBT, exceptional items, tax, effective tax rate (0.0%), PAT, PAT margin, minority interest where relevant (key it minority_interest and do NOT leave it a flat carry-forward — give it a forecast formula that grows it with earnings, holding it at a constant share of PAT: "{P:minority_interest}/{P:pat}*{R:pat}"), EPS (key=eps — do NOT leave it a flat carry-forward either: give it the formula "{R:pat}/{A:shares_out}" for EVERY column, historical and forecast alike, so it always ties out to whatever PAT and shares_out actually resolve to instead of just repeating last year's number — a row with real historicals but no forecast formula gets flat-carried forward automatically, which is a fallback for genuine gaps, not a substitute for giving this row its own well-known formula), DPS (link/enter the ACTUAL reported dividend per share for EACH historical year — do NOT leave historical DPS at 0 when the company actually paid a dividend; forecast DPS from the dividend-payout assumption so it stays continuous with the reported history). Pull revenue & EBITDA from operational via {S:op.net_revenue} / {S:op.ebitda}. You MUST include rows keyed exactly: net_revenue, ebitda, depreciation, ebit, interest, tax, pat, eps — and NONE of these forecast formulas may be left blank/omitted.`,
                     STATIC_MODEL),
                 callLLM("Balance Sheet",
                     `${periodsNote}\n\n${GRAMMAR}\n\n${CANON}\n\n${rowSchemaDoc}\n\nASSUMPTION KEYS:\n${assumKeyList}\n\n${finBlock}\nBuild a DETAILED BALANCE SHEET & RETURNS sheet for ${companyName}.\nASSETS (use these EXACT keys so the cash plug below can reference them): receivables (key=receivables — HISTORICAL: link/enter from the data; FORECAST formula = "{A:debtor_days}/365*{S:pnl.net_revenue}" — do NOT leave this as historical-only, it must scale with revenue), inventory (key=inventory — HISTORICAL: link/enter from the data; FORECAST formula = "{A:inventory_days}/365*{S:pnl.net_revenue}"), other_current_assets (HISTORICAL: link/enter; FORECAST formula = "{P:other_current_assets}/{PS:pnl.net_revenue}*{S:pnl.net_revenue}" — scales flat with revenue since there's no dedicated days assumption for it), net_fixed_assets (key=net_fixed_assets — HISTORICAL: link/enter the REAL reported Net Fixed Assets figure from the data, exactly like every other asset row above — do NOT leave this historical-derived-from-formula; FORECAST formula = "{S:capex.gross_block}-{R:acc_depreciation}" — do NOT track your own separate gross block, capex.gross_block is the single source of truth, and this formula applies ONLY to the forecast columns, never the historical ones), acc_depreciation (key=acc_depreciation — a STOCK/balance, NOT the same thing as pnl.depreciation which is the annual CHARGE. HISTORICAL: do NOT try to independently look up or link a separate "accumulated depreciation" line from the data — unlike gross block and net block, it is often not cleanly reported as one unambiguous figure, and guessing at it has actually produced a large understatement in a real run (accumulated depreciation understated by over ₹220,000 Cr for a company with a ~₹18 lakh Cr gross block), which overstated the very next forecast year's Net Fixed Assets by the same amount — a phantom multi-lakh-crore asset increase that then forces the short_term_borrowings revolver into an enormous, implausible draw to fund it, even though the revolver formula itself, the capex driver, and the working-capital formulas were all completely correct. Instead, DERIVE each historical year's value directly as (that year's capex.gross_block − that year's net_fixed_assets, both already reliably known from the two rows above) and put these 5 COMPUTED numbers directly in "historical" — do not attempt a "link" for this row. FORECAST formula = "{P:acc_depreciation}+{S:pnl.depreciation}" (this only rolls forward correctly because the historical base is properly derived, not guessed). SELF-CHECK before finalizing: gross_block(last historical year) − acc_depreciation(last historical year) MUST equal net_fixed_assets(last historical year) EXACTLY — if it does not, you have not derived acc_depreciation correctly and every forecast year's Net Fixed Assets will be wrong), cwip, investments (key=investments — this row means LONG-TERM/NON-CURRENT investments specifically. Many companies report investments TWICE — a "Current Investments" line (a child of Current/Other Current Assets) and a SEPARATE "Long Term Investments"/"Non-current Investments" line elsewhere — link THIS row to the non-current one; linking the current-investments child instead has actually happened and, combined with also linking other_current_assets to ITS parent total, silently double-counts the same rupees into Total Assets twice over), other_non_current_assets (do NOT freeze these flat across the forecast — give EACH a revenue-scaling forecast formula that holds its ratio-to-revenue constant at the last actual level: "{P:<this row's own key>}/{PS:pnl.net_revenue}*{S:pnl.net_revenue}", so the balance sheet grows coherently instead of showing an identical number in every forecast year), and cash (key=cash — historicals from the data as usual, but see BALANCING below for the forecast).\nTotal assets: key=total_assets, formula/sum = "{R:cash}+{R:receivables}+{R:inventory}+{R:other_current_assets}+{R:net_fixed_assets}+{R:cwip}+{R:investments}+{R:other_non_current_assets}".\nLIABILITIES & EQUITY: share_capital (key=share_capital, flat/no formula is acceptable — no fresh issuance is being modeled), reserves (roll forward "{P:equity}+{S:pnl.pat}*{A:pat_retention}"), shareholders' equity (key=equity), long_term_borrowings (key=long_term_borrowings, flat/no formula is acceptable — no repayment/drawdown schedule is being modeled), short_term_borrowings (key=short_term_borrowings — THIS IS THE REVOLVER/FUNDING PLUG, not a flat carry: HISTORICAL — link/enter the real reported figure as usual. FORECAST — use this EXACT dictated formula, copied verbatim (do not shorten or redesign it): "{P:short_term_borrowings}+MAX(0,{A:min_cash_pct_revenue}*{S:pnl.net_revenue}-({R:share_capital}+{R:reserves}+{R:long_term_borrowings}+{P:short_term_borrowings}+{R:payables}+{R:provisions}+{R:deferred_tax_liabilities}+{R:other_non_current_liabilities}+{R:other_current_liabilities}-{R:receivables}-{R:inventory}-{R:other_current_assets}-{R:net_fixed_assets}-{R:cwip}-{R:investments}-{R:other_non_current_assets}))" — this holds short_term_borrowings at last year's level UNLESS funding the rest of the balance sheet at last year's borrowing level would push cash below the minimum buffer, in which case it draws exactly enough extra short-term debt to keep cash at that minimum. This is what prevents the cash plug below from ever going negative — do NOT simplify this formula away or replace it with a flat carry-forward, and do NOT change the cash formula to "fix" a negative value directly; the fix belongs on THIS row, not on cash. If this draw comes out implausibly large (e.g. short-term borrowings jumping to several times their historical level in a single year), that is almost always a symptom of an unrealistic upstream working-capital or capex assumption — most commonly a debtor/inventory/payable-days driver whose FIRST forecast value was not anchored to the company's own last reported balance sheet (see the working-capital-days anchoring requirement in the Assumptions prompt), which manufactures a large artificial one-off funding gap. Do not "fix" a large draw by capping or overriding this formula — the correct fix is upstream, in the days/capex assumptions), payables (key=payables — HISTORICAL: link/enter from the data; FORECAST formula = "{A:payable_days}/365*{S:pnl.net_revenue}" — do NOT leave this as historical-only, it must scale with revenue), provisions (HISTORICAL: link/enter; FORECAST formula = "{P:provisions}/{PS:pnl.net_revenue}*{S:pnl.net_revenue}"), deferred_tax_liabilities, other_non_current_liabilities, other_current_liabilities (do NOT freeze these flat — give EACH the same revenue-scaling forecast formula "{P:<this row's own key>}/{PS:pnl.net_revenue}*{S:pnl.net_revenue}" so they scale with the business rather than repeating an identical number every forecast year).\nNONE of receivables/inventory/other_current_assets/payables/provisions may be left without a forecast formula — a flat/frozen working-capital line while revenue grows is a modeling error, not a simplification.\nTotal liabilities & equity: key=total_liabilities_equity, formula/sum of every liabilities & equity row above (via {R:} references, mirroring total_assets).\nPlus: net working capital (key=net_working_capital = "{R:receivables}+{R:inventory}+{R:other_current_assets}-{R:payables}-{R:provisions}-{R:other_current_liabilities}" — include other_current_liabilities here, not just payables/provisions: it's the liability-side counterpart to other_current_assets, which IS already included, so omitting it understates the liabilities subtracted and overstates Net Working Capital; the Capex & FCF sheet's change-in-WC pulls this), net debt (key=net_debt, formula = "{R:long_term_borrowings}+{R:short_term_borrowings}-{R:cash}" — do NOT leave this without a formula, it must move with the computed cash plug, not stay flat), capital employed (key=capital_employed), working-capital days, and returns: ROE (key=roe, formula = "{S:pnl.pat}/{R:equity}", fmt "0.0%" — this MUST be a "formula", never a plain "forecast" array of guessed numbers; a bare zero here has actually happened when the formula was omitted), ROCE (key=roce, formula = "{S:pnl.ebit}/{R:capital_employed}", fmt "0.0%" — same requirement, must be a formula), net debt/EBITDA (key=net_debt_ebitda, formula = "{R:net_debt}/{S:pnl.ebitda}", fmt "0.00").\nHISTORICAL BALANCE (the 5 ACTUAL-year columns) — a REPORTED balance sheet ALWAYS balances, so your historical columns MUST balance too, not only the forecast columns: for EVERY historical year the summed asset rows must equal the summed liabilities-&-equity rows (balance_check ≈ 0 in the actual years as well). Historical cash is NOT a plug — take it from the data. To make the actuals tie out: (a) transcribe EVERY reported line from the downloaded Balance Sheet; (b) NEVER double-count — cash, current investments and non-current investments are DISTINCT lines (include each exactly once) and reserves are counted once inside equity, not again as a separate asset/liability; (c) cross-check your historical total_assets against the reported "Total Assets" figure in the downloaded data — if it differs by more than ~1% you have mislinked or double-counted a line, so find and fix it before returning (a real prior run overstated total assets by ~18%); (d) reconcile any small residual through the low-materiality catch-all rows (other_current_assets / other_non_current_assets on the asset side, other_current_liabilities / other_non_current_liabilities on the liabilities side) so the historical balance_check lands at ~0; (e) EVERY historical year must reflect that SPECIFIC year's own reported figures — do NOT copy or repeat the prior year's balance-sheet numbers into the next year because a distinct source figure was hard to find (this has actually happened: the latest two historical years showed IDENTICAL balance-sheet values even though the P&L for those same years was correctly distinct). Before returning, spot-check total_assets, cash, and equity across adjacent historical years — if any two adjacent years show the SAME value for several rows at once, you have accidentally duplicated one year's column into another; go back to the source data and locate that specific year's real figures instead. Historical net_debt (borrowings − cash) must also match the company's REPORTED net debt — if it comes out roughly double the reported figure you have linked the wrong borrowings or cash line; fix it.\nBALANCING — cash's FORECAST formula (columns G-K only; historicals still come from the data) MUST be the plug: "{R:total_liabilities_equity}-{R:receivables}-{R:inventory}-{R:other_current_assets}-{R:net_fixed_assets}-{R:cwip}-{R:investments}-{R:other_non_current_assets}" (total liabilities & equity minus every OTHER asset row) — this makes total assets equal total liabilities & equity by construction in every forecast year. Do NOT drive forecast cash off a %-of-sales ratio; that breaks the balance. Because short_term_borrowings above already includes the revolver top-up whenever needed, this cash plug should NEVER compute to a negative number in any forecast year — a negative result here means the short_term_borrowings revolver formula was not applied exactly as dictated; re-check that row before returning, since a company literally cannot hold negative cash. Add a final check row "Balance Check (Assets - Liab.&Equity, should be ~0)" key=balance_check, formula "{R:total_assets}-{R:total_liabilities_equity}".\nYou MUST include rows keyed exactly: equity, net_debt, net_debt_ebitda, capital_employed, net_working_capital, total_assets, total_liabilities_equity, cash, receivables, inventory, other_current_assets, net_fixed_assets, acc_depreciation, cwip, investments, other_non_current_assets, payables, provisions, share_capital, long_term_borrowings, short_term_borrowings, roe, roce.`,
                     STATIC_MODEL),
-                callLLM("Valuation & DCF",
-                    `${periodsNote}\n\n${GRAMMAR}\n\n${VAL_GRAMMAR}\n\n${CANON}\n\nASSUMPTION KEYS:\n${assumKeyList}\n\n${finBlock}\nBuild a detailed VALUATION & DCF sheet for ${companyName}. Return JSON {"rows":[...]} with these sections (use {"section":"NAME"} dividers):\n(1) "RELATIVE VALUATION" — per-year live ratios: EPS key=eps ("{S:pnl.eps}"), BVPS key=bvps ("{S:bs.equity}/{A:shares_out}"), PER ("{SCALAR:current_price}/{R:eps}", fmt 0.0), P/BV ("{SCALAR:current_price}/{R:bvps}", 0.0), EV/EBITDA ("(({SCALAR:current_price}*{A:shares_out})+{S:bs.net_debt})/{S:pnl.ebitda}", 0.0), RoE ("{S:pnl.pat}/{S:bs.equity}", 0.0%), RoCE ("{S:pnl.ebit}/{S:bs.capital_employed}", 0.0%), Net debt/EBITDA ("{S:bs.net_debt}/{S:pnl.ebitda}", 0.00). current_price MUST be referenced via {SCALAR:current_price} here (a per-year row reading a single fixed fact), NEVER {A:current_price} — current_price is a scalar row on THIS sheet (see section 3), not a per-year row on Assumptions.\n(2) "DCF — FREE CASH FLOW TO FIRM" (every row "forecast_only":true): EBIT key=ebit ("{S:pnl.ebit}"), NOPAT key=nopat ("{R:ebit}*(1-{A:tax_rate})"), Add depreciation key=dep ("{S:pnl.depreciation}"), Less change in working capital key=wc_change ("{S:capex.wc_change}" — pull the SAME figure the Capex & FCF sheet computes; do NOT leave this without a formula or default it to zero), FCFF key=fcff ("{R:nopat}+{R:dep}-{R:wc_change}-{S:capex.capex}"), Discount factor key=discount_factor ("1/(1+{A:wacc})^{N}", fmt 0.000), PV of FCFF key=pv_fcff ("{R:fcff}*{R:discount_factor}").\n(3) "DCF VALUATION" — SCALAR rows: Sum of PV key=sum_pv ("{SUM:pv_fcff}"), Terminal value key=tv — use this EXACT dictated formula, copied verbatim (do not redesign it): "MAX(0,({LAST:nopat}-{A:terminal_growth}*{LAST:bs.net_working_capital})*(1+{A:terminal_growth})/({A:wacc}-{A:terminal_growth}))". Do NOT build this off {LAST:fcff} (the raw final explicit-year FCFF) — for a still-investing, capex-heavy company the LAST explicit forecast year's FCFF can itself be depressed or even negative (heavy capex, a working-capital step-up, etc.), and extrapolating THAT into a perpetuity produces a nonsensical negative terminal value (this has actually happened — a real run's terminal FCFF was negative, making equity value collapse to a large negative per-share figure). The dictated formula instead uses a NORMALIZED steady-state terminal cash flow: terminal NOPAT (which excludes capex/working-capital entirely, so it stays sensible even in a buildout year) less a working-capital investment that grows at the terminal growth rate (g × the terminal year's own net working capital LEVEL, not the raw year-over-year change row, which is more robust to any residual basis discontinuity in an early forecast year) — implicitly assuming steady-state maintenance capex equals depreciation, the standard textbook simplification — wrapped in MAX(0,...) so a structurally unprofitable terminal NOPAT can never produce a negative terminal value. PV of terminal value key=pv_tv ("{R:tv}/(1+{A:wacc})^5"), Enterprise value key=ev ("{R:sum_pv}+{R:pv_tv}"), Less net debt key=net_debt_last — use this EXACT dictated formula: "{CUR:bs.net_debt}" (the LAST HISTORICAL/ACTUAL year's net debt — today's real, reported figure — NOT {LAST:bs.net_debt}, which is 5 years OUT, a projection. Enterprise Value from a DCF is a value AS OF TODAY (all future cash flows discounted back to the present), so the EV-to-equity bridge must subtract TODAY'S actual net debt, not some future projected net debt — mixing a present-day EV with a future net debt double-counts/mismatches the time basis and distorts equity value), Add back non-operating assets key=non_operating_assets — use this EXACT dictated formula: "{CUR:bs.cwip}+{CUR:bs.investments}" (fmt "#,##0"). This row is REQUIRED and must never be omitted or set to zero. Rationale: FCFF above charges 100% of capex as a cash outflow, but NOPAT is built off EBIT, which earns NOTHING on either of these two asset classes — CWIP is still under construction (not commissioned, so zero revenue/EBIT during the whole forecast even though its cost has already been fully deducted from FCFF), and long-term investments in associates/JVs return via OTHER INCOME, which sits BELOW EBIT and therefore never enters NOPAT or FCFF at all. Both are textbook non-operating assets: the correct EV-to-equity bridge is "EV + non-operating assets − net debt". Omitting them makes the model pay for these assets in full and then value them at exactly zero, which systematically understates value per share for capital-intensive companies (a real run left ~₹28,800 Cr of CWIP — 11% of total assets — valued at nil). Use {CUR:} (the last HISTORICAL/actual year) for the same time-basis reason net_debt_last does: a DCF enterprise value is a value AS OF TODAY, so every other item in the bridge must be today's real reported balance, never a projection), Equity value key=equity_value ("{R:ev}+{R:non_operating_assets}-{R:net_debt_last}"), Holding company discount key=holding_discount_pct ("{A:holding_discount}", fmt 0.0% — a DISPLAY row showing the discount being applied below, so it's visible rather than buried inside the next row's formula), Equity value (post holding discount) key=equity_value_discounted ("{R:equity_value}*(1-{A:holding_discount})" — for a single-business company holding_discount is 0, so this equals equity_value unchanged), Value per share key=value_per_share ("{R:equity_value_discounted}/{CUR:assum.shares_out}", emphasis:"highlight" — MUST use {CUR:assum.shares_out} (today's/latest actual share count), NEVER {A:shares_out}: this is a SCALAR row (one fixed column), and shares_out is now a genuine PER-YEAR row (share count changes over time), so {A:shares_out} here would silently pick up whichever column this scalar row happens to sit in — likely the OLDEST historical year — instead of the current count — MUST reference equity_value_discounted, NOT the pre-discount equity_value, so the conglomerate discount actually reaches the headline number), Current price key=current_price (${currentPriceValueNote}a single fact — today's actual trading price, NOT a per-year series; every other row in THIS sheet that needs it references it via {SCALAR:current_price} or, from another scalar row, {R:current_price} — current_price itself must NEVER use {A:...} since it does not live on the Assumptions sheet), DCF upside key=upside ("{R:value_per_share}/{R:current_price}-1", fmt 0.0%).\n(4) "TARGET PRICE (relative, NEAR-TERM FY+1 basis)" — SCALAR rows, built off the FIRST forecast year via {FWD1:} (NOT {LAST:}, which is 5 years out and undiscounted — using it overstates the target price versus the DCF): P/E-based key=target_price_pe ("{FWD1:pnl.eps}*{A:target_pe}"), EV/EBITDA-based key=target_price_ev_ebitda ("(({FWD1:pnl.ebitda}*{A:target_ev_ebitda})-{FWD1:bs.net_debt})/{CUR:assum.shares_out}" — {CUR:}, not {A:}: this is a SCALAR row, and shares_out is a PER-YEAR row now, so {A:shares_out} would silently resolve to whatever column this scalar row sits in rather than the current share count), Blended target price key=target_price (average of the two, emphasis:"highlight"), Upside to target ("{R:target_price}/{R:current_price}-1", fmt 0.0%). Use these EXACT keys (target_price_pe, target_price_ev_ebitda) — not a paraphrase — every other row in this schema dictates a "key" for exactly this reason: a row with no fixed key gives you no reliable way to reference or verify it afterward.\n(5) "WACC BUILD-UP" — SCALAR rows: risk free ("{A:risk_free_rate}", 0.0%), equity risk premium ("{A:equity_risk_premium}", 0.0%), beta ("{A:beta}", 0.00), cost of equity ("{A:risk_free_rate}+{A:beta}*{A:equity_risk_premium}", 0.0%), cost of debt ("{A:cost_of_debt}", 0.0%), tax rate ("{A:tax_rate}", 0.0%), WACC ("{A:wacc}", 0.0%).\nYou MUST emit scalar keys: current_price, value_per_share, target_price, target_price_pe, target_price_ev_ebitda, upside (plus helpers sum_pv, pv_tv, tv, ev, net_debt_last, non_operating_assets, equity_value, holding_discount_pct, equity_value_discounted). Use fmt "#,##0" for currency rows. Be thorough.`,
+                callLLM("Valuation & DCF", valuationPrompt,
                     STATIC_MODEL),
                 callLLM("Summary Dashboard",
                     `Build a SUMMARY DASHBOARD for ${companyName} that links the most decision-relevant lines from the other sheets, referenced ONLY by these canonical keys:\nop.net_revenue, op.ebitda, op.volume\npnl.net_revenue, pnl.ebitda, pnl.depreciation, pnl.ebit, pnl.interest, pnl.tax, pnl.pat, pnl.eps\nbs.equity, bs.net_debt, bs.capital_employed\ncapex.capex, capex.ocf, capex.fcf, capex.gross_block\nReturn JSON: {"rows":[ {"section":"SECTION NAME"} OR {"label":"Display label","ref":"sheet.canonical_key","fmt":"#,##0"|"0.00","cagr":true|false} ]}. Group into OPERATIONAL, P&L, BALANCE SHEET, CAPEX & FCF. Pick ~15-22 lines. EVERY ref points to an ABSOLUTE canonical value (rupee levels, EPS, or share/volume counts) — there are NO margin/ratio/percentage canonical keys available here, so do NOT add EBITDA-margin, ROE, ROCE, or any other "%" row: applying a percentage format to an absolute-rupee figure renders a nonsensical multi-million-percent number (a real failure produced "11046000%"). Use ONLY fmt "#,##0" for rupee amounts or "0.00" for EPS / x-multiples — NEVER a "0.0%" percentage format on this sheet.`,
@@ -2870,11 +3509,125 @@ PURE-FORMULA ROWS — when this prompt gives you the COMPLETE formula for a row 
             ]);
 
             const opRows = Array.isArray(opJson.rows) ? opJson.rows : [];
+            // ── Segment revenue/EBITDA zero-fill recovery ──────────────────────────────────────
+            // The SOTP prompt tells the model to populate each <tag>_revenue / <tag>_ebitda row from
+            // the OPERATIONAL DATA block and states outright that "zero is never an acceptable
+            // historical value here" — but nothing enforced it, and the model periodically returns 0
+            // for every year of every segment even when the source plainly carries the figures
+            // (confirmed on Piramal Pharma: CHG Revenue FY23-FY26 = 2286/2449/2633/2703 and PCH
+            // Revenue = 874/985/1093/1274 are both right there under unit "Cr", yet chg_revenue,
+            // pch_revenue and cdmo_revenue all came back as straight zeros).
+            //
+            // All-zero segments are worse than merely missing: net_revenue's forecast is dictated as
+            // the SUM of the segment rows, so zeros there silently collapse the entire forecast, and
+            // the fixOtherSegments reconciliation immediately below dumps 100% of revenue into the
+            // catch-all — producing an "Other Segments" line that just restates Net Revenue while the
+            // real segments read 0. Hence this runs BEFORE that reconciliation, so it has genuine
+            // per-segment values to subtract rather than reconciling against zeros.
+            const zeroSegmentFlags = [];
+            if (isSotpCompany) {
+                const opRowByKey = (key) => opRows.find(r => r && r.key === key);
+                const isAllBlank = (row) => !row || !Array.isArray(row.historical)
+                    || !row.historical.some(v => typeof v === "number" && isFinite(v) && v !== 0);
+                for (const tag of segmentTags) {
+                    for (const kind of ["revenue", "ebitda"]) {
+                        const row = opRowByKey(`${tag}_${kind}`);
+                        if (!row || !isAllBlank(row)) continue;
+                        // A segment with no revenue at all is the real failure; a segment that HAS
+                        // revenue but no separately-disclosed EBITDA is normal (very few companies
+                        // break EBITDA out by segment), so don't flag that as an error — the
+                        // ebitda_margin_<tag> assumption already drives it off the revenue row.
+                        const revenueRow = opRowByKey(`${tag}_revenue`);
+                        const revenueMissingToo = isAllBlank(revenueRow);
+                        const found = segmentAnnualSeries(tag, kind);
+                        if (found) {
+                            row.historical = found.values;
+                            // Never let autoLink's label/value matching re-point these at an unrelated
+                            // financial-statement row afterwards — segment revenue has no legitimate
+                            // counterpart there, and a previous run mislinked one to a Balance Sheet
+                            // debt line. Same rationale as forceMechanicalValue's own noAutoLink use.
+                            row.noAutoLink = true;
+                            delete row.link;
+                            console.warn(`[AI Model] ${tag}_${kind} came back all-zero from the model — recovered ${found.covered} year(s) deterministically from the operational dashboard row "${found.label}" (section "${found.section}"): ${found.values.map(v => v == null ? "–" : Math.round(v)).join(", ")}.`);
+                        } else if (kind === "revenue" || !revenueMissingToo) {
+                            if (kind === "revenue") {
+                                zeroSegmentFlags.push(tag);
+                                console.warn(`[AI Model] ${tag}_revenue is all-zero and no annual Rs-Crore revenue row for it could be found in the operational dashboard — this segment will contribute nothing to net_revenue and its share will fall entirely into Other Segments. Flagged on the Summary Dashboard.`);
+                            } else {
+                                console.log(`[AI Model] ${tag}_ebitda has no separately-disclosed figures (normal — most companies don't break EBITDA out by segment); it stays driven by {A:ebitda_margin_${tag}} off the segment's own revenue row.`);
+                            }
+                        }
+                    }
+                }
+            }
+            // ── other_segments_* historicals: recompute deterministically ──
+            // (percent-row unit guard for these sheets runs further below, once every row array
+            //  for them has been parsed — see the normalizePercentRows calls after bsRows)
+            // other_segments_revenue is defined as "total minus the tagged segments" — per-year
+            // arithmetic across 8 columns, which the model has gotten wrong in a specific, repeatable
+            // way: its FY(n) cell held FY(n+1)'s revenue, a clean one-year-forward shift. Because
+            // net_revenue's FORECAST is dictated as the SUM of the segment rows, that shifted base
+            // then compounded through every forecast year and roughly doubled the total.
+            // Recomputed here in code instead — the same reasoning buildCapexRows already applies to
+            // formulas the model was being handed complete.
+            // The per-year total is taken from the company's own REPORTED figure via findEntryByLabel
+            // (the authoritative downloaded-data lookup), NOT from the model's net_revenue row:
+            // net_revenue is frequently link-only ({"link":"Net Revenue"} with the optional
+            // "historical" array omitted), so keying off that row's historicals would silently skip
+            // the correction on exactly the runs that need it. Falls back to the model's own row only
+            // if the label lookup finds nothing, and leaves the year untouched if neither resolves.
+            if (isSotpCompany) {
+                const findOpRow = (key) => opRows.find(r => r && r.key === key);
+                const histAt = (row, i) => (row && Array.isArray(row.historical) && typeof row.historical[i] === "number" && isFinite(row.historical[i])) ? row.historical[i] : null;
+                const fixOtherSegments = (totalKey, otherKey, tagSuffix, labelPattern) => {
+                    const otherRow = findOpRow(otherKey);
+                    if (!otherRow) return;
+                    const totalRow = findOpRow(totalKey);
+                    const reportedEntry = findEntryByLabel(labelPattern);
+                    const tagRows = segmentTags.map(t => findOpRow(`${t}_${tagSuffix}`));
+                    let anchored = 0;
+                    const fixed = HIST.map((fy, i) => {
+                        const rep = reportedEntry ? reportedEntry.valByFY[fy] : null;
+                        const total = (typeof rep === "number" && isFinite(rep)) ? rep : histAt(totalRow, i);
+                        if (total == null) return histAt(otherRow, i); // no authoritative total this year — leave the model's own figure
+                        anchored++;
+                        return total - tagRows.reduce((s, r) => s + (histAt(r, i) ?? 0), 0);
+                    });
+                    otherRow.historical = fixed;
+                    console.log(`[AI Model] Recomputed ${otherKey} historicals in code as (reported ${totalKey} − tagged segments), per year — ${anchored}/${HIST.length} year(s) anchored to a real reported figure.`);
+                };
+                fixOtherSegments("net_revenue", "other_segments_revenue", "revenue", /^(net\s*revenue|total\s*revenue|revenue\s*from\s*operations|net\s*sales|total\s*income|revenue)$/i);
+                fixOtherSegments("ebitda", "other_segments_ebitda", "ebitda", /^ebitda$/i);
+            }
             const pnlRows = Array.isArray(pnlJson.rows) ? pnlJson.rows : [];
             const bsRows = Array.isArray(bsJson.rows) ? bsJson.rows : [];
-            const capexRows = buildCapexRows(); // code-generated, no LLM call (see buildCapexRows above)
+            // Re-verify against the Operational call's ACTUAL output before trusting the segment
+            // capex path — isSotpCompany only confirms the Assumptions call provided usable
+            // segment-driver keys, not that the Operational Model call went on to comply with the
+            // SOTP prompt's dictated row keys (LLM compliance with "use exactly this key" has
+            // failed before — see the target_ev_ebitda fallback earlier in this file). Falls back
+            // to the ordinary buildCapexRows() — identical to every non-SOTP company's path — the
+            // moment either check fails, rather than referencing a segment revenue row that turns
+            // out not to exist and cascading a #MISSING error into FCFF and the DCF.
+            const opDeliveredSegments = isSotpCompany
+                && segmentTags.every(t => opRows.some(r => r && r.key === `${t}_revenue`))
+                && opRows.some(r => r && r.key === "other_segments_revenue");
+            if (isSotpCompany && !opDeliveredSegments) {
+                console.warn("[AI Model] isSotpCompany was true but the Operational Model call did not deliver all the dictated segment/other_segments revenue rows — falling back to the single blended Capex & FCF sheet for this run.");
+            }
+            const capexRows = opDeliveredSegments ? buildSegmentCapexRows() : buildCapexRows(); // code-generated, no LLM call (see buildCapexRows/buildSegmentCapexRows above)
             const valRows = Array.isArray(valJson.rows) ? valJson.rows : [];
             const summaryRows = Array.isArray(sumJson.rows) ? sumJson.rows : [];
+            // Same whole-number-percentage guard the Assumptions sheet already ran (see
+            // normalizePercentRows above) — applied to the remaining sheets now that each one's rows
+            // are parsed. Most %-rows here are pure formulas and are skipped untouched; this only
+            // catches a row where the model hardcoded its own percent VALUES (e.g. an EBITDA-margin
+            // or effective-tax-rate history typed as 18 instead of 0.18), which renders ×100 for
+            // exactly the same reason. Runs BEFORE planRows so nothing downstream sees the bad units.
+            normalizePercentRows("op", opRows);
+            normalizePercentRows("pnl", pnlRows);
+            normalizePercentRows("bs", bsRows);
+            normalizePercentRows("val", valRows);
             planRows("op", opRows);
             planRows("pnl", pnlRows);
             // Balance Sheet ASSETS vs LIABILITIES & EQUITY section dividers — the row schema lets
@@ -4585,12 +5338,18 @@ PURE-FORMULA ROWS — when this prompt gives you the COMPLETE formula for a row 
 
                 // Source citations AND the Assumptions (Judgment) call's per-row "rationale" (the
                 // analyst's stated reasoning for a judgment-driven number/trajectory — see that
-                // call's prompt), as a single Excel cell comment on the forecast input cell. Combined
-                // into ONE comment string rather than two separate wb.comments.add() calls on the
-                // same cell — the Comments API only supports one comment per cell, and a second call
-                // there would throw. Best-effort: the Comments API needs a reasonably current Excel
-                // client, and a citation/rationale is only as good as the model's own text — failures
-                // here must never abort the rest of the model build.
+                // call's prompt), as a single Excel cell comment on the row's OWN LABEL cell (column
+                // A) — not a data cell. This used to sit on the first forecast-year data cell (column
+                // G for a per-year row, B for a scalar row), which reads oddly: a note attached to
+                // one specific year's number looks like it's ABOUT that year, when it's actually
+                // about the row/assumption as a whole. Column A is where every row's own name already
+                // lives (see displayLabel above), so that's the natural, unambiguous place for a note
+                // about the row. Combined into ONE comment string rather than two separate
+                // wb.comments.add() calls on the same cell — the Comments API only supports one
+                // comment per cell, and a second call there would throw. Best-effort: the Comments
+                // API needs a reasonably current Excel client, and a citation/rationale is only as
+                // good as the model's own text — failures here must never abort the rest of the
+                // model build.
                 // The hard 300-char cap this used to have was well below what Excel's Comments API
                 // actually supports (tens of thousands of characters) — it existed as an arbitrary
                 // safety margin, but became a real problem once the Judgment call's prompt started
@@ -4615,7 +5374,7 @@ PURE-FORMULA ROWS — when this prompt gives you the COMPLETE formula for a row 
                         if (item.rationale) parts.push(String(item.rationale));
                         if (item.source) parts.push(`Source: ${item.source}`);
                         if (!parts.length) continue;
-                        wb.comments.add(made.assum.getRange(item.scalar ? `B${item._row}` : `G${item._row}`), truncateNote(parts.join(" — "), 1200));
+                        wb.comments.add(made.assum.getRange(`A${item._row}`), truncateNote(parts.join(" — "), 1200));
                         sourced++;
                     }
                     await context.sync();
@@ -4757,6 +5516,50 @@ PURE-FORMULA ROWS — when this prompt gives you the COMPLETE formula for a row 
                         }
                         if (rr % 2 === 0) sh.getRange(`A${rr}:${CAGR_COL}${rr}`).format.fill.color = "#f9f9f9";
                         rr++;
+                    }
+                    // ── SOTP fallback flag (shown on the dashboard) — visible, not just a console
+                    // warning, whenever this company was expected to get segment-aware modeling but
+                    // didn't fully get it: either the Segment Drivers call never landed 2+ usable
+                    // segment pairs despite holding_discount>0 (see the console.warn near
+                    // isSotpCompany above), or it did but the Operational Model call's output didn't
+                    // deliver the dictated segment revenue rows (see opDeliveredSegments below).
+                    // Someone opening this file has no way to see a browser console warning — this
+                    // is the only place they'd ever learn the SOTP treatment was expected but silently
+                    // fell back to the single blended DCF for this run.
+                    if (holdingDiscountVal > 0 && !(isSotpCompany && opDeliveredSegments)) {
+                        rr += 2;
+                        const reason = segmentTags.length < 2
+                            ? "the segment-driver assumptions were never produced"
+                            : "the Operational Model did not deliver the expected per-segment revenue rows";
+                        sh.getRange(`A${rr}`).values = [[`⚠  SOTP SEGMENT MODELING EXPECTED BUT DID NOT ENGAGE`]];
+                        const sotpHdr = sh.getRange(`A${rr}:${CAGR_COL}${rr}`);
+                        sotpHdr.format.font.bold = true; sotpHdr.format.font.size = 10;
+                        sotpHdr.format.font.color = "#8a4b00"; sotpHdr.format.fill.color = "#fff2cc";
+                        rr++;
+                        sh.getRange(`A${rr}`).values = [[`This company was judged a genuine multi-segment conglomerate (holding_discount = ${(holdingDiscountVal * 100).toFixed(0)}%), which should route the model to segment-specific growth/margin/capex/valuation assumptions instead of one blended company-wide rate — but ${reason}, so this run fell back to the single blended DCF. The numbers below are not wrong, but they blend distinct businesses into one average the way every pre-SOTP model did; re-running the build may pick up the segment treatment.`]];
+                        const sotpNote = sh.getRange(`A${rr}:${CAGR_COL}${rr}`);
+                        sotpNote.format.font.size = 9; sotpNote.format.font.color = "#5a4a30";
+                        sotpNote.format.fill.color = "#fff8e5"; sotpNote.format.wrapText = true;
+                        sh.getRange(`A${rr}`).format.rowHeight = 60;
+                    }
+                    // ── Zero-revenue segment flag ──
+                    // A segment the model left at zero AND that couldn't be recovered from the
+                    // operational dashboard contributes nothing to net_revenue, and its real share of
+                    // the business silently lands in "Other Segments" instead. That's invisible in
+                    // the numbers themselves (the total still ties), so it gets said out loud here —
+                    // a console warning is no use to whoever opens the delivered file.
+                    if (zeroSegmentFlags.length) {
+                        rr += 2;
+                        sh.getRange(`A${rr}`).values = [[`⚠  ${zeroSegmentFlags.length} SEGMENT${zeroSegmentFlags.length === 1 ? "" : "S"} HAVE NO REVENUE DATA`]];
+                        const zHdr = sh.getRange(`A${rr}:${CAGR_COL}${rr}`);
+                        zHdr.format.font.bold = true; zHdr.format.font.size = 10;
+                        zHdr.format.font.color = "#8a4b00"; zHdr.format.fill.color = "#fff2cc";
+                        rr++;
+                        sh.getRange(`A${rr}`).values = [[`The AI returned zero historical revenue for ${zeroSegmentFlags.join(", ")}, and no annual Rs-Crore revenue figure for ${zeroSegmentFlags.length === 1 ? "it" : "them"} could be found in this company's own operational disclosures either. ${zeroSegmentFlags.length === 1 ? "This segment contributes" : "These segments contribute"} nothing to the modelled Net Revenue, and ${zeroSegmentFlags.length === 1 ? "its" : "their"} real share of the business is absorbed into "Other Segments" instead — so the total still ties to reported revenue, but the segment split on the Operational sheet understates ${zeroSegmentFlags.length === 1 ? "this segment" : "these segments"} and overstates Other Segments. Review the Operational sheet's segment revenue rows before relying on the sum-of-the-parts valuation.`]];
+                        const zNote = sh.getRange(`A${rr}:${CAGR_COL}${rr}`);
+                        zNote.format.font.size = 9; zNote.format.font.color = "#5a4a30";
+                        zNote.format.fill.color = "#fff8e5"; zNote.format.wrapText = true;
+                        sh.getRange(`A${rr}`).format.rowHeight = 60;
                     }
                     // ── Disclaimers (shown on the dashboard) ──
                     rr += 2;
@@ -6062,7 +6865,7 @@ Return ONLY a valid JSON object — no markdown, no explanation, no code fences.
    To hide before deploy: set CHAT_ENABLED = false (the UI is removed and nothing
    is wired up), or comment out this whole block + the #chatFeature markup/style
    in taskpane.html. The financial-model feature does not depend on any of this. */
-const CHAT_ENABLED = false; // TEMPORARY: hidden again pre-deployment — priority is the wallet-feature update; re-enable by flipping back to true
+const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tools (get_workbook_overview/read_range/write_cells/fill_formula/recalculate_and_check/undo_last_change/trace_dependencies/search_workbook) — flip back to false before deploying if the wallet-feature update still isn't ready
 
 (function setupAskClaudeChat() {
     if (!CHAT_ENABLED) {
@@ -6084,19 +6887,39 @@ const CHAT_ENABLED = false; // TEMPORARY: hidden again pre-deployment — priori
 
     // Whether workbook edits are applied immediately or held for a per-write confirmation.
     // Defaults to OFF (ask first) — matches the "confirm before destructive edits" guardrail.
+    // Presented as a compact mode-picker (button + popup with a tick by the active mode), the
+    // same pattern Claude Code itself uses for its own mode switcher.
     const AUTO_APPLY_KEY = "goia_chatAutoApplyEdits";
     let autoApplyEdits = localStorage.getItem(AUTO_APPLY_KEY) === "1";
-    const autoApplyToggle = byId("chatAutoApply"), autoApplyLabel = byId("chatAutoApplyLabel");
-    const renderAutoApplyLabel = () => {
-        if (autoApplyLabel) autoApplyLabel.textContent = autoApplyEdits ? "Writing to sheets automatically" : "Ask before writing to sheets";
+    const modeBtn = byId("chatModeBtn"), modeMenu = byId("chatModeMenu"),
+        modeBtnLabel = byId("chatModeBtnLabel"), modeIcon = byId("chatModeIcon");
+    const renderMode = () => {
+        if (modeBtnLabel) modeBtnLabel.textContent = autoApplyEdits ? "Write automatically" : "Ask before writing";
+        if (modeIcon) modeIcon.textContent = autoApplyEdits ? "⚡" : "✋";
+        if (modeMenu) {
+            modeMenu.querySelectorAll(".chat-mode-tick").forEach(t => {
+                t.classList.toggle("active", t.dataset.tick === (autoApplyEdits ? "auto" : "ask"));
+            });
+        }
     };
-    if (autoApplyToggle) {
-        autoApplyToggle.checked = autoApplyEdits;
-        renderAutoApplyLabel();
-        autoApplyToggle.addEventListener("change", () => {
-            autoApplyEdits = autoApplyToggle.checked;
-            try { localStorage.setItem(AUTO_APPLY_KEY, autoApplyEdits ? "1" : "0"); } catch (e) { /* storage unavailable */ }
-            renderAutoApplyLabel();
+    if (modeBtn && modeMenu) {
+        renderMode();
+        modeBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            modeMenu.classList.toggle("open");
+        });
+        modeMenu.querySelectorAll(".chat-mode-item").forEach(item => {
+            item.addEventListener("click", () => {
+                autoApplyEdits = item.dataset.mode === "auto";
+                try { localStorage.setItem(AUTO_APPLY_KEY, autoApplyEdits ? "1" : "0"); } catch (e) { /* storage unavailable */ }
+                renderMode();
+                modeMenu.classList.remove("open");
+            });
+        });
+        document.addEventListener("click", (e) => {
+            if (modeMenu.classList.contains("open") && !modeMenu.contains(e.target) && e.target !== modeBtn) {
+                modeMenu.classList.remove("open");
+            }
         });
     }
 
@@ -6170,12 +6993,45 @@ const CHAT_ENABLED = false; // TEMPORARY: hidden again pre-deployment — priori
             companyInput.value = t.value;
         }
     };
+    // Lightweight markdown renderer for DataGPT's own replies (headers, **bold**, *italics*,
+    // `code`, bullet/numbered lists, --- rules, paragraph breaks) — the model's answers were
+    // arriving as raw markdown text via textContent, showing literal "**" and "###" to the user.
+    // User-typed messages are untouched (still plain textContent below) since they need no
+    // rendering and shouldn't have their own literal * or # reinterpreted as formatting.
+    const escapeHtml = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const renderInline = (s) => {
+        s = escapeHtml(s);
+        s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
+        s = s.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
+        s = s.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, "$1<i>$2</i>");
+        return s;
+    };
+    const renderMarkdown = (text) => {
+        if (!text) return "";
+        const lines = String(text).replace(/\r\n/g, "\n").split("\n");
+        let html = "", listType = null, para = [];
+        const closeList = () => { if (listType) { html += listType === "ul" ? "</ul>" : "</ol>"; listType = null; } };
+        const flushPara = () => { if (para.length) { html += "<p>" + para.map(renderInline).join("<br>") + "</p>"; para = []; } };
+        for (const raw of lines) {
+            const line = raw.trim();
+            let m;
+            if (!line) { flushPara(); closeList(); }
+            else if (/^(-{3,}|\*{3,})$/.test(line)) { flushPara(); closeList(); html += "<hr>"; }
+            else if ((m = /^(#{1,4})\s+(.*)$/.exec(line))) { flushPara(); closeList(); html += `<div class="md-h md-h${m[1].length}">${renderInline(m[2])}</div>`; }
+            else if ((m = /^[-*]\s+(.*)$/.exec(line))) { flushPara(); if (listType !== "ul") { closeList(); html += "<ul>"; listType = "ul"; } html += `<li>${renderInline(m[1])}</li>`; }
+            else if ((m = /^\d+\.\s+(.*)$/.exec(line))) { flushPara(); if (listType !== "ol") { closeList(); html += "<ol>"; listType = "ol"; } html += `<li>${renderInline(m[1])}</li>`; }
+            else { closeList(); para.push(line); }
+        }
+        flushPara(); closeList();
+        return html;
+    };
     const addMsg = (role, text) => {
         const m = document.createElement("div");
         m.className = "chat-msg " + role;
         const b = document.createElement("div");
         b.className = "chat-bubble";
-        b.textContent = text;
+        if (role === "bot") b.innerHTML = renderMarkdown(text);
+        else b.textContent = text;
         m.appendChild(b);
         stream.appendChild(m);
         stream.scrollTop = stream.scrollHeight;
@@ -6184,6 +7040,7 @@ const CHAT_ENABLED = false; // TEMPORARY: hidden again pre-deployment — priori
     const addCard = (text, cls) => {
         const c = document.createElement("div");
         c.className = "chat-card " + (cls || "run");
+        c.dataset.createdAt = Date.now(); // read by settleCard below
         const t = document.createElement("span"); t.textContent = text;
         const s = document.createElement("span"); s.className = "chat-card-st";
         c.appendChild(t); c.appendChild(s);
@@ -6191,6 +7048,20 @@ const CHAT_ENABLED = false; // TEMPORARY: hidden again pre-deployment — priori
         stream.scrollTop = stream.scrollHeight;
         return c;
     };
+    // Flips a card from its pulsing "run" state to done/err. In-memory Excel API calls and cached
+    // MCP lookups routinely finish inside a single microtask — fast enough that the browser never
+    // actually paints the pulsing state before it's already flipped to done, so the card just
+    // "pops in" already finished instead of visibly working. This tops up whatever's left of a
+    // minimum visible run time first, so every card gets at least one real animated frame.
+    const MIN_CARD_RUN_MS = 450;
+    async function settleCard(card, cls, symbol) {
+        if (!card) return; // some tools only show a card conditionally (e.g. toolNamedRanges)
+        const elapsed = Date.now() - Number(card.dataset.createdAt || 0);
+        if (elapsed < MIN_CARD_RUN_MS) await new Promise(r => setTimeout(r, MIN_CARD_RUN_MS - elapsed));
+        card.className = "chat-card " + cls;
+        const st = card.querySelector(".chat-card-st");
+        if (st) st.textContent = symbol;
+    }
     // Renders an inline approve/skip prompt and resolves once the user picks one —
     // lets the tool-calling loop below simply `await` a write decision like any other I/O.
     function addConfirmCard(text, opts) {
@@ -6217,23 +7088,6 @@ const CHAT_ENABLED = false; // TEMPORARY: hidden again pre-deployment — priori
         });
     }
 
-    // Gate for every workbook write: asks first unless the user has flipped on
-    // "write automatically". Warns explicitly when a write would overwrite an existing sheet.
-    async function maybeConfirmAndWrite(action) {
-        const sheetName = String(action?.sheet || "Claude Output").slice(0, 31);
-        if (!autoApplyEdits) {
-            let exists = false;
-            try { exists = (await toolListSheets()).sheets.some(s => s.toLowerCase() === sheetName.toLowerCase()); }
-            catch (e) { /* assume new sheet */ }
-            const verb = exists ? `overwrite the existing sheet "${sheetName}"` : `create a new sheet "${sheetName}"`;
-            const rows = Array.isArray(action?.rows) ? action.rows.length : 0;
-            const approved = await addConfirmCard(`DataGPT wants to ${verb}${rows ? ` (${rows} row${rows === 1 ? "" : "s"})` : ""}.`);
-            if (!approved) return { ok: false, rejected: true, sheet: sheetName };
-        }
-        await writeAction(action);
-        return { ok: true, sheet: sheetName };
-    }
-
     const greet = () => addMsg("bot",
         "Hi — I'm connected to your GoIndia data and this workbook. Ask me about the selected company, or to write something into a sheet. (Experimental)");
 
@@ -6241,8 +7095,21 @@ const CHAT_ENABLED = false; // TEMPORARY: hidden again pre-deployment — priori
     history.forEach(m => addMsg(m.role === "assistant" ? "bot" : "user", m.content));
 
     const openPanel = () => { panel.style.display = "flex"; fab.style.display = "none"; setCompany(); if (!stream.childElementCount) greet(); input.focus(); };
-    const closePanel = () => { panel.style.display = "none"; fab.style.display = ""; };
+    const closePanel = () => { panel.style.display = "none"; fab.style.display = ""; if (modeMenu) modeMenu.classList.remove("open"); };
     fab.addEventListener("click", openPanel);
+
+    // Ribbon handshake: the "Ask DataGPT" button's ShowTaskpane action points at
+    // taskpane.html?view=datagpt (see manifest.xml and applyRibbonView near the top of this file,
+    // which already hid every #addinUI section except #chatFeature for this exact view) —
+    // auto-open the chat here too so the pane opens with DataGPT already in front and nothing
+    // else, rather than an empty pane with just the fab to click.
+    // Read ?view= directly rather than document.body.dataset.view: this whole IIFE runs
+    // synchronously at script-parse time, before the Office.onReady callback that sets that
+    // dataset attribute (applyRibbonView, above) has had a chance to fire — relying on it here
+    // was a real race that left DataGPT's panel closed behind a fab the user had to click anyway.
+    let initialView = "main";
+    try { initialView = new URLSearchParams(location.search).get("view") || "main"; } catch (e) { /* malformed query string */ }
+    if (initialView === "datagpt") openPanel();
     byId("chatClose").addEventListener("click", closePanel);
     const chatClear = byId("chatClear");
     if (chatClear) {
@@ -6255,8 +7122,6 @@ const CHAT_ENABLED = false; // TEMPORARY: hidden again pre-deployment — priori
             greet();
         });
     }
-    document.querySelectorAll("#chatFeature .chat-chip").forEach(ch =>
-        ch.addEventListener("click", () => { input.value = ch.textContent; input.focus(); }));
     input.addEventListener("input", () => { input.style.height = "auto"; input.style.height = Math.min(96, input.scrollHeight) + "px"; });
     input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
     sendBtn.addEventListener("click", send);
@@ -6264,7 +7129,16 @@ const CHAT_ENABLED = false; // TEMPORARY: hidden again pre-deployment — priori
     if (ddToggle) ddToggle.addEventListener("blur", setCompany);
 
     // ── GoIndia MCP access ──
-    const MCP_SERVER_URL = "https://goindia-mcp.fly.dev/sse"; // the actual MCP server — see McpClient below
+    // TEMPORARY, local-testing-only: goindia-mcp.fly.dev has no CORS headers on /sse or
+    // /messages/, so the browser blocks this add-in from calling it directly (curl/server-to-
+    // server calls were never subject to that check — only cross-origin fetch() from a webpage
+    // is). Pointed at the wallet backend's new /wallet/mcp/sse proxy (routers/wallet.py) instead,
+    // which does the actual goindia-mcp hop server-to-server and relays the stream back — sidesteps
+    // the problem without needing a fix on a server we don't control. Once this is confirmed
+    // working against localhost:8000, point this at the equivalent proxy route once it's live on
+    // transcriptanalyser.com, and revert this back to the direct goindia-mcp.fly.dev URL only if/
+    // when that server actually adds its own CORS headers.
+    const MCP_SERVER_URL = "https://transcriptanalyser.com/wallet/mcp/sse";
     const MCP_KEY_URL = "https://transcriptanalyser.com/dbcatalog/get-mcp-key";
     const TEST_MCP_KEY = process.env.TEST_MCP_KEY || ""; // injected at build time from .env — see webpack.config.js
     let mcpAccess = null; // { mcp_api_key, flag } | null — fetched once per panel session
@@ -6426,124 +7300,1183 @@ const CHAT_ENABLED = false; // TEMPORARY: hidden again pre-deployment — priori
     const toOpenAITools = (mcpTools) => mcpTools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.input_schema } }));
 
     // ── Excel-side tools ──
+    // Ported from sbroenne/pi-for-excel (src/tools/*.ts, src/excel/helpers.ts) — a real Office.js
+    // add-in that implements this same tool set. Adapted to plain JS (this file has no TypeScript/
+    // TypeBox) and this file's existing style: OpenAI function-calling schemas in EXCEL_TOOLS,
+    // dispatched by callTool(name, args), with mutating tools managing their own confirm/running
+    // card lifecycle exactly like the old write_excel_sheet did (see the dispatch split in send()
+    // below) rather than the generic per-tool card the read-only tools get there.
     const TEXT_CAP = 3500;
     const capText = (s, n = TEXT_CAP) => {
         s = (s || "").trim();
         return s.length > n ? s.slice(0, n) + "\n…[truncated]" : s;
     };
 
-    const EXCEL_TOOLS = [
-        { type: "function", function: { name: "list_excel_sheets", description: "List the worksheet names currently in the user's open Excel workbook.", parameters: { type: "object", properties: {} } } },
-        { type: "function", function: { name: "read_excel_sheet", description: "Read a worksheet's actual used-range layout (row numbers, column letters and cell text) from the user's open workbook. ALWAYS call this before writing a formula (e.g. a VLOOKUP) that references an existing sheet — never guess row/column positions.", parameters: { type: "object", properties: { sheet_name: { type: "string" } }, required: ["sheet_name"] } } },
-        { type: "function", function: { name: "write_excel_sheet", description: "Create or overwrite a worksheet in the user's workbook with a title, headers and rows. Cells may be plain values or formula strings starting with \"=\" (e.g. a VLOOKUP into a sheet you've already read).", parameters: { type: "object", properties: { sheet: { type: "string" }, title: { type: "string" }, headers: { type: "array", items: { type: "string" } }, rows: { type: "array", items: { type: "array" } } }, required: ["sheet"] } } }
-    ];
-
-    async function toolListSheets() {
-        let names = [];
-        await Excel.run(async (ctx) => {
-            const wb = ctx.workbook;
-            wb.worksheets.load("items/name");
-            await ctx.sync();
-            names = wb.worksheets.items.map(s => s.name);
-        });
-        return { sheets: names };
-    }
-    async function toolReadSheet({ sheet_name }) {
-        const colLetter = (n) => { let s = ""; while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = (n - m - 1) / 26; } return s; };
-        let result = { error: `No sheet named "${sheet_name}" in the workbook.` };
-        await Excel.run(async (ctx) => {
-            const wb = ctx.workbook;
-            wb.worksheets.load("items/name");
-            await ctx.sync();
-            const match = wb.worksheets.items.find(s => s.name.toLowerCase() === String(sheet_name || "").toLowerCase());
-            if (!match) return;
-            const sh = wb.worksheets.getItem(match.name);
-            const used = sh.getUsedRangeOrNullObject();
-            used.load(["text", "rowIndex", "columnIndex", "rowCount", "columnCount", "address"]);
-            await ctx.sync();
-            if (used.isNullObject) { result = { sheet: match.name, empty: true }; return; }
-            const maxRows = Math.min(used.rowCount, 60);
-            const maxCols = Math.min(used.columnCount, 20);
-            const lines = [];
-            for (let r = 0; r < maxRows; r++) {
-                const rowVals = used.text[r].slice(0, maxCols);
-                if (rowVals.every(v => String(v).trim() === "")) continue;
-                const cells = rowVals.map((v, i) => (String(v).trim() !== "" ? `${colLetter(used.columnIndex + i + 1)}=${v}` : null)).filter(Boolean);
-                lines.push(`Row ${used.rowIndex + r + 1}: ` + cells.join(" | "));
+    // Address/range math — 0-indexed column, 1-indexed row, mirrors pi-for-excel's helpers.ts.
+    const chatColToLetter = (col) => { let letter = "", c = col; while (c >= 0) { letter = String.fromCharCode((c % 26) + 65) + letter; c = Math.floor(c / 26) - 1; } return letter; };
+    const chatLetterToCol = (letters) => { let col = 0; for (let i = 0; i < letters.length; i++) col = col * 26 + (letters.charCodeAt(i) - 64); return col - 1; };
+    const chatParseCell = (cell) => {
+        const clean = cell.includes("!") ? cell.slice(cell.indexOf("!") + 1) : cell;
+        const m = clean.match(/^\$?([A-Za-z]+)\$?(\d+)$/);
+        if (!m) throw new Error(`Invalid cell address: ${cell}`);
+        return { col: chatLetterToCol(m[1].toUpperCase()), row: parseInt(m[2], 10) };
+    };
+    const chatCellAddress = (col, row) => `${chatColToLetter(col)}${row}`;
+    const chatComputeRangeAddress = (startCell, rows, cols) => {
+        const { col, row } = chatParseCell(startCell);
+        return `${startCell}:${chatCellAddress(col + cols - 1, row + rows - 1)}`;
+    };
+    const chatParseRangeRef = (ref) => {
+        if (ref.includes("!")) {
+            const idx = ref.indexOf("!");
+            const sheet = ref.slice(0, idx).replace(/^'|'$/g, "").replace(/''/g, "'");
+            return { sheet, address: ref.slice(idx + 1) };
+        }
+        return { sheet: null, address: ref };
+    };
+    const chatQualifiedAddress = (sheetName, address) => {
+        const clean = address.includes("!") ? address.slice(address.indexOf("!") + 1) : address;
+        const needsQuote = /[\s']/.test(sheetName);
+        return `${needsQuote ? `'${sheetName.replace(/'/g, "''")}'` : sheetName}!${clean}`;
+    };
+    const chatGetRangeAndSheet = (ctx, ref) => {
+        const parsed = chatParseRangeRef(ref);
+        const sheet = parsed.sheet ? ctx.workbook.worksheets.getItem(parsed.sheet) : ctx.workbook.worksheets.getActiveWorksheet();
+        return { sheet, range: sheet.getRange(parsed.address) };
+    };
+    // A cell VALUE starting with "#" (e.g. "#REF!", "#DIV/0!") is Excel's own error rendering —
+    // simplest reliable way to detect a formula error without a special-cells API call.
+    const chatFindErrors = (values, startAddress) => {
+        const errors = [];
+        const start = chatParseCell(startAddress);
+        for (let r = 0; r < (values || []).length; r++) {
+            const row = values[r] || [];
+            for (let c = 0; c < row.length; c++) {
+                const v = row[c];
+                if (typeof v === "string" && v.startsWith("#")) errors.push({ address: chatCellAddress(start.col + c, start.row + r), error: v });
             }
-            result = { sheet: match.name, address: used.address, totalRows: used.rowCount, totalCols: used.columnCount, preview: capText(lines.join("\n"), 3500) };
+        }
+        return errors;
+    };
+    const chatCountOccupied = (values, formulas) => {
+        let n = 0;
+        for (let r = 0; r < (values || []).length; r++) {
+            const vr = values[r] || [], fr = (formulas && formulas[r]) || [];
+            for (let c = 0; c < vr.length; c++) {
+                const hasValue = vr[c] !== null && vr[c] !== undefined && vr[c] !== "";
+                const hasFormula = typeof fr[c] === "string" && fr[c].startsWith("=");
+                if (hasValue || hasFormula) n++;
+            }
+        }
+        return n;
+    };
+    const chatPadValues = (values) => {
+        const cols = Math.max(1, ...values.map(r => r.length));
+        return { padded: values.map(row => { const r = row.slice(); while (r.length < cols) r.push(""); return r; }), rows: values.length, cols };
+    };
+    // Same syntax checks pi-for-excel's write-cells.ts runs before ever touching Excel — catches
+    // an unbalanced paren/quote or a formula that trails an operator client-side, instead of
+    // finding out only after the cell renders #NAME?/#VALUE!.
+    const chatValidateFormula = (formula) => {
+        if (!formula.startsWith("=")) return null;
+        const body = formula.slice(1);
+        if (body.trim().length === 0) return "Empty formula";
+        if (((body.match(/"/g) || []).length) % 2 !== 0) return "Unbalanced quotes";
+        let depth = 0, inString = false;
+        for (const ch of body) {
+            if (ch === "\"") { inString = !inString; continue; }
+            if (inString) continue;
+            if (ch === "(") depth++;
+            if (ch === ")") { depth--; if (depth < 0) return "Unbalanced parentheses"; }
+        }
+        if (depth !== 0) return "Unbalanced parentheses";
+        if (/[+\-*/^&,]$/.test(body.trim())) return "Formula ends with an operator";
+        return null;
+    };
+    const formatMiniTable = (rows) => {
+        if (!rows || !rows.length) return "(empty)";
+        return rows.map(row => "| " + row.map(v => (v === null || v === undefined || v === "") ? "" : String(v)).join(" | ") + " |").join("\n");
+    };
+
+    // Undo support: a small in-memory stack of "before" snapshots, one per successful write_cells/
+    // fill_formula call, so undo_last_change can restore exactly what was there — Ctrl+Z doesn't
+    // reliably undo programmatic Office.js writes, so this is the only real safety net for a bad
+    // AI edit. Capped at 10 entries; oldest falls off first. Cleared on panel reload (session-only,
+    // same lifetime as chat history's in-memory state before persistHistory).
+    const undoStack = [];
+    const pushUndoSnapshot = (snap) => { undoStack.push(snap); if (undoStack.length > 10) undoStack.shift(); };
+
+    const EXCEL_TOOLS = [
+        { type: "function", function: { name: "get_workbook_overview", description: "Get a structural overview of the workbook: sheet names, dimensions, header rows, named ranges, tables, and chart/pivot counts. Call this at the start of a task, or when you need to understand the workbook's structure before reading specific ranges. Pass sheet_name for a detailed view of one sheet (headers, tables, named ranges, a data preview).", parameters: { type: "object", properties: { sheet_name: { type: "string", description: "Optional — return detailed info for this one sheet instead of the whole-workbook summary." } } } } },
+        { type: "function", function: { name: "read_range", description: "Read cell values, formulas, and number formats from a range in the user's open workbook (e.g. \"A1:D10\" or \"Sheet2!B3:B20\"). Always call this before writing a formula that references existing cells — never guess row/column positions.", parameters: { type: "object", properties: { range: { type: "string", description: "A1-notation range, optionally sheet-qualified, e.g. \"A1:D10\" or \"Sheet2!A1:B5\". If no sheet is given, uses the active sheet." } }, required: ["range"] } } },
+        { type: "function", function: { name: "create_sheet", description: "Create a new, blank worksheet. write_cells/fill_formula only work on sheets that already exist — call this first if the sheet the user wants doesn't exist yet.", parameters: { type: "object", properties: { name: { type: "string", description: "Name for the new sheet (max 31 characters, can't contain \\ / ? * [ ] or :)." }, activate: { type: "boolean", description: "Switch the workbook view to the new sheet after creating it. Default true." } }, required: ["name"] } } },
+        { type: "function", function: { name: "write_cells", description: "Write values and/or formulas (strings starting with \"=\") to a range of cells, starting at start_cell. Only touches the cells you specify — everything else on the sheet is left alone. Blocks by default if the target already has data; only pass allow_overwrite:true after the user has actually confirmed they want that data overwritten.", parameters: { type: "object", properties: { start_cell: { type: "string", description: "Top-left cell to write from, e.g. \"A1\" or \"Sheet2!B3\"." }, values: { type: "array", items: { type: "array" }, description: "2D array of values/formulas. Each inner array is a row." }, allow_overwrite: { type: "boolean", description: "Set true to overwrite existing data in the target range. Default false." } }, required: ["start_cell", "values"] } } },
+        { type: "function", function: { name: "fill_formula", description: "Fill one formula across a range using Excel's own AutoFill — relative references adjust per cell automatically, the same as dragging the fill handle. Use this instead of building a large 2D formula array by hand.", parameters: { type: "object", properties: { range: { type: "string", description: "Target range to fill, e.g. \"B2:B20\" or \"Sheet1!C3:F20\". Single contiguous range only." }, formula: { type: "string", description: "Formula to fill, starting with \"=\", e.g. \"=SUM(B2:B10)\"." }, allow_overwrite: { type: "boolean", description: "Set true to overwrite existing data in the target range. Default false." } }, required: ["range", "formula"] } } },
+        { type: "function", function: { name: "recalculate_and_check", description: "Force Excel to recalculate every formula, then scan for formula errors (#REF!, #DIV/0!, #VALUE!, etc.). Call this after write_cells/fill_formula to confirm an edit didn't break anything downstream, instead of just assuming it worked.", parameters: { type: "object", properties: { sheet_name: { type: "string", description: "Optional — scope the error scan to just this sheet. Omit to scan every visible sheet." } } } } },
+        { type: "function", function: { name: "audit_workbook", description: "Proactively check whether the workbook/model is actually healthy — not just after a specific edit. Recalculates, then scans for formula errors AND for any \"check\"/reconciliation row (e.g. a balance check) whose value isn't close to zero the way it should be. Use this for a request like \"is my model healthy?\" or \"does this balance?\", not just reactively after write_cells.", parameters: { type: "object", properties: { sheet_name: { type: "string", description: "Optional — scope the audit to just this sheet. Omit to audit every visible sheet." }, tolerance: { type: "number", description: "How far from zero a check-row value can be before it's flagged. Default 0.01 (covers ordinary floating-point rounding)." } } } } },
+        { type: "function", function: { name: "undo_last_change", description: "Revert the most recent write_cells or fill_formula change made this session, restoring exactly what was there before. Regular Ctrl+Z does not reliably undo programmatic add-in writes, so this is the only dependable way to back out a bad edit.", parameters: { type: "object", properties: {} } } },
+        { type: "function", function: { name: "trace_dependencies", description: "Trace formula lineage for a single cell — precedents (what feeds it, upstream) or dependents (what it feeds, downstream). Use this to explain WHY a value is what it is by tracing the real chain of cells behind it, instead of reading one formula at a time and guessing.", parameters: { type: "object", properties: { cell: { type: "string", description: "Cell to trace, e.g. \"D10\" or \"Sheet2!F5\". Must be a single cell, not a range." }, mode: { type: "string", enum: ["precedents", "dependents"], description: "Trace direction. Default precedents." }, depth: { type: "number", description: "How many levels to trace. Default 2, max 5." } }, required: ["cell"] } } },
+        { type: "function", function: { name: "search_workbook", description: "Search for text/values (or formula text) across every visible sheet in the workbook. Use this to find where something is calculated or referenced — e.g. \"where is EBITDA calculated?\" — without reading every sheet one by one.", parameters: { type: "object", properties: { query: { type: "string", description: "Search term." }, search_formulas: { type: "boolean", description: "Search formula text instead of displayed values. Useful for finding cross-sheet references." }, use_regex: { type: "boolean", description: "Treat query as a case-insensitive regular expression." }, sheet_name: { type: "string", description: "Restrict the search to this sheet. Omit to search every visible sheet." }, max_results: { type: "number", description: "Maximum matches to return. Default 20." } }, required: ["query"] } } },
+        { type: "function", function: { name: "format_cells", description: "Apply VISUAL formatting to a range — font (bold/italic/underline/color/size/name), fill color, number format, alignment, borders, column width/row height, or merge. Does NOT change cell values or formulas — use write_cells for that.", parameters: { type: "object", properties: { range: { type: "string", description: "Range to format, e.g. \"A1:D1\" or \"Sheet2!B3:B20\"." }, bold: { type: "boolean" }, italic: { type: "boolean" }, underline: { type: "boolean" }, font_color: { type: "string", description: "Hex color, e.g. \"#0000FF\"." }, font_size: { type: "number" }, font_name: { type: "string" }, fill_color: { type: "string", description: "Hex background color, e.g. \"#FFFF00\"." }, number_format: { type: "string", description: "A preset (\"currency\", \"percent\", \"number\", \"integer\", \"text\") or a raw Excel number-format string, e.g. \"#,##0.00\"." }, horizontal_alignment: { type: "string", enum: ["Left", "Center", "Right", "General"] }, vertical_alignment: { type: "string", enum: ["Top", "Center", "Bottom"] }, wrap_text: { type: "boolean" }, borders: { type: "string", enum: ["thin", "medium", "thick", "none"], description: "Border weight applied to all four edges plus inside gridlines." }, border_color: { type: "string", description: "Hex color for borders set via `borders`. Default black." }, column_width: { type: "number", description: "Column width in points." }, row_height: { type: "number", description: "Row height in points." }, merge: { type: "boolean", description: "Merge (true) or unmerge (false) the range." } }, required: ["range"] } } },
+        { type: "function", function: { name: "create_chart", description: "Create a chart from a data range — the core way to turn a comparison table into a visual. Use this whenever the user asks to \"chart\", \"graph\", \"visualize\", or \"plot\" something.", parameters: { type: "object", properties: { source_range: { type: "string", description: "Data range for the chart, e.g. \"A1:D12\" or \"Sheet1!A1:D12\" (include header row/column for series names)." }, chart_type: { type: "string", enum: ["column", "column_stacked", "bar", "bar_stacked", "line", "line_markers", "area", "area_stacked", "pie", "doughnut", "scatter", "radar"], description: "Chart type. Default column." }, title: { type: "string", description: "Chart title." }, x_axis_title: { type: "string" }, y_axis_title: { type: "string" }, legend_position: { type: "string", enum: ["right", "left", "top", "bottom", "none"] } }, required: ["source_range"] } } },
+        { type: "function", function: { name: "conditional_format", description: "Add or clear conditional formatting rules — highlight cells that meet a condition (e.g. \"highlight negative numbers in red\"), or apply a color scale/gradient across a range (e.g. \"color-scale this range\").", parameters: { type: "object", properties: { action: { type: "string", enum: ["add", "clear"], description: "\"add\" a rule, or \"clear\" every rule in the range." }, range: { type: "string", description: "Target range, e.g. \"A1:D10\" or \"Sheet2!B2:B50\"." }, type: { type: "string", enum: ["cell_value", "formula", "color_scale"], description: "Rule type for action=\"add\"." }, operator: { type: "string", enum: ["Between", "NotBetween", "EqualTo", "NotEqualTo", "GreaterThan", "LessThan", "GreaterThanOrEqual", "LessThanOrEqual"], description: "Required for type=\"cell_value\"." }, value: { description: "Comparison value for type=\"cell_value\", e.g. 0 or \"=$B$2\"." }, value2: { description: "Second value, for Between/NotBetween." }, formula: { type: "string", description: "Custom formula for type=\"formula\", e.g. \"=A1<0\"." }, fill_color: { type: "string", description: "Hex fill color applied when the rule matches (cell_value/formula rules)." }, font_color: { type: "string" }, bold: { type: "boolean" }, italic: { type: "boolean" }, underline: { type: "boolean" }, min_color: { type: "string", description: "Color-scale low-end hex color. Default red." }, mid_color: { type: "string", description: "Color-scale midpoint hex color. Default yellow." }, max_color: { type: "string", description: "Color-scale high-end hex color. Default green." } }, required: ["action", "range"] } } },
+        { type: "function", function: { name: "modify_structure", description: "Insert/delete rows or columns, or rename/delete/hide/unhide a sheet. Deleting anything asks for confirmation first (unless auto-apply is on) since it can destroy data — inserting, renaming, hiding, and unhiding do not, since nothing is lost.", parameters: { type: "object", properties: { action: { type: "string", enum: ["insert_row", "delete_row", "insert_column", "delete_column", "rename_sheet", "delete_sheet", "hide_sheet", "unhide_sheet"] }, sheet: { type: "string", description: "Target sheet name. Required for sheet actions; for row/column actions, omit to use the active sheet." }, position: { type: "number", description: "1-indexed row number (insert_row/delete_row) or 1-indexed column number (insert_column/delete_column)." }, count: { type: "number", description: "Number of rows/columns to insert or delete. Default 1." }, new_name: { type: "string", description: "New name, for rename_sheet." } }, required: ["action"] } } },
+        { type: "function", function: { name: "named_ranges", description: "Manage named ranges — lets you (and the AI) refer to \"WACC\" instead of a guessed cell address. Deleting a name asks for confirmation first since any formula referencing it by name would break.", parameters: { type: "object", properties: { action: { type: "string", enum: ["add", "update", "delete", "list"] }, name: { type: "string", description: "The named range's name. Required for add/update/delete." }, reference: { type: "string", description: "Cell/range reference for add/update, e.g. \"Sheet1!$B$8\" or \"='Assumptions'!$B$8\"." }, scope: { type: "string", description: "Optional sheet name to scope the name to that sheet instead of the whole workbook." } }, required: ["action"] } } },
+        { type: "function", function: { name: "autofit", description: "Auto-fit column widths and/or row heights to their content — use after writing a new sheet/table where columns are too narrow to read.", parameters: { type: "object", properties: { range: { type: "string", description: "Range/sheet to auto-fit, e.g. \"A1:F1\" or \"Sheet2!A:F\". Omit to auto-fit the active sheet's whole used range." }, columns: { type: "boolean", description: "Auto-fit column widths. Default true." }, rows: { type: "boolean", description: "Auto-fit row heights. Default true." } } } } },
+        { type: "function", function: { name: "tables", description: "Convert a range into a proper Excel Table (sortable/filterable, with structured references) — use when the user asks to make a range \"a proper table,\" or wants to sort a range that already is one. \"delete\" only removes the Table wrapper (filters/styling) — the underlying data is left exactly as-is, same as Excel's own \"Convert to Range.\"", parameters: { type: "object", properties: { action: { type: "string", enum: ["create", "sort", "rename", "delete"] }, range: { type: "string", description: "Source range for action=\"create\", e.g. \"A1:E20\" or \"Sheet1!A1:E20\"." }, has_headers: { type: "boolean", description: "Whether the first row is a header row. Default true." }, name: { type: "string", description: "Table name — assigned name for create, or the target table's current name for sort/rename/delete." }, new_name: { type: "string", description: "New name, for action=\"rename\"." }, sort_column: { type: "number", description: "0-indexed column within the table to sort by, for action=\"sort\". Default 0." }, sort_ascending: { type: "boolean", description: "Sort ascending. Default true." } }, required: ["action"] } } },
+        { type: "function", function: { name: "comments", description: "Add, reply to, resolve/reopen, delete, or list cell comments — good for leaving a note explaining WHY a change was made, pairing with undo_last_change's audit trail.", parameters: { type: "object", properties: { action: { type: "string", enum: ["add", "reply", "resolve", "reopen", "delete", "list"] }, cell: { type: "string", description: "Single cell the comment is attached to, e.g. \"B2\" or \"Sheet1!B2\". Required for add/reply/resolve/reopen/delete." }, content: { type: "string", description: "Comment/reply text. Required for add/reply." }, sheet: { type: "string", description: "Sheet to list comments from, for action=\"list\". Omit to use the active sheet." } }, required: ["action"] } } },
+    ];
+    const EXCEL_TOOL_NAMES = new Set(EXCEL_TOOLS.map(t => t.function.name));
+    // These three manage their own confirm-card/running-card lifecycle (see each function below),
+    // the same way the old write_excel_sheet did via maybeConfirmAndWrite — everything else in
+    // EXCEL_TOOL_NAMES gets the generic "Running X…" wrapper send() applies itself.
+    const EXCEL_SELF_MANAGED_UI_TOOLS = new Set(["create_sheet", "write_cells", "fill_formula", "undo_last_change", "modify_structure", "named_ranges"]);
+
+    async function toolWorkbookOverview({ sheet: sheetName } = {}) {
+        let text;
+        await Excel.run(async (ctx) => {
+            if (sheetName) {
+                const sheet = ctx.workbook.worksheets.getItem(sheetName);
+                sheet.load("name,visibility");
+                const used = sheet.getUsedRangeOrNullObject();
+                used.load("rowCount,columnCount,address,values");
+                const headerRange = sheet.getRange("1:1").getUsedRangeOrNullObject();
+                headerRange.load("values");
+                const tables = sheet.tables;
+                tables.load("items/name,items/rows/count,items/columns/count");
+                const names = ctx.workbook.names;
+                names.load("items/name,items/value,items/visible");
+                const charts = sheet.charts;
+                charts.load("count");
+                const pivotTables = sheet.pivotTables;
+                pivotTables.load("items/name");
+                await ctx.sync();
+
+                const lines = [];
+                const vis = sheet.visibility === "Visible" ? "" : ` (${sheet.visibility})`;
+                const dims = used.isNullObject ? "empty" : `${used.rowCount} rows × ${used.columnCount} cols`;
+                lines.push(`## Sheet: ${sheet.name}${vis}`, `Dimensions: ${dims}`);
+                const headers = used.isNullObject || headerRange.isNullObject ? [] : (headerRange.values[0] || []).filter(v => v !== null && v !== undefined && v !== "");
+                if (headers.length) lines.push(`Headers: ${headers.join(", ")}`);
+                if (tables.items.length) {
+                    lines.push("", `### Tables (${tables.items.length})`);
+                    for (const t of tables.items) lines.push(`- **${t.name}** (${t.rows.count} rows × ${t.columns.count} cols)`);
+                }
+                const sheetPrefix = `${sheet.name}!`.toLowerCase(), sheetQPrefix = `'${sheet.name}'!`.toLowerCase();
+                const relevantNames = names.items.filter(n => n.visible && typeof n.value === "string" && (n.value.toLowerCase().startsWith(sheetPrefix) || n.value.toLowerCase().startsWith(sheetQPrefix)));
+                if (relevantNames.length) {
+                    lines.push("", `### Named Ranges (${relevantNames.length})`);
+                    for (const n of relevantNames) lines.push(`- **${n.name}** = ${n.value}`);
+                }
+                const pivotTotal = pivotTables.items.length;
+                if ((charts.count || 0) + pivotTotal > 0) {
+                    lines.push("", "### Objects", `- Charts: ${charts.count || 0}`, `- Pivot tables (${pivotTotal}): ${pivotTables.items.map(p => p.name).join(", ") || "(none)"}`);
+                }
+                if (!used.isNullObject && used.rowCount > 0) {
+                    const n = Math.min(5, used.rowCount);
+                    lines.push("", `### Preview (first ${n} rows)`, formatMiniTable(used.values.slice(0, n)));
+                }
+                text = lines.join("\n");
+            } else {
+                const wb = ctx.workbook;
+                wb.load("name");
+                const sheets = wb.worksheets;
+                sheets.load("items/name,items/position,items/visibility");
+                const names = wb.names;
+                names.load("items/name,items/value,items/visible");
+                await ctx.sync();
+
+                const lines = [`## Workbook: ${wb.name}`, "", `### Sheets (${sheets.items.length})`];
+                const perSheet = sheets.items.map(s => {
+                    const used = s.getUsedRangeOrNullObject();
+                    used.load("rowCount,columnCount");
+                    const headerRange = s.getRange("1:1").getUsedRangeOrNullObject();
+                    headerRange.load("values");
+                    const tables = s.tables;
+                    tables.load("items/name");
+                    const charts = s.charts;
+                    charts.load("count");
+                    return { s, used, headerRange, tables, charts };
+                });
+                await ctx.sync();
+                for (const { s, used, headerRange, tables, charts } of perSheet) {
+                    const vis = s.visibility === "Visible" ? "" : ` (${s.visibility})`;
+                    const dims = used.isNullObject ? "empty" : `${used.rowCount} rows × ${used.columnCount} cols`;
+                    lines.push(`${s.position + 1}. **${s.name}**${vis} — ${dims}`);
+                    const headers = used.isNullObject || headerRange.isNullObject ? [] : (headerRange.values[0] || []).filter(v => v !== null && v !== undefined && v !== "");
+                    if (headers.length) {
+                        const display = headers.length > 8 ? headers.slice(0, 8).join(", ") + `, … (+${headers.length - 8} more)` : headers.join(", ");
+                        lines.push(`   Headers: ${display}`);
+                    }
+                    if (tables.items.length) for (const t of tables.items) lines.push(`   Table: "${t.name}"`);
+                    if (charts.count) lines.push(`   Charts: ${charts.count}`);
+                }
+                const visibleNames = names.items.filter(n => n.visible);
+                if (visibleNames.length) {
+                    lines.push("", `### Named Ranges (${visibleNames.length})`);
+                    for (const n of visibleNames) lines.push(`- **${n.name}** = ${n.value}`);
+                }
+                text = lines.join("\n");
+            }
+        });
+        return { overview: capText(text, 5000) };
+    }
+
+    async function toolReadRange({ range: rangeRef }) {
+        if (!rangeRef) return { error: "range is required" };
+        let result;
+        await Excel.run(async (ctx) => {
+            const { sheet, range } = chatGetRangeAndSheet(ctx, rangeRef);
+            range.load("values,formulas,numberFormat,address,rowCount,columnCount");
+            sheet.load("name");
+            await ctx.sync();
+            const cellPart = range.address.includes("!") ? range.address.slice(range.address.indexOf("!") + 1) : range.address;
+            const errors = chatFindErrors(range.values, cellPart.split(":")[0]);
+            result = {
+                sheet: sheet.name,
+                address: chatQualifiedAddress(sheet.name, range.address),
+                rows: range.rowCount,
+                cols: range.columnCount,
+                values: range.values,
+                formulas: range.formulas,
+                numberFormats: range.numberFormat,
+                ...(errors.length ? { errors } : {}),
+            };
         });
         return result;
     }
 
+    // Blocks on existing data (unless allow_overwrite) BEFORE ever showing a confirm card — a
+    // blocked write never touched Excel at all, so there's nothing to confirm; the model sees the
+    // existing data and can ask the user whether to proceed with allow_overwrite:true. Only an
+    // ACTUAL pending write (empty target, or allow_overwrite already true) reaches the confirm gate.
+    async function toolWriteCells({ start_cell, values, allow_overwrite }) {
+        if (!start_cell || !Array.isArray(values) || !values.length) return { error: "start_cell and a non-empty values array are required" };
+        const startCellRef = start_cell.includes("!") ? start_cell.slice(start_cell.indexOf("!") + 1) : start_cell;
+        if (startCellRef.includes(":")) return { error: "start_cell must be a single cell (e.g. \"A1\"), not a range" };
+        let startParsed;
+        try { startParsed = chatParseCell(startCellRef); } catch (e) { return { error: String(e.message || e) }; }
+        const { padded, rows, cols } = chatPadValues(values);
+
+        for (let r = 0; r < padded.length; r++) {
+            for (let c = 0; c < padded[r].length; c++) {
+                const v = padded[r][c];
+                if (typeof v === "string" && v.startsWith("=")) {
+                    const bad = chatValidateFormula(v);
+                    if (bad) return { error: `Invalid formula at ${chatCellAddress(startParsed.col + c, startParsed.row + r)}: ${v} (${bad})` };
+                }
+            }
+        }
+
+        let check;
+        try {
+            await Excel.run(async (ctx) => {
+                const { sheet } = chatGetRangeAndSheet(ctx, start_cell);
+                sheet.load("name");
+                const rangeAddr = chatComputeRangeAddress(startCellRef, rows, cols);
+                const target = sheet.getRange(rangeAddr);
+                target.load("values,formulas");
+                await ctx.sync();
+                check = { sheetName: sheet.name, address: rangeAddr, beforeValues: target.values, beforeFormulas: target.formulas };
+            });
+        } catch (e) { return { error: String(e.message || e) }; }
+
+        const occupied = chatCountOccupied(check.beforeValues, check.beforeFormulas);
+        const fullAddr = chatQualifiedAddress(check.sheetName, check.address);
+        if (occupied > 0 && !allow_overwrite) {
+            return { blocked: true, address: fullAddr, existingCount: occupied, existingValues: check.beforeValues };
+        }
+
+        if (!autoApplyEdits) {
+            const verb = occupied > 0 ? `overwrite ${occupied} existing cell(s) in` : "write to";
+            const approved = await addConfirmCard(`DataGPT wants to ${verb} ${fullAddr} (${rows}×${cols}).`);
+            if (!approved) return { ok: false, rejected: true, address: fullAddr };
+        }
+        const card = addCard(`Writing ${fullAddr}…`, "run");
+        try {
+            let written;
+            await Excel.run(async (ctx) => {
+                const sheet = ctx.workbook.worksheets.getItem(check.sheetName);
+                sheet.getRange(check.address).values = padded;
+                await ctx.sync();
+                const verify = sheet.getRange(check.address);
+                verify.load("values,formulas");
+                await ctx.sync();
+                written = { readBackValues: verify.values, readBackFormulas: verify.formulas };
+            });
+            pushUndoSnapshot({ kind: "cells", sheetName: check.sheetName, address: check.address, beforeValues: check.beforeValues, beforeFormulas: check.beforeFormulas });
+            const errors = chatFindErrors(written.readBackValues, startCellRef);
+            await settleCard(card, errors.length ? "err" : "done", errors.length ? "✕" : "✓");
+            return { ok: true, address: fullAddr, rows, cols, ...(errors.length ? { errors } : {}) };
+        } catch (e) {
+            await settleCard(card, "err", "✕");
+            return { error: String(e.message || e) };
+        }
+    }
+
+    async function toolFillFormula({ range: rangeRef, formula, allow_overwrite }) {
+        if (!rangeRef || !formula) return { error: "range and formula are required" };
+        if (!formula.startsWith("=")) return { error: "formula must start with \"=\"" };
+        const bad = chatValidateFormula(formula);
+        if (bad) return { error: `Invalid formula (${bad})` };
+        if (/[;,]/.test(rangeRef)) return { error: "fill_formula only supports a single contiguous range" };
+
+        let check;
+        try {
+            await Excel.run(async (ctx) => {
+                const { sheet, range } = chatGetRangeAndSheet(ctx, rangeRef);
+                sheet.load("name");
+                range.load("address,rowCount,columnCount,values,formulas");
+                await ctx.sync();
+                check = { sheetName: sheet.name, address: range.address, rowCount: range.rowCount, columnCount: range.columnCount, beforeValues: range.values, beforeFormulas: range.formulas };
+            });
+        } catch (e) { return { error: String(e.message || e) }; }
+
+        const occupied = chatCountOccupied(check.beforeValues, check.beforeFormulas);
+        const fullAddr = chatQualifiedAddress(check.sheetName, check.address);
+        if (occupied > 0 && !allow_overwrite) {
+            return { blocked: true, address: fullAddr, existingCount: occupied, existingValues: check.beforeValues };
+        }
+
+        if (!autoApplyEdits) {
+            const verb = occupied > 0 ? `overwrite ${occupied} existing cell(s) in` : "fill";
+            const approved = await addConfirmCard(`DataGPT wants to ${verb} ${fullAddr} (${check.rowCount}×${check.columnCount}) with "${formula}".`);
+            if (!approved) return { ok: false, rejected: true, address: fullAddr };
+        }
+        const card = addCard(`Filling formula across ${fullAddr}…`, "run");
+        try {
+            let filled;
+            await Excel.run(async (ctx) => {
+                const sheet = ctx.workbook.worksheets.getItem(check.sheetName);
+                const range = sheet.getRange(check.address);
+                const topLeft = range.getCell(0, 0);
+                topLeft.formulas = [[formula]];
+                topLeft.autoFill(range, "FillDefault");
+                range.load("values,formulas");
+                await ctx.sync();
+                filled = { readBackValues: range.values, readBackFormulas: range.formulas };
+            });
+            pushUndoSnapshot({ kind: "cells", sheetName: check.sheetName, address: check.address, beforeValues: check.beforeValues, beforeFormulas: check.beforeFormulas });
+            const cellPart = check.address.includes("!") ? check.address.slice(check.address.indexOf("!") + 1) : check.address;
+            const errors = chatFindErrors(filled.readBackValues, cellPart.split(":")[0]);
+            await settleCard(card, errors.length ? "err" : "done", errors.length ? "✕" : "✓");
+            return { ok: true, address: fullAddr, rows: check.rowCount, cols: check.columnCount, formula, ...(errors.length ? { errors } : {}) };
+        } catch (e) {
+            await settleCard(card, "err", "✕");
+            return { error: String(e.message || e) };
+        }
+    }
+
+    // Not gated by a confirm card — recalculating is always-safe, expected Excel behavior (not an
+    // AI-authored edit), same reasoning as why read-only tools don't need approval either.
+    async function toolRecalculate({ sheet: sheetName } = {}) {
+        let result;
+        await Excel.run(async (ctx) => {
+            ctx.workbook.application.calculate("Recalculate");
+            await ctx.sync();
+
+            let sheets;
+            if (sheetName) {
+                const s = ctx.workbook.worksheets.getItem(sheetName);
+                s.load("name");
+                sheets = [s];
+            } else {
+                ctx.workbook.worksheets.load("items/name,items/visibility");
+                await ctx.sync();
+                sheets = ctx.workbook.worksheets.items.filter(s => s.visibility === "Visible");
+            }
+            // Plain values scan per sheet, same technique as chatFindErrors elsewhere in this file
+            // — could be slow on a handful of very large sheets, but every sheet this add-in itself
+            // writes is bounded to a few hundred rows at most, and that's the common case here.
+            const usedRanges = sheets.map(s => { const u = s.getUsedRangeOrNullObject(); u.load("values,address,isNullObject"); return { sheet: s, used: u }; });
+            await ctx.sync();
+
+            const errors = [];
+            for (const { sheet, used } of usedRanges) {
+                if (used.isNullObject) continue;
+                const cellPart = used.address.includes("!") ? used.address.slice(used.address.indexOf("!") + 1) : used.address;
+                for (const e of chatFindErrors(used.values, cellPart.split(":")[0])) errors.push({ sheet: sheet.name, ...e });
+            }
+            result = { recalculated: true, errorCount: errors.length, errors: errors.slice(0, 50) };
+        });
+        return result;
+    }
+
+    // Purpose-built for this product specifically, not a generic Excel feature — a direct
+    // application of the same "does this model actually tie out" checks the AI Financial Model
+    // builder already runs on itself (balance_check ≈ 0, etc.), but on demand for ANY workbook,
+    // not just one this add-in built. Recalculates first (unlike recalculate_and_check, which
+    // assumes the caller already knows what changed — this is the "give me the full picture,
+    // unprompted" tool, so it can't rely on a fresh recalc having already happened), then reports
+    // two things: formula errors everywhere, and any "check" row whose value isn't close to zero
+    // the way a reconciliation/sanity-check row is supposed to be. A "check" row is found by
+    // label, not by key — this works on someone else's workbook too, not just ones this add-in
+    // built with a known balance_check key.
+    async function toolAuditWorkbook({ sheet: sheetName, tolerance } = {}) {
+        const tol = typeof tolerance === "number" && isFinite(tolerance) ? Math.abs(tolerance) : 0.01;
+        let result;
+        await Excel.run(async (ctx) => {
+            ctx.workbook.application.calculate("Recalculate");
+            await ctx.sync();
+
+            let sheets;
+            if (sheetName) {
+                const s = ctx.workbook.worksheets.getItem(sheetName);
+                s.load("name");
+                sheets = [s];
+            } else {
+                ctx.workbook.worksheets.load("items/name,items/visibility");
+                await ctx.sync();
+                sheets = ctx.workbook.worksheets.items.filter(s => s.visibility === "Visible");
+            }
+            const usedRanges = sheets.map(s => { const u = s.getUsedRangeOrNullObject(); u.load("values,address,isNullObject"); return { sheet: s, used: u }; });
+            await ctx.sync();
+
+            const formulaErrors = [];
+            const checkRowIssues = [];
+            for (const { sheet, used } of usedRanges) {
+                if (used.isNullObject) continue;
+                const cellPart = used.address.includes("!") ? used.address.slice(used.address.indexOf("!") + 1) : used.address;
+                const startCell = cellPart.split(":")[0];
+                const start = chatParseCell(startCell);
+
+                for (const e of chatFindErrors(used.values, startCell)) formulaErrors.push({ sheet: sheet.name, ...e });
+
+                for (let r = 0; r < used.values.length; r++) {
+                    const row = used.values[r] || [];
+                    const label = row.find(v => typeof v === "string" && v.trim() !== "");
+                    if (typeof label !== "string" || !/check/i.test(label)) continue;
+                    const rowNum = start.row + r;
+                    const offenders = [];
+                    for (let c = 0; c < row.length; c++) {
+                        const v = row[c];
+                        if (typeof v === "number" && Math.abs(v) > tol) offenders.push({ address: chatCellAddress(start.col + c, rowNum), value: v });
+                    }
+                    if (offenders.length) checkRowIssues.push({ sheet: sheet.name, row: rowNum, label: label.trim(), offenders: offenders.slice(0, 10) });
+                }
+            }
+            result = {
+                healthy: formulaErrors.length === 0 && checkRowIssues.length === 0,
+                formulaErrors: formulaErrors.slice(0, 50),
+                checkRowIssues: checkRowIssues.slice(0, 20),
+            };
+        });
+        return result;
+    }
+
+    // Only checks for a name collision (Excel can't silently overwrite a sheet by creating a
+    // duplicate-named one the way write_cells can silently overwrite occupied cells) — so unlike
+    // write_cells/fill_formula there's no allow_overwrite escape hatch, just a clear error telling
+    // the model to target the existing sheet instead of trying to create a duplicate.
+    async function toolCreateSheet({ name, activate } = {}) {
+        const sheetName = String(name || "").trim().slice(0, 31);
+        if (!sheetName) return { error: "name is required" };
+        if (/[\\/?*[\]:]/.test(sheetName)) return { error: "Sheet names can't contain \\ / ? * [ ] or :" };
+
+        let exists = false;
+        try {
+            await Excel.run(async (ctx) => {
+                ctx.workbook.worksheets.load("items/name");
+                await ctx.sync();
+                exists = ctx.workbook.worksheets.items.some(s => s.name.toLowerCase() === sheetName.toLowerCase());
+            });
+        } catch (e) { return { error: String(e.message || e) }; }
+        if (exists) return { error: `A sheet named "${sheetName}" already exists — use write_cells/fill_formula/read_range on it directly instead of creating a duplicate.` };
+
+        if (!autoApplyEdits) {
+            const approved = await addConfirmCard(`DataGPT wants to create a new sheet named "${sheetName}".`);
+            if (!approved) return { ok: false, rejected: true, name: sheetName };
+        }
+        const card = addCard(`Creating sheet "${sheetName}"…`, "run");
+        try {
+            await Excel.run(async (ctx) => {
+                const sh = ctx.workbook.worksheets.add(sheetName);
+                if (activate !== false) sh.activate();
+                await ctx.sync();
+            });
+            pushUndoSnapshot({ kind: "createSheet", sheetName });
+            await settleCard(card, "done", "✓");
+            return { ok: true, name: sheetName };
+        } catch (e) {
+            await settleCard(card, "err", "✕");
+            return { error: String(e.message || e) };
+        }
+    }
+
+    async function toolUndoLastChange() {
+        const snap = undoStack.pop();
+        if (!snap) return { ok: false, error: "Nothing to undo — no tracked change this session." };
+
+        if (snap.kind === "createSheet") {
+            if (!autoApplyEdits) {
+                const approved = await addConfirmCard(`DataGPT wants to undo creating the sheet "${snap.sheetName}" (deletes it).`);
+                if (!approved) { undoStack.push(snap); return { ok: false, rejected: true, name: snap.sheetName }; }
+            }
+            const card = addCard(`Deleting sheet "${snap.sheetName}"…`, "run");
+            try {
+                await Excel.run(async (ctx) => {
+                    ctx.workbook.worksheets.getItem(snap.sheetName).delete();
+                    await ctx.sync();
+                });
+                await settleCard(card, "done", "✓");
+                return { ok: true, deletedSheet: snap.sheetName };
+            } catch (e) {
+                await settleCard(card, "err", "✕");
+                undoStack.push(snap);
+                return { error: String(e.message || e) };
+            }
+        }
+
+        const fullAddr = chatQualifiedAddress(snap.sheetName, snap.address);
+        if (!autoApplyEdits) {
+            const approved = await addConfirmCard(`DataGPT wants to undo the last change to ${fullAddr}.`);
+            if (!approved) { undoStack.push(snap); return { ok: false, rejected: true, address: fullAddr }; }
+        }
+        const card = addCard(`Undoing change to ${fullAddr}…`, "run");
+        try {
+            await Excel.run(async (ctx) => {
+                const sheet = ctx.workbook.worksheets.getItem(snap.sheetName);
+                // Restore the formula where the original cell had one, otherwise the plain value —
+                // a cell that was blank before must go back to blank, not to whatever the write
+                // computed. Range.formulas accepts a mix of formula strings and plain values in the
+                // same 2D array, same as .values would for the non-formula entries.
+                const restore = snap.beforeValues.map((row, r) => row.map((v, c) => {
+                    const f = snap.beforeFormulas[r] && snap.beforeFormulas[r][c];
+                    return (typeof f === "string" && f.startsWith("=")) ? f : v;
+                }));
+                sheet.getRange(snap.address).formulas = restore;
+                await ctx.sync();
+            });
+            await settleCard(card, "done", "✓");
+            return { ok: true, address: fullAddr };
+        } catch (e) {
+            await settleCard(card, "err", "✕");
+            undoStack.push(snap);
+            return { error: String(e.message || e) };
+        }
+    }
+
+    // Uses Excel's own getDirectPrecedents()/getDirectDependents() when the host supports them
+    // (falls back gracefully otherwise). For precedents, an unavailable API falls back to scanning
+    // the cell's own formula text for references. There's deliberately NO workbook-wide scanning
+    // fallback for dependents — finding every cell that references this one with no native API
+    // means scanning every sheet's formulas by hand, which is expensive and out of scope here; if
+    // the API isn't available, dependents tracing just reports that plainly instead.
+    async function toolTraceDependencies({ cell, mode, depth }) {
+        if (!cell) return { error: "cell is required" };
+        const traceMode = mode === "dependents" ? "dependents" : "precedents";
+        const maxDepth = Math.min(Math.max(parseInt(depth, 10) || 2, 1), 5);
+        const MAX_NODES = 40;
+        let apiUnavailable = false;
+        const nodes = {};
+        let rootAddr;
+        try {
+            await Excel.run(async (ctx) => {
+                const queue = [{ ref: cell, depth: 0 }];
+                const visited = new Set();
+                while (queue.length && Object.keys(nodes).length < MAX_NODES) {
+                    const { ref, depth: d } = queue.shift();
+                    let sheet, range;
+                    try { ({ sheet, range } = chatGetRangeAndSheet(ctx, ref)); } catch (e) { continue; }
+                    range.load("values,formulas,address");
+                    sheet.load("name");
+                    await ctx.sync();
+                    const cellPart = range.address.includes("!") ? range.address.slice(range.address.indexOf("!") + 1) : range.address;
+                    const qualified = chatQualifiedAddress(sheet.name, cellPart.split(":")[0]);
+                    if (visited.has(qualified)) continue;
+                    visited.add(qualified);
+                    if (d === 0) rootAddr = qualified;
+                    const formula = range.formulas[0] && range.formulas[0][0];
+                    const formulaStr = (typeof formula === "string" && formula.startsWith("=")) ? formula : undefined;
+                    const node = { address: qualified, value: range.values[0] && range.values[0][0], ...(formulaStr ? { formula: formulaStr } : {}), links: [] };
+                    nodes[qualified] = node;
+                    if (d >= maxDepth) continue;
+
+                    let related = [];
+                    try {
+                        const rel = traceMode === "precedents" ? range.getDirectPrecedents() : range.getDirectDependents();
+                        rel.load("addresses");
+                        await ctx.sync();
+                        related = (rel.addresses || []).flatMap(s => s.split(",").map(x => x.trim()).filter(Boolean));
+                    } catch (e) {
+                        apiUnavailable = true;
+                        if (traceMode === "precedents" && formulaStr) {
+                            const re = /(?:'[^']+'|[A-Za-z_][A-Za-z0-9_.]*)?!?\$?[A-Z]{1,3}\$?\d+(?::\$?[A-Z]{1,3}\$?\d+)?/g;
+                            const seen = new Set();
+                            for (const m of formulaStr.matchAll(re)) {
+                                const token = m[0];
+                                if (!/\d/.test(token)) continue;
+                                const ref2 = (token.includes("!") ? token : `${sheet.name}!${token}`).replace(/\$/g, "");
+                                if (!seen.has(ref2)) { seen.add(ref2); related.push(ref2); }
+                            }
+                        }
+                    }
+                    related = related.slice(0, 15); // cap fan-out per node so a wide dependency web can't runaway
+                    for (const r of related) {
+                        // fullRef always has a sheet prefix by construction — Excel sheet names can
+                        // never contain "!", so splitting on the first one is always unambiguous.
+                        const fullRef = r.includes("!") ? r : `${sheet.name}!${r}`;
+                        const bangIdx = fullRef.indexOf("!");
+                        node.links.push(chatQualifiedAddress(fullRef.slice(0, bangIdx), fullRef.slice(bangIdx + 1)));
+                        queue.push({ ref: fullRef, depth: d + 1 });
+                    }
+                }
+            });
+        } catch (e) {
+            return { error: String(e.message || e) };
+        }
+        return {
+            mode: traceMode, root: rootAddr, depth: maxDepth, nodes: Object.values(nodes),
+            ...(apiUnavailable ? { note: traceMode === "dependents" ? "Direct-dependents API unavailable in this Excel version/host — dependents tracing could not run." : "Direct-precedents API unavailable — fell back to scanning each cell's own formula text." } : {}),
+        };
+    }
+
+    async function toolSearchWorkbook({ query, search_formulas, use_regex, sheet, max_results }) {
+        if (!query) return { error: "query is required" };
+        const maxResults = Math.max(parseInt(max_results, 10) || 20, 1);
+        const searchFormulas = !!search_formulas;
+        let regex;
+        if (use_regex) {
+            try { regex = new RegExp(query, "i"); } catch (e) { return { error: `Invalid regex: ${e.message}` }; }
+        }
+        const queryLower = query.toLowerCase();
+        let result;
+        await Excel.run(async (ctx) => {
+            const sheets = ctx.workbook.worksheets;
+            sheets.load("items/name,items/visibility");
+            await ctx.sync();
+            const targets = sheet ? sheets.items.filter(s => s.name === sheet) : sheets.items.filter(s => s.visibility === "Visible");
+
+            const loaded = targets.map(s => { const u = s.getUsedRangeOrNullObject(); u.load("values,formulas,address,isNullObject"); return { sheet: s, used: u }; });
+            await ctx.sync();
+
+            const matches = [];
+            let hasMore = false;
+            outer: for (const { sheet: sh, used } of loaded) {
+                if (used.isNullObject) continue;
+                const cellPart = used.address.includes("!") ? used.address.slice(used.address.indexOf("!") + 1) : used.address;
+                let start;
+                try { start = chatParseCell(cellPart.split(":")[0]); } catch (e) { continue; }
+                for (let r = 0; r < used.values.length; r++) {
+                    const valueRow = used.values[r] || [], formulaRow = used.formulas[r] || [];
+                    for (let c = 0; c < valueRow.length; c++) {
+                        const value = valueRow[c], formula = formulaRow[c];
+                        let target = "";
+                        if (searchFormulas) {
+                            if (typeof formula !== "string" || !formula) continue;
+                            target = formula;
+                        } else {
+                            if (value === null || value === undefined || value === "") continue;
+                            target = String(value);
+                        }
+                        const isMatch = regex ? regex.test(target) : target.toLowerCase().includes(queryLower);
+                        if (!isMatch) continue;
+                        matches.push({
+                            sheet: sh.name,
+                            address: chatCellAddress(start.col + c, start.row + r),
+                            value,
+                            ...(typeof formula === "string" && formula.startsWith("=") ? { formula } : {}),
+                        });
+                        if (matches.length >= maxResults) { hasMore = true; break outer; }
+                    }
+                }
+            }
+            result = { matches, hasMore };
+        });
+        return result;
+    }
+
+    // ── Second tool batch: chart/formatting-focused, ported from the same reference
+    // (pi-for-excel-main's src/tools/format-cells.ts, charts.ts, conditional-format.ts,
+    // modify-structure.ts, comments.ts) where it has an equivalent; named_ranges/autofit/tables
+    // have no dedicated file there, so those are written directly from the plain Excel JS API.
+    // Risk classification for the confirm-gate (see EXCEL_SELF_MANAGED_UI_TOOLS below): anything
+    // that only changes PRESENTATION (formatting, conditional formatting, charts, autofit, table
+    // wrapping, comments) can't destroy data and is trivially reversible, so none of those prompt
+    // for approval — same reasoning as why read-only tools don't. modify_structure's delete_*
+    // actions and named_ranges' delete action CAN cause real damage (deleting a row/column/sheet
+    // destroys data; deleting a name breaks every formula that referenced it by name), so those two
+    // tools manage their own confirm logic internally, gating only their destructive actions.
+
+    const CHAT_NUMBER_FORMAT_PRESETS = { currency: "#,##0.00", integer: "#,##0", number: "#,##0.00", percent: "0.0%", text: "@" };
+    const CHAT_BORDER_EDGES = ["EdgeTop", "EdgeBottom", "EdgeLeft", "EdgeRight", "InsideHorizontal", "InsideVertical"];
+    const CHAT_BORDER_WEIGHTS = { thin: "Thin", medium: "Medium", thick: "Thick" };
+
+    async function toolFormatCells(p) {
+        if (!p || !p.range) return { error: "range is required" };
+        const applied = [];
+        try {
+            let fullAddr;
+            await Excel.run(async (ctx) => {
+                const { sheet, range } = chatGetRangeAndSheet(ctx, p.range);
+                sheet.load("name");
+                range.load("address,rowCount,columnCount");
+                await ctx.sync();
+                const fmt = range.format;
+                if (typeof p.bold === "boolean") { fmt.font.bold = p.bold; applied.push(p.bold ? "bold" : "not bold"); }
+                if (typeof p.italic === "boolean") { fmt.font.italic = p.italic; applied.push(p.italic ? "italic" : "not italic"); }
+                if (typeof p.underline === "boolean") { fmt.font.underline = p.underline ? "Single" : "None"; applied.push(p.underline ? "underline" : "no underline"); }
+                if (p.font_color) { fmt.font.color = p.font_color; applied.push(`font color ${p.font_color}`); }
+                if (typeof p.font_size === "number") { fmt.font.size = p.font_size; applied.push(`${p.font_size}pt`); }
+                if (p.font_name) { fmt.font.name = p.font_name; applied.push(`font ${p.font_name}`); }
+                if (p.fill_color) { fmt.fill.color = p.fill_color; applied.push(`fill ${p.fill_color}`); }
+                if (p.number_format) {
+                    const nf = CHAT_NUMBER_FORMAT_PRESETS[p.number_format] || p.number_format;
+                    range.numberFormat = Array.from({ length: range.rowCount }, () => Array.from({ length: range.columnCount }, () => nf));
+                    applied.push(`format "${nf}"`);
+                }
+                if (p.horizontal_alignment) { fmt.horizontalAlignment = p.horizontal_alignment; applied.push(`align ${p.horizontal_alignment}`); }
+                if (p.vertical_alignment) { fmt.verticalAlignment = p.vertical_alignment; applied.push(`v-align ${p.vertical_alignment}`); }
+                if (typeof p.wrap_text === "boolean") { fmt.wrapText = p.wrap_text; applied.push(p.wrap_text ? "wrap" : "no wrap"); }
+                if (p.borders === "none") {
+                    for (const edge of CHAT_BORDER_EDGES) fmt.borders.getItem(edge).style = "None";
+                    applied.push("borders removed");
+                } else if (p.borders) {
+                    const weight = CHAT_BORDER_WEIGHTS[p.borders];
+                    for (const edge of CHAT_BORDER_EDGES) {
+                        const b = fmt.borders.getItem(edge);
+                        b.style = "Continuous"; b.weight = weight;
+                        if (p.border_color) b.color = p.border_color;
+                    }
+                    applied.push(`${p.borders} borders`);
+                }
+                if (typeof p.column_width === "number") { fmt.columnWidth = p.column_width; applied.push(`col width ${p.column_width}pt`); }
+                if (typeof p.row_height === "number") { fmt.rowHeight = p.row_height; applied.push(`row height ${p.row_height}pt`); }
+                if (typeof p.merge === "boolean") { if (p.merge) range.merge(); else range.unmerge(); applied.push(p.merge ? "merged" : "unmerged"); }
+                await ctx.sync();
+                fullAddr = chatQualifiedAddress(sheet.name, range.address);
+            });
+            return { ok: true, address: fullAddr, applied };
+        } catch (e) {
+            return { error: String(e.message || e) };
+        }
+    }
+
+    const CHAT_CHART_TYPE_MAP = {
+        column: "ColumnClustered", column_stacked: "ColumnStacked", bar: "BarClustered", bar_stacked: "BarStacked",
+        line: "Line", line_markers: "LineMarkers", area: "Area", area_stacked: "AreaStacked",
+        pie: "Pie", doughnut: "Doughnut", scatter: "XYScatter", radar: "Radar",
+    };
+    async function toolCreateChart(p) {
+        if (!p || !p.source_range) return { error: "source_range is required" };
+        const excelType = CHAT_CHART_TYPE_MAP[p.chart_type] || "ColumnClustered";
+        try {
+            let result;
+            await Excel.run(async (ctx) => {
+                const { sheet, range } = chatGetRangeAndSheet(ctx, p.source_range);
+                sheet.load("name");
+                const chart = sheet.charts.add(excelType, range, "Auto");
+                if (p.title) chart.title.text = p.title;
+                if (p.legend_position === "none") chart.legend.visible = false;
+                else if (p.legend_position) { chart.legend.visible = true; chart.legend.position = p.legend_position; }
+                if (p.x_axis_title) chart.axes.categoryAxis.title.text = p.x_axis_title;
+                if (p.y_axis_title) chart.axes.valueAxis.title.text = p.y_axis_title;
+                chart.name = `${p.title || "Chart"}_${Date.now() % 100000}`;
+                chart.load("name");
+                await ctx.sync();
+                result = { name: chart.name, sheet: sheet.name };
+            });
+            return { ok: true, ...result };
+        } catch (e) {
+            return { error: String(e.message || e) };
+        }
+    }
+
+    async function toolConditionalFormat(p) {
+        if (!p || !p.range) return { error: "range is required" };
+        try {
+            let fullAddr;
+            await Excel.run(async (ctx) => {
+                const { sheet, range } = chatGetRangeAndSheet(ctx, p.range);
+                sheet.load("name");
+                range.load("address");
+                await ctx.sync();
+                fullAddr = chatQualifiedAddress(sheet.name, range.address);
+
+                if (p.action === "clear") {
+                    range.conditionalFormats.clearAll();
+                    await ctx.sync();
+                    return;
+                }
+
+                const applyFmt = (fmt) => {
+                    if (p.fill_color) fmt.fill.color = p.fill_color;
+                    if (p.font_color) fmt.font.color = p.font_color;
+                    if (typeof p.bold === "boolean") fmt.font.bold = p.bold;
+                    if (typeof p.italic === "boolean") fmt.font.italic = p.italic;
+                    if (typeof p.underline === "boolean") fmt.font.underline = p.underline ? "Single" : "None";
+                };
+
+                if (p.type === "color_scale") {
+                    const cf = range.conditionalFormats.add("ColorScale");
+                    cf.colorScale.criteria = {
+                        minimum: { formula: null, type: "LowestValue", color: p.min_color || "#F8696B" },
+                        midpoint: { formula: "50", type: "Percentile", color: p.mid_color || "#FFEB84" },
+                        maximum: { formula: null, type: "HighestValue", color: p.max_color || "#63BE7B" },
+                    };
+                } else if (p.type === "formula") {
+                    if (!p.formula) throw new Error("formula is required for type=\"formula\"");
+                    const cf = range.conditionalFormats.add("Custom");
+                    cf.custom.rule.formula = p.formula;
+                    applyFmt(cf.custom.format);
+                } else {
+                    if (!p.operator) throw new Error("operator is required for type=\"cell_value\"");
+                    const cf = range.conditionalFormats.add("CellValue");
+                    const rule = { formula1: String(p.value ?? ""), operator: p.operator };
+                    if (p.value2 !== undefined) rule.formula2 = String(p.value2);
+                    cf.cellValue.rule = rule;
+                    applyFmt(cf.cellValue.format);
+                }
+                await ctx.sync();
+            });
+            return { ok: true, address: fullAddr, action: p.action };
+        } catch (e) {
+            return { error: String(e.message || e) };
+        }
+    }
+
+    const CHAT_STRUCTURE_DESTRUCTIVE = new Set(["delete_row", "delete_column", "delete_sheet"]);
+    async function toolModifyStructure(p) {
+        if (!p || !p.action) return { error: "action is required" };
+        if (CHAT_STRUCTURE_DESTRUCTIVE.has(p.action) && !autoApplyEdits) {
+            const desc = p.action === "delete_sheet" ? `delete the sheet "${p.sheet}"`
+                : p.action === "delete_row" ? `delete row(s) ${p.position}-${(p.position || 0) + (p.count || 1) - 1} on "${p.sheet || "the active sheet"}"`
+                    : `delete column(s) starting at ${chatColToLetter((p.position || 1) - 1)} on "${p.sheet || "the active sheet"}"`;
+            const approved = await addConfirmCard(`DataGPT wants to ${desc}. This can destroy data.`);
+            if (!approved) return { ok: false, rejected: true };
+        }
+        const card = addCard(`${p.action.replace(/_/g, " ")}…`, "run");
+        try {
+            let result;
+            await Excel.run(async (ctx) => {
+                const getSheet = () => p.sheet ? ctx.workbook.worksheets.getItem(p.sheet) : ctx.workbook.worksheets.getActiveWorksheet();
+                const count = Math.max(1, parseInt(p.count, 10) || 1);
+                switch (p.action) {
+                    case "insert_row": {
+                        if (!p.position) throw new Error("position is required for insert_row");
+                        const sheet = getSheet(); sheet.load("name");
+                        sheet.getRange(`${p.position}:${p.position + count - 1}`).insert("Down");
+                        await ctx.sync();
+                        result = { message: `Inserted ${count} row(s) at row ${p.position} on "${sheet.name}"` };
+                        break;
+                    }
+                    case "delete_row": {
+                        if (!p.position) throw new Error("position is required for delete_row");
+                        const sheet = getSheet(); sheet.load("name");
+                        sheet.getRange(`${p.position}:${p.position + count - 1}`).delete("Up");
+                        await ctx.sync();
+                        result = { message: `Deleted ${count} row(s) starting at row ${p.position} on "${sheet.name}"` };
+                        break;
+                    }
+                    case "insert_column": {
+                        if (!p.position) throw new Error("position is required for insert_column");
+                        const startLetter = chatColToLetter(p.position - 1), endLetter = chatColToLetter(p.position + count - 2);
+                        const sheet = getSheet(); sheet.load("name");
+                        sheet.getRange(`${startLetter}:${endLetter}`).insert("Right");
+                        await ctx.sync();
+                        result = { message: `Inserted ${count} column(s) at column ${startLetter} on "${sheet.name}"` };
+                        break;
+                    }
+                    case "delete_column": {
+                        if (!p.position) throw new Error("position is required for delete_column");
+                        const startLetter = chatColToLetter(p.position - 1), endLetter = chatColToLetter(p.position + count - 2);
+                        const sheet = getSheet(); sheet.load("name");
+                        sheet.getRange(`${startLetter}:${endLetter}`).delete("Left");
+                        await ctx.sync();
+                        result = { message: `Deleted ${count} column(s) starting at column ${startLetter} on "${sheet.name}"` };
+                        break;
+                    }
+                    case "rename_sheet": {
+                        if (!p.sheet || !p.new_name) throw new Error("sheet and new_name are required for rename_sheet");
+                        getSheet().name = p.new_name;
+                        await ctx.sync();
+                        result = { message: `Renamed "${p.sheet}" to "${p.new_name}"` };
+                        break;
+                    }
+                    case "delete_sheet": {
+                        if (!p.sheet) throw new Error("sheet is required for delete_sheet");
+                        getSheet().delete();
+                        await ctx.sync();
+                        result = { message: `Deleted sheet "${p.sheet}"` };
+                        break;
+                    }
+                    case "hide_sheet": {
+                        if (!p.sheet) throw new Error("sheet is required for hide_sheet");
+                        getSheet().visibility = "Hidden";
+                        await ctx.sync();
+                        result = { message: `Hid sheet "${p.sheet}"` };
+                        break;
+                    }
+                    case "unhide_sheet": {
+                        if (!p.sheet) throw new Error("sheet is required for unhide_sheet");
+                        getSheet().visibility = "Visible";
+                        await ctx.sync();
+                        result = { message: `Unhid sheet "${p.sheet}"` };
+                        break;
+                    }
+                    default: throw new Error(`Unknown action "${p.action}"`);
+                }
+            });
+            await settleCard(card, "done", "✓");
+            return { ok: true, ...result };
+        } catch (e) {
+            await settleCard(card, "err", "✕");
+            return { error: String(e.message || e) };
+        }
+    }
+
+    async function toolNamedRanges(p) {
+        if (!p || !p.action) return { error: "action is required" };
+        if (p.action === "delete" && !autoApplyEdits) {
+            const approved = await addConfirmCard(`DataGPT wants to delete the named range "${p.name}". Any formula referencing it by name will break.`);
+            if (!approved) return { ok: false, rejected: true };
+        }
+        const selfManaged = p.action === "delete";
+        const card = selfManaged ? addCard(`Deleting named range "${p.name}"…`, "run") : null;
+        try {
+            let result;
+            await Excel.run(async (ctx) => {
+                const names = p.scope ? ctx.workbook.worksheets.getItem(p.scope).names : ctx.workbook.names;
+                switch (p.action) {
+                    case "list": {
+                        names.load("items/name,items/value,items/type,items/visible");
+                        await ctx.sync();
+                        result = { names: names.items.filter(n => n.visible).map(n => ({ name: n.name, value: n.value, type: n.type })) };
+                        break;
+                    }
+                    case "add": {
+                        if (!p.name || !p.reference) throw new Error("name and reference are required for add");
+                        names.add(p.name, p.reference.startsWith("=") ? p.reference : `=${p.reference}`);
+                        await ctx.sync();
+                        result = { message: `Created named range "${p.name}" = ${p.reference}` };
+                        break;
+                    }
+                    case "update": {
+                        if (!p.name || !p.reference) throw new Error("name and reference are required for update");
+                        const item = names.getItem(p.name);
+                        item.formula = p.reference.startsWith("=") ? p.reference : `=${p.reference}`;
+                        await ctx.sync();
+                        result = { message: `Updated named range "${p.name}" to ${p.reference}` };
+                        break;
+                    }
+                    case "delete": {
+                        if (!p.name) throw new Error("name is required for delete");
+                        names.getItem(p.name).delete();
+                        await ctx.sync();
+                        result = { message: `Deleted named range "${p.name}"` };
+                        break;
+                    }
+                    default: throw new Error(`Unknown action "${p.action}"`);
+                }
+            });
+            await settleCard(card, "done", "✓");
+            return { ok: true, ...result };
+        } catch (e) {
+            await settleCard(card, "err", "✕");
+            return { error: String(e.message || e) };
+        }
+    }
+
+    async function toolAutofit({ range: rangeRef, columns, rows } = {}) {
+        try {
+            let fullAddr;
+            await Excel.run(async (ctx) => {
+                let sheet, range;
+                if (rangeRef) { ({ sheet, range } = chatGetRangeAndSheet(ctx, rangeRef)); }
+                else { sheet = ctx.workbook.worksheets.getActiveWorksheet(); range = sheet.getUsedRange(); }
+                sheet.load("name");
+                range.load("address");
+                await ctx.sync();
+                if (columns !== false) range.format.autofitColumns();
+                if (rows !== false) range.format.autofitRows();
+                await ctx.sync();
+                fullAddr = chatQualifiedAddress(sheet.name, range.address);
+            });
+            return { ok: true, address: fullAddr };
+        } catch (e) {
+            return { error: String(e.message || e) };
+        }
+    }
+
+    async function toolTables(p) {
+        if (!p || !p.action) return { error: "action is required" };
+        try {
+            let result;
+            await Excel.run(async (ctx) => {
+                switch (p.action) {
+                    case "create": {
+                        if (!p.range) throw new Error("range is required for create");
+                        const { sheet, range } = chatGetRangeAndSheet(ctx, p.range);
+                        sheet.load("name");
+                        const table = sheet.tables.add(range, p.has_headers !== false);
+                        if (p.name) table.name = p.name;
+                        table.load("name,id");
+                        await ctx.sync();
+                        result = { message: `Created table "${table.name}" from ${p.range}`, name: table.name };
+                        break;
+                    }
+                    case "sort": {
+                        if (!p.name) throw new Error("name is required for sort");
+                        const table = ctx.workbook.tables.getItem(p.name);
+                        table.sort.apply([{ key: p.sort_column || 0, ascending: p.sort_ascending !== false }]);
+                        await ctx.sync();
+                        result = { message: `Sorted table "${p.name}" by column ${p.sort_column || 0}` };
+                        break;
+                    }
+                    case "rename": {
+                        if (!p.name || !p.new_name) throw new Error("name and new_name are required for rename");
+                        ctx.workbook.tables.getItem(p.name).name = p.new_name;
+                        await ctx.sync();
+                        result = { message: `Renamed table "${p.name}" to "${p.new_name}"` };
+                        break;
+                    }
+                    case "delete": {
+                        // Removes the Table wrapper only (filters/styling/structured refs) — the
+                        // underlying cell data is left exactly as-is, same as Excel's own "Convert
+                        // to Range." Nothing gets deleted, so this isn't confirm-gated.
+                        if (!p.name) throw new Error("name is required for delete");
+                        ctx.workbook.tables.getItem(p.name).convertToRange();
+                        await ctx.sync();
+                        result = { message: `Converted table "${p.name}" back to a plain range` };
+                        break;
+                    }
+                    default: throw new Error(`Unknown action "${p.action}"`);
+                }
+            });
+            return { ok: true, ...result };
+        } catch (e) {
+            return { error: String(e.message || e) };
+        }
+    }
+
+    async function toolComments(p) {
+        if (!p || !p.action) return { error: "action is required" };
+        try {
+            let result;
+            await Excel.run(async (ctx) => {
+                switch (p.action) {
+                    case "list": {
+                        const sheet = p.sheet ? ctx.workbook.worksheets.getItem(p.sheet) : ctx.workbook.worksheets.getActiveWorksheet();
+                        sheet.load("name");
+                        const comments = sheet.comments;
+                        comments.load("items/content,items/authorName,items/resolved");
+                        await ctx.sync();
+                        const withLoc = comments.items.map(c => { const loc = c.getLocation(); loc.load("address"); return { c, loc }; });
+                        await ctx.sync();
+                        result = { comments: withLoc.map(({ c, loc }) => ({ address: chatQualifiedAddress(sheet.name, loc.address), content: c.content, author: c.authorName, resolved: c.resolved })) };
+                        break;
+                    }
+                    case "add": {
+                        if (!p.cell || !p.content) throw new Error("cell and content are required for add");
+                        const { sheet, range } = chatGetRangeAndSheet(ctx, p.cell);
+                        sheet.load("name");
+                        sheet.comments.add(range, p.content);
+                        await ctx.sync();
+                        result = { message: `Added comment to ${chatQualifiedAddress(sheet.name, range.address || p.cell)}` };
+                        break;
+                    }
+                    case "reply": {
+                        if (!p.cell || !p.content) throw new Error("cell and content are required for reply");
+                        const comment = await chatFindCommentAtCell(ctx, p.cell);
+                        if (!comment) throw new Error(`No comment found at ${p.cell}`);
+                        comment.replies.add(p.content);
+                        await ctx.sync();
+                        result = { message: `Replied to comment at ${p.cell}` };
+                        break;
+                    }
+                    case "resolve":
+                    case "reopen": {
+                        if (!p.cell) throw new Error("cell is required for resolve/reopen");
+                        const comment = await chatFindCommentAtCell(ctx, p.cell);
+                        if (!comment) throw new Error(`No comment found at ${p.cell}`);
+                        comment.resolved = p.action === "resolve";
+                        await ctx.sync();
+                        result = { message: `${p.action === "resolve" ? "Resolved" : "Reopened"} comment at ${p.cell}` };
+                        break;
+                    }
+                    case "delete": {
+                        if (!p.cell) throw new Error("cell is required for delete");
+                        const comment = await chatFindCommentAtCell(ctx, p.cell);
+                        if (!comment) throw new Error(`No comment found at ${p.cell}`);
+                        comment.delete();
+                        await ctx.sync();
+                        result = { message: `Deleted comment at ${p.cell}` };
+                        break;
+                    }
+                    default: throw new Error(`Unknown action "${p.action}"`);
+                }
+            });
+            return { ok: true, ...result };
+        } catch (e) {
+            return { error: String(e.message || e) };
+        }
+    }
+    // Shared by reply/resolve/reopen/delete — Office.js has no "get comment at this cell" lookup,
+    // only "get this comment's cell", so finding the right comment means loading every comment on
+    // the sheet and matching addresses ourselves. Must run inside the SAME Excel.run as the caller
+    // (shares the caller's context/sync cadence), so this takes `ctx` rather than opening its own.
+    async function chatFindCommentAtCell(ctx, cellRef) {
+        const { sheet, range } = chatGetRangeAndSheet(ctx, cellRef);
+        sheet.load("name");
+        range.load("address");
+        const comments = sheet.comments;
+        comments.load("items");
+        await ctx.sync();
+        const targetAddr = range.address.includes("!") ? range.address.slice(range.address.indexOf("!") + 1) : range.address;
+        const withLoc = comments.items.map(c => { const loc = c.getLocation(); loc.load("address"); return { c, loc }; });
+        await ctx.sync();
+        const match = withLoc.find(({ loc }) => {
+            const a = loc.address.includes("!") ? loc.address.slice(loc.address.indexOf("!") + 1) : loc.address;
+            return a === targetAddr;
+        });
+        return match ? match.c : null;
+    }
+
     function toolLabel(name, args) {
         switch (name) {
-            case "list_excel_sheets": return "Listing workbook sheets";
-            case "read_excel_sheet": return `Reading sheet "${args.sheet_name}"`;
+            case "get_workbook_overview": return args.sheet_name ? `Inspecting sheet "${args.sheet_name}"` : "Getting workbook overview";
+            case "read_range": return `Reading ${args.range}`;
+            case "recalculate_and_check": return "Recalculating and checking for errors";
+            case "audit_workbook": return args.sheet_name ? `Auditing sheet "${args.sheet_name}"` : "Auditing workbook health";
+            case "trace_dependencies": return `Tracing ${args.mode === "dependents" ? "dependents" : "precedents"} of ${args.cell}`;
+            case "search_workbook": return `Searching for "${args.query}"`;
+            case "format_cells": return `Formatting ${args.range}`;
+            case "create_chart": return `Creating chart from ${args.source_range}`;
+            case "conditional_format": return args.action === "clear" ? `Clearing conditional formatting on ${args.range}` : `Adding conditional formatting to ${args.range}`;
+            case "autofit": return args.range ? `Auto-fitting ${args.range}` : "Auto-fitting the active sheet";
+            case "tables": return `${(args.action || "").replace(/^./, c => c.toUpperCase())} table${args.name ? ` "${args.name}"` : ""}`;
+            case "comments": return `${(args.action || "").replace(/^./, c => c.toUpperCase())} comment${args.cell ? ` at ${args.cell}` : ""}`;
             default: return name;
         }
     }
 
     async function callTool(name, args) {
         switch (name) {
-            case "list_excel_sheets": return toolListSheets();
-            case "read_excel_sheet": return toolReadSheet(args);
+            case "get_workbook_overview": return toolWorkbookOverview({ sheet: args.sheet_name });
+            case "read_range": return toolReadRange(args);
+            case "create_sheet": return toolCreateSheet(args);
+            case "write_cells": return toolWriteCells(args);
+            case "fill_formula": return toolFillFormula(args);
+            case "recalculate_and_check": return toolRecalculate({ sheet: args.sheet_name });
+            case "audit_workbook": return toolAuditWorkbook({ sheet: args.sheet_name, tolerance: args.tolerance });
+            case "undo_last_change": return toolUndoLastChange();
+            case "trace_dependencies": return toolTraceDependencies(args);
+            case "search_workbook": return toolSearchWorkbook({ ...args, sheet: args.sheet_name });
+            case "format_cells": return toolFormatCells(args);
+            case "create_chart": return toolCreateChart(args);
+            case "conditional_format": return toolConditionalFormat(args);
+            case "modify_structure": return toolModifyStructure(args);
+            case "named_ranges": return toolNamedRanges(args);
+            case "autofit": return toolAutofit(args);
+            case "tables": return toolTables(args);
+            case "comments": return toolComments(args);
             default: return { error: `Unknown tool "${name}"` };
-        }
-    }
-
-    const padRow = (arr, n) => { const a = (arr || []).slice(0, n).map(v => (v == null ? "" : v)); while (a.length < n) a.push(""); return a; };
-
-    // Write a simple table (the only Excel action the chat performs for now).
-    async function writeAction(action) {
-        const card = addCard(`Writing sheet "${action.sheet || "Claude Output"}"…`, "run");
-        const st = card.querySelector(".chat-card-st");
-        try {
-            await Excel.run(async (ctx) => {
-                const wb = ctx.workbook;
-                wb.worksheets.load("items/name");
-                await ctx.sync();
-                const names = wb.worksheets.items.map(s => s.name);
-                const sheetName = String(action.sheet || "Claude Output").slice(0, 31);
-                let sh;
-                if (names.includes(sheetName)) { sh = wb.worksheets.getItem(sheetName); sh.getUsedRange()?.clear(); }
-                else sh = wb.worksheets.add(sheetName);
-                sh.tabColor = "#D97757";
-                const colL = (n) => { let s = ""; while (n > 0) { const mm = (n - 1) % 26; s = String.fromCharCode(65 + mm) + s; n = (n - mm - 1) / 26; } return s; };
-                const headers = Array.isArray(action.headers) ? action.headers : [];
-                const rows = Array.isArray(action.rows) ? action.rows : [];
-                const ncol = Math.max(headers.length, ...rows.map(r => (r || []).length), 1);
-                const last = colL(ncol);
-                let r = 1;
-                if (action.title) {
-                    sh.getRange("A1").values = [[String(action.title)]];
-                    sh.getRange("A1").format.font.bold = true;
-                    sh.getRange("A1").format.font.size = 13;
-                    sh.getRange("A1").format.fill.color = "#fdf3ee";
-                    r = 3;
-                }
-                if (headers.length) {
-                    const hr = sh.getRange(`A${r}:${last}${r}`);
-                    hr.values = [padRow(headers, ncol)];
-                    hr.format.font.bold = true; hr.format.fill.color = "#e8edf3";
-                    r++;
-                }
-                if (rows.length) {
-                    sh.getRange(`A${r}:${last}${r + rows.length - 1}`).values = rows.map(x => padRow(x, ncol));
-                }
-                sh.getRange("A:A").format.columnWidth = 180;
-                sh.activate();
-                await ctx.sync();
-            });
-            card.className = "chat-card done"; st.textContent = "✓";
-        } catch (e) {
-            console.error("[Chat] write failed", e);
-            card.className = "chat-card err"; st.textContent = "✕";
         }
     }
 
     async function send() {
         if (busy) return;
+        if (!chatBalanceSufficient) return; // button is already disabled; this covers Enter-to-send
         const q = input.value.trim();
         if (!q) return;
 
@@ -6597,16 +8530,32 @@ const CHAT_ENABLED = false; // TEMPORARY: hidden again pre-deployment — priori
                     : `GoIndia's research data tools are unavailable this turn (${mcpUnavailableReason}) — you only have the Excel read/write tools below. If the user's request needs data you don't already have from this conversation, say so rather than inventing numbers.\n`) +
                 `Rules:\n` +
                 `- If a data tool needs a company identifier you don't have, look it up via the available tools first — never guess.\n` +
-                `- Before writing any formula that references an existing worksheet (e.g. a VLOOKUP into "Key Financials"), call read_excel_sheet on it first — never guess row/column positions. Use list_excel_sheets if you're unsure what sheets exist.\n` +
-                `- Use write_excel_sheet to create or update sheets. Prefer live formulas (VLOOKUP/MATCH etc.) that reference a sheet you've already read; otherwise write the plain values you fetched.\n` +
-                `- Every write is shown to the user for approval before it happens unless they've turned on auto-apply. If a write_excel_sheet result comes back with rejected: true, tell the user the write was skipped rather than assuming it happened — do not silently retry it.\n` +
+                `- Call get_workbook_overview at the start of a task (or read_range on the specific area) before writing any formula that references existing cells — never guess row/column positions. Prefer a named range from the overview over a guessed cell address when one exists.\n` +
+                `- write_cells/fill_formula only work on a sheet that already exists — if the user names a sheet that isn't in the workbook (check get_workbook_overview first), call create_sheet before trying to write to it, rather than reporting that you "can't" create it.\n` +
+                `- Use write_cells for values/formulas at specific cells, and fill_formula (never a hand-built 2D formula array) when the same formula repeats down or across a range — relative references adjust automatically. Both only touch the cells you specify; nothing else on the sheet is affected.\n` +
+                `- Every write is shown to the user for approval before it happens unless they've turned on auto-apply. If a write_cells/fill_formula/undo_last_change result comes back with rejected: true or blocked: true, tell the user rather than assuming it happened — only retry with allow_overwrite:true if the user actually confirms they want that data overwritten.\n` +
+                `- After a write that could affect other formulas, call recalculate_and_check and mention any errors it finds rather than assuming success. If a change turns out wrong, use undo_last_change rather than trying to manually reconstruct the previous state.\n` +
+                `- Use trace_dependencies to explain WHY a value is what it is (trace its precedents) instead of re-reading formulas one cell at a time. Use search_workbook to locate where something is calculated or referenced instead of reading every sheet.\n` +
+                `- Visual/structural requests have their own tools — format_cells (bold, currency, colors, borders), conditional_format (highlight/color-scale by value), create_chart (visualize a comparison), autofit (fix narrow columns after writing new data), tables (make a range sortable/filterable), named_ranges (so a cell can be called "WACC" instead of guessed by address), modify_structure (insert/delete rows/columns, rename/hide a sheet), and comments (leave a note explaining a change). Prefer these over write_cells for anything that isn't a value or formula.\n` +
                 `- Compute derived figures yourself (YoY growth, CAGR, margins, ratios, averages) from the numbers you fetch.\n` +
                 `- Be concise in your final answer.`;
 
             const combinedTools = EXCEL_TOOLS.concat(mcpOpenAITools);
             const convo = [{ role: "system", content: system }, ...history.slice(-8)];
             let full = "";
-            for (let iter = 0; iter < 6; iter++) {
+            // Summed across every OpenRouter call this question takes (tool-calling round trips
+            // included, plus the forced-final-answer fallback below if it fires) — deducted from
+            // the wallet and logged once the full answer is in, see deductChatCost near the bottom.
+            let totalCostUsd = 0;
+            // A real MCP research/model-editing question routinely needs many round trips —
+            // search_company, get_catalog, get_schema, one or more run_query attempts (the first
+            // query often isn't quite right and needs a retry), then possibly audit_workbook/
+            // trace_dependencies/write_cells on top of that. 6 was too tight and left "full" empty
+            // (see the fallback below) even though the model was mid-investigation, not stuck or
+            // erroring; raised again since even 10 was cutting off legitimately multi-step work,
+            // then again from 20 to 30 for the same reason.
+            const MAX_TOOL_ITERS = 30;
+            for (let iter = 0; iter < MAX_TOOL_ITERS; iter++) {
                 const res = await fetch(OPENROUTER_URL, {
                     method: "POST",
                     headers: { "Content-Type": "application/json", "Authorization": `Bearer ${OPENROUTER_KEY}` },
@@ -6615,6 +8564,7 @@ const CHAT_ENABLED = false; // TEMPORARY: hidden again pre-deployment — priori
                 if (!res.ok) throw new Error(`OpenRouter ${res.status}: ${(await res.text()).slice(0, 160)}`);
                 const data = await res.json();
                 const cost = data.usage?.cost;
+                if (cost != null) totalCostUsd += Number(cost) || 0;
                 console.log(`[Chat] 💰 turn ${iter + 1} cost: ${cost != null ? "$" + Number(cost).toFixed(5) : "n/a"} | tokens: ${data.usage?.total_tokens ?? "?"}`);
 
                 const msg = data.choices?.[0]?.message;
@@ -6628,50 +8578,79 @@ const CHAT_ENABLED = false; // TEMPORARY: hidden again pre-deployment — priori
                     let args = {};
                     try { args = JSON.parse(call.function.arguments || "{}"); } catch (e) { /* leave empty */ }
                     let result;
-                    if (call.function.name === "write_excel_sheet") {
-                        try { result = await maybeConfirmAndWrite(args); } // renders its own confirm/write card
+                    if (EXCEL_SELF_MANAGED_UI_TOOLS.has(call.function.name)) {
+                        try { result = await callTool(call.function.name, args); } // renders its own confirm/running card
                         catch (e) { result = { error: String(e.message || e) }; }
-                    } else if (call.function.name === "list_excel_sheets" || call.function.name === "read_excel_sheet") {
+                    } else if (EXCEL_TOOL_NAMES.has(call.function.name)) {
                         const card = addCard(`${toolLabel(call.function.name, args)}…`, "run");
-                        const st = card.querySelector(".chat-card-st");
-                        try { result = await callTool(call.function.name, args); card.className = "chat-card done"; st.textContent = "✓"; }
-                        catch (e) { result = { error: String(e.message || e) }; card.className = "chat-card err"; st.textContent = "✕"; }
+                        try { result = await callTool(call.function.name, args); await settleCard(card, "done", "✓"); }
+                        catch (e) { result = { error: String(e.message || e) }; await settleCard(card, "err", "✕"); }
                     } else {
                         // MCP-provided tool
                         const card = addCard(`Running "${call.function.name}"…`, "run");
-                        const st = card.querySelector(".chat-card-st");
                         try {
                             const r = await mcpClient.callTool(call.function.name, args);
                             result = r.isError ? { error: r.text } : { text: capText(r.text) };
-                            card.className = "chat-card " + (r.isError ? "err" : "done"); st.textContent = r.isError ? "✕" : "✓";
-                        } catch (e) { result = { error: String(e.message || e) }; card.className = "chat-card err"; st.textContent = "✕"; }
+                            await settleCard(card, r.isError ? "err" : "done", r.isError ? "✕" : "✓");
+                        } catch (e) { result = { error: String(e.message || e) }; await settleCard(card, "err", "✕"); }
                     }
                     convo.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(result).slice(0, 6000) });
                 }
             }
 
-            // Fallback: honor a fenced ```excel block if the model emitted one instead of
-            // calling write_excel_sheet.
-            let shown = full;
-            const mm = full.match(/```excel\s*([\s\S]*?)```/i);
-            if (mm) {
+            // Ran out of iterations while the model was still calling tools (never hit the
+            // !calls.length break above) — force one last text-ONLY turn (no "tools" param at all,
+            // so it physically cannot call another one) so whatever was actually discovered along
+            // the way still reaches the user, instead of silently showing "(no response)" for a
+            // question that was genuinely being worked on, not stuck or erroring.
+            if (!full) {
                 try {
-                    const parsed = JSON.parse(mm[1].trim());
-                    for (const a of (Array.isArray(parsed) ? parsed : [parsed])) await maybeConfirmAndWrite(a);
-                } catch (e) { console.warn("[Chat] bad action JSON", e); }
-                shown = full.replace(/```excel[\s\S]*?```/i, "").trim();
+                    const res = await fetch(OPENROUTER_URL, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${OPENROUTER_KEY}` },
+                        body: JSON.stringify({
+                            model: AI_MODEL,
+                            messages: [...convo, { role: "user", content: "Give your best answer now based on everything gathered above — no more tool calls." }],
+                            temperature: 0.2, max_tokens: 3000, usage: { include: true },
+                        }),
+                    });
+                    if (res.ok) {
+                        const data = await res.json();
+                        full = data.choices?.[0]?.message?.content || "";
+                        const cost = data.usage?.cost;
+                        if (cost != null) totalCostUsd += Number(cost) || 0;
+                    }
+                } catch (e) { /* fall through to "(no response)" below if even this fails */ }
             }
 
-            thinking.textContent = shown || "(no response)";
-            history.push({ role: "assistant", content: shown });
+            // (No fenced-```excel``` fallback anymore — that existed only to catch write_excel_sheet
+            // being emitted as text instead of a real tool call. write_cells/fill_formula are plain
+            // function-calling tools like every other tool here, with no bespoke action-JSON shape
+            // to fall back to; if the model doesn't call a tool properly, it simply doesn't act —
+            // the same failure mode as any other tool-calling miss.)
+            //
+            // "thinking" was appended to the stream FIRST, before any of this turn's tool-progress
+            // cards — left in place, the answer would fill in at the TOP of a growing list of cards
+            // instead of at the bottom, so as the window grew taller the user had to scroll back UP
+            // to notice it had finished. Move it to the end now that every card for this turn has
+            // already been added, so the answer always lands as the last, most-visible thing.
+            stream.appendChild(thinking.parentElement); // move the .chat-msg wrapper, not just the inner .chat-bubble — moving the bubble alone detaches it from the wrapper whose .chat-msg.bot .chat-bubble rule supplies its background/border
+            stream.scrollTop = stream.scrollHeight;
+            thinking.innerHTML = renderMarkdown(full || "(no response)");
+            history.push({ role: "assistant", content: full });
             persistHistory();
+            // Query is fully complete (tool calls done, final answer rendered) — deduct+log the
+            // summed cost now. Fire-and-forget, same as the financial-model deduction elsewhere.
+            if (totalCostUsd > 0) deductChatCost({ question: q, costUsd: totalCostUsd });
         } catch (e) {
-            thinking.textContent = "⚠ " + e.message;
+            stream.appendChild(thinking.parentElement); // move the .chat-msg wrapper, not just the inner .chat-bubble — moving the bubble alone detaches it from the wrapper whose .chat-msg.bot .chat-bubble rule supplies its background/border
+            stream.scrollTop = stream.scrollHeight;
+            thinking.innerHTML = renderMarkdown("⚠ " + e.message);
             console.error("[Chat] error", e);
         } finally {
             if (mcpClient) { try { await mcpClient.close(); } catch (e) { /* already torn down */ } }
             try { abortController.abort(); } catch (e) { /* no-op if already settled */ }
-            busy = false; sendBtn.disabled = false;
+            busy = false; sendBtn.disabled = !chatBalanceSufficient;
         }
     }
 })();
