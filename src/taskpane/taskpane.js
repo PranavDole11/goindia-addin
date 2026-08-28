@@ -422,6 +422,19 @@ document.getElementById("loginForm").addEventListener("submit", async (e) => {
     document.getElementById("loginScreen").style.display = "flex";
 });*/
 
+// Broker-report fetch window. The deployed service exposes /mcp/broker_reports_single_comp
+// (PLURAL) and, unlike the singular route, it does NOT derive its own window — fincode, start_date
+// and end_date are all required, as YYYY-MM-DD. Six months back matches what the singular route
+// computed internally, so the data returned is unchanged. Declared at MODULE level because its two
+// callers sit in different scopes: the financial-model fetch and the chat panel's own.
+const brokerReportWindow = () => {
+    const to = new Date();
+    const from = new Date(to);
+    from.setMonth(from.getMonth() - 6);
+    const iso = (d) => d.toISOString().slice(0, 10);
+    return { start_date: iso(from), end_date: iso(to) };
+};
+
 const MAX_MODEL_COST_INR = 30; // matches the AI Financial Model card's own displayed cost ceiling
 const TEST_BYPASS_USER_ID = "test123"; // ut@gmail.com certification account — see refreshWalletBalance
 
@@ -844,6 +857,10 @@ const MIN_CHAT_BALANCE_INR = 3;
 // window before the first balance fetch resolves; from then on refreshWalletBalance() fails CLOSED
 // exactly like the AI-model toggle does.
 let chatBalanceSufficient = true;
+// Mirrors the chat panel's own `busy` out to module scope. setChatAvailability below runs on a
+// 60s wallet timer and used to reset the send button's disabled state unconditionally — which
+// re-enabled it mid-query, roughly a minute into every long answer.
+let chatBusy = false;
 
 // Disables the DataGPT send button and reveals the notice above the composer. The textarea stays
 // usable on purpose — a half-typed question should not be lost just because the balance dipped,
@@ -852,7 +869,9 @@ function setChatAvailability(sufficientBalance) {
     chatBalanceSufficient = !!sufficientBalance;
     const btn = document.getElementById("chatSend");
     const notice = document.getElementById("chatBalanceNotice");
-    if (btn) btn.disabled = !chatBalanceSufficient;
+    // While a turn is in flight the button belongs to the chat panel (it is a STOP button then),
+    // so leave it alone and let renderSendBtn own it.
+    if (btn && !chatBusy) btn.disabled = !chatBalanceSufficient;
     if (notice) notice.style.display = chatBalanceSufficient ? "none" : "block";
 }
 
@@ -1443,6 +1462,13 @@ const RIBBON_VIEW_ALLOWLIST = {
     download: [
         "companyDataControls", "companyDropdownWrap", "includeOptions", "buttons",
         "walletDeductBanner", "aiStatusBox", "warningMsg", "infoBox",
+        // dataStatusRow carries the "new data available" status AND its Refresh button. It was
+        // missing from this allowlist, so the ribbon's Download Data view hid it outright (it is a
+        // direct child of #addinUI, like infoBox above, so the loop below set display:none on it).
+        // That is the one view where it matters most — checking for and pulling new data is the
+        // whole purpose of that view, and the button was only reachable from the default "main"
+        // view. Present in the shipped v1.4.0.0 bundle with the same omission.
+        "dataStatusRow",
         "disclaimerModal", "staleModelModal",
     ],
     profile: ["profileSection", "profileExtras"],
@@ -2100,11 +2126,11 @@ Office.onReady(async (info) => {
         // assumptions) — a stronger reasoning model.
         // All calls route through OpenRouter (a direct-to-Google API path was tried and reverted).
         const STATIC_MODEL = "google/gemini-2.5-flash";
-        const DYNAMIC_MODEL = "openai/gpt-5.4";
+        const DYNAMIC_MODEL = "openai/gpt-5.6-sol";
         // Cross-PROVIDER last-resort fallback for every call (not just Assumptions). A same-provider
         // fallback (e.g. flash -> pro) is useless against a Google-infra-wide blip — observed in
         // practice: an "Upstream idle timeout" on gemini-2.5-pro and "JSON error injected into SSE
-        const FALLBACK_MODEL = "openai/gpt-5.4";
+        const FALLBACK_MODEL = "openai/gpt-5.6-sol";
 
         const GENERAL_DISCLAIMER = "General Disclaimer - The information on this website has been collected from certain public sources. GoIndia Advisors LLP believes that the information it uses comes from reliable sources, but does not guarantee the accuracy or completeness of this information, which is subject to change without notice, and nothing in this document shall be construed as such a guarantee. Employees involved in this service may hold positions in the companies mentioned in the services/information. We disclaim any liability arising from use of information contained on this website. Nothing herein shall constitute or be construed as an offering of financial instruments or as investment advice or recommendations by GoIndia Advisors LLP. The Site may include advertisements and links to external sites and co-branded pages which GoIndia Advisors LLP does not endorse and cannot accept any responsibility or liability for loss or damage suffered by the intended viewer. GoIndia Advisors LLP is unable to exercise control over the security or content of information passing over the network or via the Service, and GoIndia Advisors LLP hereby excludes all liability of any kind for the transmission or reception of infringing or unlawful information of whatever nature.";
 
@@ -2525,7 +2551,7 @@ Office.onReady(async (info) => {
                 });
                 const [ecRes, brRes, miRes, obRes, ...qnaResArr] = await Promise.all([
                     selection.earningCall ? post("https://goindiainvest.in/mcp/earning_call_summaries", { fincodes: [fc], quarter_years: last2Q }) : Promise.resolve(null),
-                    selection.broker ? post("https://goindiainvest.in/mcp/broker_report_single_comp", { fincode: fc }) : Promise.resolve(null),
+                    selection.broker ? post("https://goindiainvest.in/mcp/broker_reports_single_comp", { fincode: Number(fc), ...brokerReportWindow() }) : Promise.resolve(null),
                     selection.interview ? post("https://goindiainvest.in/mcp/comp_management_interviews", { fincode: fc }) : Promise.resolve(null),
                     selection.orderBook ? post("https://goindiainvest.in/mcp/order_book_single_comp", { fincode: fc, quarter_list: last2Q.map(String) }) : Promise.resolve(null),
                     ...(selection.qna ? last2Q.map(qy => post("https://goindiainvest.in/mcp/fetch_transcript_ques_ans", { fincode: fc, quarter_year: qy })) : [])
@@ -5993,10 +6019,11 @@ PURE-FORMULA ROWS — when this prompt gives you the COMPLETE formula for a row 
                 // Broker/analyst reports (recommendations, price targets)
                 let brText = "";
                 try {
-                    const brRes = await fetch("https://goindiainvest.in/mcp/broker_report_single_comp", {
+                    const brRes = await fetch("https://goindiainvest.in/mcp/broker_reports_single_comp", {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ fincode: comp.fincode })
+                        // fincode must be an INTEGER here — the schema rejects a numeric string.
+                        body: JSON.stringify({ fincode: Number(comp.fincode), ...brokerReportWindow() })
                     });
                     if (brRes.ok) brText = await brRes.text();
                 } catch (e) { /* broker data is optional */ }
@@ -6356,8 +6383,23 @@ Return ONLY a valid JSON object — no markdown, no explanation, no code fences.
         if (operationalChecked) handleOperationalRefresh().catch(e => console.error("Operational fetch failed:", e));
 
         const modes = [];
-        if (indASChecked) modes.push({ label: "IndAS", suffix: "" });
-        if (detailedChecked) modes.push({ label: "Detailed", suffix: "IND" });
+        // The API's "IND" suffix IS the Ind-AS presentation — these two were wired the wrong way
+        // round, so the section written as "(IndAS)" actually held the non-IND sheet and vice
+        // versa. That's why a period the API only publishes on the IND sheet (e.g. Mar2026 on
+        // BalanceSheetIND) appeared to be "missing": it was written under the "(Detailed)" title.
+        //
+        // This order is the SHEET'S VISUAL order: combined with the Consolidated-then-Standalone
+        // write loops further down, it lays each sheet out as IndAS Consolidated, Detailed
+        // Consolidated, IndAS Standalone, Detailed Standalone.
+        //
+        // Safe to order for readability ONLY because buildIndex now picks the best-RANKED block
+        // rather than the first one written (see the rank note there). Until that changed, table
+        // order silently doubled as link priority, so laying the sheet out this way would have
+        // re-pointed every autoLink at the IND series — which is HALF-YEARLY (Mar/Sep, ~5 periods)
+        // against the non-IND series' ANNUAL 13+ years, and a model needs the annual one. rankOf
+        // now carries that preference on its own, independent of where the tables sit.
+        if (indASChecked) modes.push({ label: "IndAS", suffix: "IND" });
+        if (detailedChecked) modes.push({ label: "Detailed", suffix: "" });
         if (modes.length === 0) return; // Operational-only selection — nothing else to do
 
         try {
@@ -6369,7 +6411,7 @@ Return ONLY a valid JSON object — no markdown, no explanation, no code fences.
             // PROBE — some companies (e.g. no subsidiaries) have ONLY a standalone (S) entry in
             // basic_info and no consolidated (C) one at all. Rather than fire 4-8 Consolidated
             // calls per format that are guaranteed to come back empty, fetch ONE cheap Consolidated
-            // sheet up front (base/IndAS ProfitLoss) and use it to decide whether to bother with
+            // sheet up front (the non-IND ProfitLoss, i.e. the "Detailed" label) and use it to decide whether to bother with
             // Consolidated at all for the rest of this download.
             let hasConsolidated = true;
             let probePlCData = null;
@@ -6391,7 +6433,8 @@ Return ONLY a valid JSON object — no markdown, no explanation, no code fences.
             // Standalone is fetched, and the Consolidated fields are left null so the sheet-writer
             // knows to omit those sections rather than show an empty "not available" placeholder.
             const modeDatasets = await Promise.all(modes.map(async ({ label, suffix }) => {
-                // The probe itself already answers plCData for the base (no-suffix/IndAS) format —
+                // The probe itself already answers plCData for the no-suffix format (labelled
+                // "Detailed" — see the note on `modes` above) —
                 // reuse it instead of re-fetching the identical sheet. Only when the probe actually
                 // succeeded — if it failed outright, hasConsolidated fails open to true (fetch both,
                 // same as before this change existed), but probePlCData is null, so it must NOT be
@@ -6851,10 +6894,12 @@ Return ONLY a valid JSON object — no markdown, no explanation, no code fences.
 /* ═══════════════ DATAGPT CHAT (EXPERIMENTAL) ═══════════════
    One agent, DeepSeek V4 Pro (via OpenRouter), with two tool sources merged into a single
    tool-calling loop:
-   1. GoIndia's own MCP server (goindia-mcp.fly.dev/sse) — connected to directly (the same
-      server gia-chat2.js's own McpClient talks to; that file is a reference for the wire
-      protocol only, its /api/chatai/gia-chat2 wrapper is a separate product with its own
-      agent loop and is NOT called from here). Covers the full backend/routers/mcp.py data
+   1. GoIndia's own MCP server (goindia-mcp.fly.dev/mcp, over the Streamable HTTP transport
+      that replaced HTTP+SSE) — reached through the wallet backend's server-to-server proxy
+      because the upstream sends no CORS headers (the same server gia-chat2_new.js's own
+      McpClient talks to; that file is a reference for the wire protocol only, its
+      /api/chatai/gia-chat2_new wrapper is a separate product with its own agent loop and is
+      NOT called from here). Covers the full backend/routers/mcp.py data
       surface. Requires the user to hold an active MCP subscription (checked via dbcatalog's
       /get-mcp-key); a fresh MCP connection is opened per turn, mirroring gia-chat2.js's own
       "one client per chat turn" lifecycle.
@@ -6876,7 +6921,15 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
 
     const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
     const OPENROUTER_KEY = process.env.OPENROUTER_KEY; // injected at build time from .env — see webpack.config.js
-    const AI_MODEL = "deepseek/deepseek-v4-pro"; // DataGPT — stronger multi-step tool-calling across the wider tool surface below
+    const AI_MODEL = "deepseek/deepseek-v4-flash-0731"; // DataGPT — stronger multi-step tool-calling across the wider tool surface below
+    // Cheap screening model, used twice before the main loop: once to pick the tool set
+    // (see the classifier in send()) and once to decide whether to ask a clarifying question.
+    // Both are one-line JSON verdicts, so the smallest capable model is the right call.
+    const CLARIFIER_MODEL = "openai/gpt-5-mini";
+    // Set when we have just asked a clarifying question, so the user's ANSWER is not itself
+    // screened — otherwise a reply like "Last 3 years" reads as vague on its own and we would
+    // ask again, forever.
+    let skipClarifierOnce = false;
 
     const byId = (id) => document.getElementById(id);
     const fab = byId("chatFab"), panel = byId("chatPanel"), stream = byId("chatStream"),
@@ -6935,6 +6988,28 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
         try { localStorage.setItem(CHAT_HISTORY_KEY, JSON.stringify(history.slice(-MAX_HISTORY))); } catch (e) { /* storage full/unavailable */ }
     };
     let busy = false;
+    // The in-flight turn's AbortController, so the send button can cancel it.
+    let currentAbort = null;
+    const renderSendBtn = () => {
+        if (!sendBtn) return;
+        if (busy) {
+            // Deliberately ENABLED while busy — it is the stop control now, not a send control.
+            sendBtn.disabled = false;
+            sendBtn.textContent = "■";
+            sendBtn.title = "Stop";
+            sendBtn.classList.add("stop");
+        } else {
+            sendBtn.disabled = !chatBalanceSufficient;
+            sendBtn.textContent = "➤";
+            sendBtn.title = "Send";
+            sendBtn.classList.remove("stop");
+        }
+    };
+    const setBusy = (v) => { busy = v; chatBusy = v; renderSendBtn(); };
+    const stopCurrentTurn = () => {
+        if (!currentAbort) return;
+        try { currentAbort.abort(); } catch (e) { /* already settled */ }
+    };
 
     // The chat keeps its own company selection so the user can switch companies (or add a
     // second one to compare) without leaving the panel. "primaryCo" mirrors the main
@@ -7006,16 +7081,61 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
         s = s.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, "$1<i>$2</i>");
         return s;
     };
+    // ── Markdown tables ──
+    // A pipe row is only a table if the NEXT line is a separator (|---|---|). Requiring that
+    // second line keeps ordinary prose containing a "|" from being swallowed as a table.
+    const isTableRow = (s) => s.includes("|");
+    const isTableSep = (s) => s.includes("|") && s.includes("-") && /^[\s|:-]+$/.test(s);
+    // Empty cells are MEANINGFUL and must survive: the model writes grouped tables where a
+    // continuation row leaves the label blank ("| | Tata Motors | 58,217 |"), so splitting must
+    // not drop them.
+    const splitRow = (s) => s.replace(/^\s*\|/, "").replace(/\|\s*$/, "").split("|").map(c => c.trim());
+    const alignOf = (cell) => {
+        const l = cell.startsWith(":"), r = cell.endsWith(":");
+        return l && r ? "center" : r ? "right" : l ? "left" : "";
+    };
+    // Financial tables are mostly figures and read far better right-aligned, but the model rarely
+    // bothers emitting alignment markers — so infer it per column when it didn't say.
+    const looksNumeric = (s) => /^[₹$€£]?\s*\(?-?[\d,]+(\.\d+)?\)?\s*%?$/.test(s.trim()) && /\d/.test(s);
+    const buildTable = (header, aligns, rows) => {
+        const colAlign = header.map((_, i) => {
+            if (aligns[i]) return aligns[i];
+            const vals = rows.map(r => r[i]).filter(v => v != null && v !== "");
+            return vals.length && vals.every(looksNumeric) ? "right" : "";
+        });
+        const cell = (tag, v, i) => `<${tag}${colAlign[i] ? ` style="text-align:${colAlign[i]}"` : ""}>${renderInline(v ?? "")}</${tag}>`;
+        let h = `<div class="md-table-wrap"><table class="md-table"><thead><tr>`;
+        header.forEach((c, i) => { h += cell("th", c, i); });
+        h += `</tr></thead><tbody>`;
+        for (const r of rows) {
+            h += "<tr>";
+            // Pad short rows rather than emitting a ragged table.
+            for (let i = 0; i < header.length; i++) h += cell("td", r[i], i);
+            h += "</tr>";
+        }
+        return h + `</tbody></table></div>`;
+    };
+
     const renderMarkdown = (text) => {
         if (!text) return "";
         const lines = String(text).replace(/\r\n/g, "\n").split("\n");
         let html = "", listType = null, para = [];
         const closeList = () => { if (listType) { html += listType === "ul" ? "</ul>" : "</ol>"; listType = null; } };
         const flushPara = () => { if (para.length) { html += "<p>" + para.map(renderInline).join("<br>") + "</p>"; para = []; } };
-        for (const raw of lines) {
-            const line = raw.trim();
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i].trim();
             let m;
-            if (!line) { flushPara(); closeList(); }
+            if (isTableRow(line) && i + 1 < lines.length && isTableSep(lines[i + 1].trim())) {
+                flushPara(); closeList();
+                const header = splitRow(line);
+                const aligns = splitRow(lines[i + 1].trim()).map(alignOf);
+                const rows = [];
+                let j = i + 2;
+                while (j < lines.length && isTableRow(lines[j].trim()) && lines[j].trim()) { rows.push(splitRow(lines[j].trim())); j++; }
+                html += buildTable(header, aligns, rows);
+                i = j - 1;
+            }
+            else if (!line) { flushPara(); closeList(); }
             else if (/^(-{3,}|\*{3,})$/.test(line)) { flushPara(); closeList(); html += "<hr>"; }
             else if ((m = /^(#{1,4})\s+(.*)$/.exec(line))) { flushPara(); closeList(); html += `<div class="md-h md-h${m[1].length}">${renderInline(m[2])}</div>`; }
             else if ((m = /^[-*]\s+(.*)$/.exec(line))) { flushPara(); if (listType !== "ul") { closeList(); html += "<ul>"; listType = "ul"; } html += `<li>${renderInline(m[1])}</li>`; }
@@ -7037,14 +7157,138 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
         stream.scrollTop = stream.scrollHeight;
         return b;
     };
-    const addCard = (text, cls) => {
+    // Tappable answers under a clarifying question. Sending on click is the whole point — the
+    // user should not have to retype "Last 3 years" — but the composer stays live so they can
+    // ignore the chips entirely and answer in their own words.
+    const renderClarifyOptions = (bubble, options) => {
+        if (!bubble || !options.length) return;
+        const wrap = document.createElement("div");
+        wrap.className = "chat-clarify-opts";
+        options.slice(0, 4).forEach((opt) => {
+            const text = String(opt || "").trim();
+            if (!text) return;
+            const b = document.createElement("button");
+            b.type = "button";
+            b.className = "chat-clarify-opt";
+            b.textContent = text;
+            b.addEventListener("click", () => {
+                // Disable the whole set on the way out, so a double-tap cannot fire two turns.
+                wrap.querySelectorAll("button").forEach(x => { x.disabled = true; });
+                input.value = text;
+                send();
+            });
+            wrap.appendChild(b);
+        });
+        bubble.appendChild(wrap);
+    };
+
+    // ── Collapsible progress group ──
+    // Previously every tool call left a permanent line in the stream, so a 27-step question buried
+    // its own answer under 27 rows of finished chores. Now only the step CURRENTLY running is
+    // visible; each one folds into a one-line summary as it completes, and the summary expands if
+    // the user wants the detail. Same shape as this chat's own tool progress.
+    let currentStepGroup = null;
+    // The live "working" indicator. Deliberately NOT a chat bubble — an empty bubble with dots in
+    // it reads as a message the assistant already sent. It is a plain pulsing dot that gets
+    // replaced by the real answer bubble when one exists.
+    let thinkingEl = null;
+    const showThinking = () => {
+        hideThinking();
+        thinkingEl = document.createElement("div");
+        thinkingEl.className = "chat-thinking";
+        thinkingEl.innerHTML = `<span class="chat-thinking-dot"></span>`;
+        stream.appendChild(thinkingEl);
+        stream.scrollTop = stream.scrollHeight;
+        return thinkingEl;
+    };
+    const hideThinking = () => { if (thinkingEl) { thinkingEl.remove(); thinkingEl = null; } };
+    // Anything appended to the stream mid-turn (a step group, a confirm card) would otherwise land
+    // BELOW the indicator, so keep it pinned last.
+    const keepThinkingLast = () => { if (thinkingEl) stream.appendChild(thinkingEl); };
+    // Called at the start of each phase so research and write steps summarise separately rather
+    // than merging into one meaningless total.
+    // Forces the next card to open a fresh group. Called once per question.
+    const newStepGroup = () => { currentStepGroup = null; };
+    // Called when a phase begins. The "Connecting to GoIndia MCP…" card is added before any phase
+    // exists, so its group carries no phase tag — the first phase ADOPTS that group rather than
+    // starting a second one and leaving the connect step stranded above the summary. Later phases
+    // find a tagged group and start their own, so research and write still summarise separately.
+    const startStepGroup = (label) => {
+        if (currentStepGroup && currentStepGroup.isConnected && !currentStepGroup.dataset.phase) {
+            currentStepGroup.dataset.phase = label || "phase";
+            return;
+        }
+        currentStepGroup = null;
+    };
+
+    const STEP_KINDS = {
+        query: ["run_query"],
+        lookup: ["search_company", "get_companies_by_sector_or_index"],
+        schema: ["get_catalog", "get_schema", "get_skill_by_name"],
+        read: ["get_workbook_overview", "read_range", "search_workbook", "trace_dependencies", "audit_workbook"],
+    };
+    const kindOfTool = (name) => {
+        for (const k in STEP_KINDS) if (STEP_KINDS[k].includes(name)) return k;
+        return name ? "edit" : "step"; // anything else that names a tool is a workbook change
+    };
+    const KIND_LABEL = {
+        query: ["query", "queries"],
+        lookup: ["lookup", "lookups"],
+        schema: ["schema read", "schema reads"],
+        read: ["sheet read", "sheet reads"],
+        edit: ["sheet edit", "sheet edits"],
+        step: ["step", "steps"],
+    };
+    const renderStepSummary = (group) => {
+        const counts = {}, done = group.querySelectorAll(".chat-steps-body .chat-card");
+        done.forEach(c => {
+            const k = c.dataset.kind || "step";
+            counts[k] = (counts[k] || 0) + 1;
+        });
+        const parts = Object.keys(counts).map(k => {
+            const [one, many] = KIND_LABEL[k] || KIND_LABEL.step;
+            return `${counts[k]} ${counts[k] === 1 ? one : many}`;
+        });
+        const label = group.querySelector(".chat-steps-label");
+        if (!label) return;
+        label.textContent = parts.length ? parts.join(" · ") : "Working…";
+        group.querySelector(".chat-steps-head").style.display = done.length ? "flex" : "none";
+    };
+    const ensureStepGroup = () => {
+        if (currentStepGroup && currentStepGroup.isConnected) return currentStepGroup;
+        const g = document.createElement("div");
+        g.className = "chat-steps";
+        const head = document.createElement("button");
+        head.type = "button";
+        head.className = "chat-steps-head";
+        head.style.display = "none"; // nothing summarised yet
+        head.innerHTML = `<span class="chat-steps-chev">▸</span><span class="chat-steps-label"></span>`;
+        const body = document.createElement("div");
+        body.className = "chat-steps-body";
+        head.addEventListener("click", () => {
+            const open = g.classList.toggle("open");
+            head.querySelector(".chat-steps-chev").textContent = open ? "▾" : "▸";
+        });
+        g.appendChild(head); g.appendChild(body);
+        stream.appendChild(g);
+        keepThinkingLast();
+        currentStepGroup = g;
+        return g;
+    };
+
+    const addCard = (text, cls, toolName) => {
+        const g = ensureStepGroup();
         const c = document.createElement("div");
         c.className = "chat-card " + (cls || "run");
         c.dataset.createdAt = Date.now(); // read by settleCard below
+        c.dataset.kind = kindOfTool(toolName);
         const t = document.createElement("span"); t.textContent = text;
         const s = document.createElement("span"); s.className = "chat-card-st";
         c.appendChild(t); c.appendChild(s);
-        stream.appendChild(c);
+        // Live steps sit OUTSIDE the collapsible body so the running one is always visible even
+        // when the summary above it is collapsed.
+        g.appendChild(c);
+        keepThinkingLast();
         stream.scrollTop = stream.scrollHeight;
         return c;
     };
@@ -7061,6 +7305,14 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
         card.className = "chat-card " + cls;
         const st = card.querySelector(".chat-card-st");
         if (st) st.textContent = symbol;
+        // Finished — fold it into the collapsible body and refresh the one-line summary, so the
+        // stream shows only whatever is running right now.
+        const group = card.closest(".chat-steps");
+        const body = group && group.querySelector(".chat-steps-body");
+        if (body) {
+            body.appendChild(card);
+            renderStepSummary(group);
+        }
     }
     // Renders an inline approve/skip prompt and resolves once the user picks one —
     // lets the tool-calling loop below simply `await` a write decision like any other I/O.
@@ -7088,6 +7340,80 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
         });
     }
 
+    // ── Company shortlist confirmation ──
+    // For a vague ask ("companies with gold exposure") the model resolves a candidate list that may
+    // include entities the user never meant — a bullion refiner alongside jewellery retailers, say,
+    // which then distorts every ranking and margin comparison downstream. Cheaper to check the list
+    // costs one interaction than to run the whole analysis on the wrong set.
+    //
+    // Rendered as removable pills plus a free-text box, so correcting the list is a couple of taps
+    // rather than re-typing the question.
+    function addCompanyConfirmCard(prompt, companies) {
+        const c = document.createElement("div");
+        c.className = "chat-confirm chat-companies";
+        const t = document.createElement("div"); t.className = "cf-text"; t.textContent = prompt;
+        const pills = document.createElement("div"); pills.className = "cc-pills";
+        // Kept as a live Set so a removed pill is genuinely gone from the answer, not just hidden.
+        const kept = new Set(companies);
+        companies.forEach((name) => {
+            const pill = document.createElement("span");
+            pill.className = "cc-pill";
+            const label = document.createElement("span"); label.textContent = name;
+            const x = document.createElement("button");
+            x.type = "button"; x.className = "cc-x"; x.textContent = "✕"; x.title = `Remove ${name}`;
+            x.addEventListener("click", () => {
+                if (kept.has(name)) { kept.delete(name); pill.classList.add("removed"); x.textContent = "＋"; x.title = `Add ${name} back`; }
+                else { kept.add(name); pill.classList.remove("removed"); x.textContent = "✕"; x.title = `Remove ${name}`; }
+            });
+            pill.appendChild(label); pill.appendChild(x);
+            pills.appendChild(pill);
+        });
+        const addWrap = document.createElement("div"); addWrap.className = "cc-add";
+        const addInput = document.createElement("input");
+        addInput.type = "text"; addInput.className = "cc-input"; addInput.placeholder = "Add another company…";
+        addWrap.appendChild(addInput);
+        const actions = document.createElement("div"); actions.className = "cf-actions";
+        const go = document.createElement("button"); go.className = "cf-approve"; go.textContent = "Continue";
+        actions.appendChild(go);
+        c.appendChild(t); c.appendChild(pills); c.appendChild(addWrap); c.appendChild(actions);
+        stream.appendChild(c);
+        stream.scrollTop = stream.scrollHeight;
+        addInput.focus();
+
+        return new Promise((resolve) => {
+            const finish = () => {
+                // Anything typed but not yet committed still counts — nobody expects a name they
+                // just typed to be silently dropped because they clicked Continue instead of Enter.
+                const typed = addInput.value.split(",").map(x => x.trim()).filter(Boolean);
+                const final = [...kept, ...typed.filter(x => !kept.has(x))];
+                pills.remove(); addWrap.remove(); actions.remove();
+                c.classList.add("cf-done");
+                t.textContent = final.length ? `✓ Using: ${final.join(", ")}` : "✓ No companies selected";
+                resolve(final);
+            };
+            addInput.addEventListener("keydown", (e) => {
+                if (e.key !== "Enter") return;
+                e.preventDefault();
+                const v = addInput.value.trim();
+                if (!v) { finish(); return; } // Enter on an empty box means "done"
+                v.split(",").map(x => x.trim()).filter(Boolean).forEach((name) => {
+                    if (kept.has(name)) return;
+                    kept.add(name);
+                    const pill = document.createElement("span");
+                    pill.className = "cc-pill added";
+                    const label = document.createElement("span"); label.textContent = name;
+                    const x = document.createElement("button");
+                    x.type = "button"; x.className = "cc-x"; x.textContent = "✕";
+                    x.addEventListener("click", () => { kept.delete(name); pill.remove(); });
+                    pill.appendChild(label); pill.appendChild(x);
+                    pills.appendChild(pill);
+                });
+                addInput.value = "";
+            });
+            go.addEventListener("click", finish);
+        });
+    }
+
     const greet = () => addMsg("bot",
         "Hi — I'm connected to your GoIndia data and this workbook. Ask me about the selected company, or to write something into a sheet. (Experimental)");
 
@@ -7110,7 +7436,7 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
     let initialView = "main";
     try { initialView = new URLSearchParams(location.search).get("view") || "main"; } catch (e) { /* malformed query string */ }
     if (initialView === "datagpt") openPanel();
-    byId("chatClose").addEventListener("click", closePanel);
+    // (No close button any more — see the chat header in taskpane.html.)
     const chatClear = byId("chatClear");
     if (chatClear) {
         chatClear.addEventListener("click", async () => {
@@ -7124,21 +7450,26 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
     }
     input.addEventListener("input", () => { input.style.height = "auto"; input.style.height = Math.min(96, input.scrollHeight) + "px"; });
     input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
-    sendBtn.addEventListener("click", send);
+    sendBtn.addEventListener("click", () => { if (busy) stopCurrentTurn(); else send(); });
+    renderSendBtn(); // markup ships the send glyph; make the JS the single source of truth from here
     const ddToggle = byId("dropdownToggle");
     if (ddToggle) ddToggle.addEventListener("blur", setCompany);
 
     // ── GoIndia MCP access ──
-    // TEMPORARY, local-testing-only: goindia-mcp.fly.dev has no CORS headers on /sse or
-    // /messages/, so the browser blocks this add-in from calling it directly (curl/server-to-
-    // server calls were never subject to that check — only cross-origin fetch() from a webpage
-    // is). Pointed at the wallet backend's new /wallet/mcp/sse proxy (routers/wallet.py) instead,
-    // which does the actual goindia-mcp hop server-to-server and relays the stream back — sidesteps
-    // the problem without needing a fix on a server we don't control. Once this is confirmed
-    // working against localhost:8000, point this at the equivalent proxy route once it's live on
-    // transcriptanalyser.com, and revert this back to the direct goindia-mcp.fly.dev URL only if/
-    // when that server actually adds its own CORS headers.
-    const MCP_SERVER_URL = "https://transcriptanalyser.com/wallet/mcp/sse";
+    // goindia-mcp.fly.dev sends no Access-Control-Allow-Origin header, so the browser blocks this
+    // add-in from calling it directly (curl/server-to-server calls were never subject to that
+    // check — only cross-origin fetch() from a webpage is). The wallet backend proxies it
+    // server-to-server instead (see the Streamable HTTP proxy in routers/wallet.py), which
+    // sidesteps the problem without needing a fix on a server we do not control.
+    //
+    // NOTE the route: /wallet/mcp, NOT the old /wallet/mcp/sse. The MCP transport moved from
+    // HTTP+SSE (a GET stream plus a separate POST endpoint) to Streamable HTTP (one endpoint,
+    // every reply returned by its own POST), so both the proxy and McpClient below now speak
+    // that instead. The proxy MUST also send Access-Control-Expose-Headers naming
+    // Mcp-Session-Id: it is not a CORS-safelisted response header, so without that the browser
+    // withholds it from this page, no session is ever captured, and every call after initialize
+    // is rejected upstream with HTTP 400 "Missing session ID" while curl sees a healthy server.
+    const MCP_SERVER_URL = "https://transcriptanalyser.com/wallet/mcp";
     const MCP_KEY_URL = "https://transcriptanalyser.com/dbcatalog/get-mcp-key";
     const TEST_MCP_KEY = process.env.TEST_MCP_KEY || ""; // injected at build time from .env — see webpack.config.js
     let mcpAccess = null; // { mcp_api_key, flag } | null — fetched once per panel session
@@ -7163,123 +7494,142 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
     }
 
     // ── MCP client (ported from gia-chat2.js's McpClient) ──
-    // MCP's HTTP+SSE transport: 1) open an SSE GET, 2) the server sends an "endpoint" event
-    // whose data is a relative URL to POST JSON-RPC requests to, 3) each request's response
-    // arrives back over that same SSE stream, matched by request id. One client per chat turn
-    // — opened at the start of send(), closed in its finally block.
+    // MCP's Streamable HTTP transport (2025-03-26+), which REPLACED the old HTTP+SSE transport.
+    // The old one was two-legged: open a GET /sse stream, wait for an "endpoint" event naming a
+    // second URL to POST to, then match every reply as it came back DOWN that stream. Streamable
+    // HTTP collapses that to ONE endpoint — each JSON-RPC message is a POST to /mcp and its reply
+    // comes back in that same POST's response, either inline application/json or a short
+    // text/event-stream carrying just that reply.
+    //
+    // Three things fall away with it, all of which existed only to prop up the old transport:
+    //   - the SSE reader, the endpoint promise and the pending-request map (a reply is now simply
+    //     the response to its own request, so nothing needs correlating by id after the fact);
+    //   - the 20s JSON-RPC "ping" heartbeat, which existed because an IDLE stream was killed after
+    //     30-46s while the model was thinking between tool calls. There is no stream held open
+    //     between calls now, so there is nothing to keep alive;
+    //   - the 90s response timeout guarding against a silently-dropped stream.
+    //
+    // What carries over: `Mcp-Session-Id`, assigned by the server on the initialize response and
+    // echoed on every later request so the whole turn is one session; and `_streamDead`, kept
+    // because callMcpWithRetry reads it to decide whether to reconnect. It is now set when the
+    // server reports the session is gone (HTTP 404), which is this transport's equivalent of the
+    // stream having died. One client per chat turn — opened at the start of send(), closed in its
+    // finally block.
     class McpClient {
-        constructor(sseUrl, signal) {
-            this.sseUrl = sseUrl;
+        constructor(url, signal) {
+            this.url = url;              // single Streamable HTTP endpoint (…/mcp?token=…)
             this.signal = signal;
-            this.postUrl = null;
+            this.sessionId = null;       // captured from the initialize response header
+            this.protocolVersion = null; // negotiated; echoed back on every later request
+            this.serverInstructions = "";
             this.id = 0;
             this.tools = [];
-            this.pending = new Map();
-            this._endpointResolve = null;
-            this._endpointReject = null;
-            this._endpointPromise = new Promise((resolve, reject) => {
-                this._endpointResolve = resolve;
-                this._endpointReject = reject;
-            });
-            this._endpointPromise.catch(() => {});
             this._closed = false;
+            this._streamDead = null;     // set on session loss so callMcpWithRetry reconnects
         }
         _nextId() { return ++this.id; }
-        async open() {
-            const res = await fetch(this.sseUrl, { method: "GET", headers: { "Accept": "text/event-stream" }, signal: this.signal });
-            if (!res.ok || !res.body) {
-                const text = await res.text().catch(() => "");
-                throw new Error(`MCP SSE open HTTP ${res.status}: ${text.slice(0, 300)}`);
-            }
-            this._readSse(res.body).catch((err) => {
-                if (!this._closed) {
-                    this._endpointReject?.(err);
-                    for (const { reject } of this.pending.values()) reject(new Error(`MCP SSE stream closed: ${err.message ?? err}`));
-                    this.pending.clear();
-                }
-            });
-            this.postUrl = await this._endpointPromise;
-        }
-        async _readSse(body) {
-            const reader = body.getReader();
-            const decoder = new TextDecoder("utf-8");
-            let buf = "", evName = "", evData = "";
-            const flushEvent = () => {
-                if (!evName && !evData) return;
-                this._handleSseEvent(evName || "message", evData);
-                evName = ""; evData = "";
+        // Kept so the call sites (open() then initialize()) do not have to change — the session
+        // is established by initialize() itself on this transport.
+        async open() { /* no-op */ }
+        _headers() {
+            const h = {
+                "Content-Type": "application/json",
+                // Streamable HTTP requires the client to accept BOTH reply shapes.
+                "Accept": "application/json, text/event-stream",
             };
-            while (true) {
-                const { value, done } = await reader.read();
-                if (done) break;
-                buf += decoder.decode(value, { stream: true });
-                let nl;
-                while ((nl = buf.indexOf("\n")) !== -1) {
-                    const line = buf.slice(0, nl).replace(/\r$/, "");
-                    buf = buf.slice(nl + 1);
-                    if (line === "") { flushEvent(); continue; }
-                    if (line.startsWith(":")) continue;
-                    if (line.startsWith("event:")) evName = line.slice(6).trim();
-                    else if (line.startsWith("data:")) { const chunk = line.slice(5).replace(/^ /, ""); evData = evData ? `${evData}\n${chunk}` : chunk; }
-                }
-            }
-            flushEvent();
+            if (this.sessionId) h["Mcp-Session-Id"] = this.sessionId;
+            // Required on every request after version negotiation; without it a strict server is
+            // entitled to assume the oldest protocol version, or reject outright.
+            if (this.protocolVersion) h["MCP-Protocol-Version"] = this.protocolVersion;
+            return h;
         }
-        _handleSseEvent(name, data) {
-            if (name === "endpoint") {
-                let resolved;
-                try { resolved = new URL(data, this.sseUrl).toString(); } catch { resolved = data; }
-                this._endpointResolve?.(resolved);
-                return;
-            }
-            if (name === "message" || name === "") {
-                if (!data) return;
-                let obj;
-                try { obj = JSON.parse(data); } catch { return; }
-                if (obj && Object.prototype.hasOwnProperty.call(obj, "id") && this.pending.has(obj.id)) {
-                    const { resolve } = this.pending.get(obj.id);
-                    this.pending.delete(obj.id);
-                    resolve(obj);
+        // Pull the JSON-RPC object matching this request id out of a text/event-stream body.
+        // The body carries only this reply, but it may be preceded by comments or other events,
+        // so parse properly rather than assuming a single "data:" line.
+        _parseEventStream(text, id) {
+            let data = "";
+            const flush = () => {
+                if (!data) return null;
+                let obj = null;
+                try { obj = JSON.parse(data); } catch { obj = null; }
+                data = "";
+                return (obj && obj.id === id) ? obj : null;
+            };
+            for (const raw of text.split(/\r?\n/)) {
+                const line = raw.replace(/\r$/, "");
+                if (line === "") { const m = flush(); if (m) return m; continue; }
+                if (line.startsWith(":")) continue;
+                if (line.startsWith("data:")) {
+                    const chunk = line.slice(5).replace(/^ /, "");
+                    data = data ? `${data}\n${chunk}` : chunk;
                 }
             }
+            return flush();
         }
         async _rpc(method, params) {
-            if (!this.postUrl) throw new Error("MCP client not opened");
+            if (this._streamDead) throw new Error(`MCP session closed: ${this._streamDead}`);
             const id = this._nextId();
-            const body = { jsonrpc: "2.0", id, method, params: params ?? {} };
-            const responsePromise = new Promise((resolve, reject) => { this.pending.set(id, { resolve, reject }); });
-            responsePromise.catch(() => {});
-            let res;
-            try {
-                res = await fetch(this.postUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: this.signal });
-            } catch (err) { this.pending.delete(id); throw err; }
+            const res = await fetch(this.url, {
+                method: "POST",
+                headers: this._headers(),
+                body: JSON.stringify({ jsonrpc: "2.0", id, method, params: params ?? {} }),
+                signal: this.signal,
+            });
+            // The server assigns the session on the initialize reply; capture it before anything
+            // can throw, so even a failed call leaves the session usable.
+            const sid = res.headers.get("mcp-session-id");
+            if (sid) this.sessionId = sid;
+            // 404 means the server has forgotten this session (expired or evicted). That is not a
+            // tool error — it is the session being gone — so mark it dead and let callMcpWithRetry
+            // build a fresh client rather than retrying into a session that no longer exists.
+            if (res.status === 404 && this.sessionId) {
+                this._streamDead = "session expired (HTTP 404)";
+                throw new Error(`MCP ${method}: session expired`);
+            }
             if (!res.ok && res.status !== 202) {
-                this.pending.delete(id);
                 const text = await res.text().catch(() => "");
                 throw new Error(`MCP ${method} POST HTTP ${res.status}: ${text.slice(0, 300)}`);
             }
-            try {
-                const ctype = res.headers.get("content-type") || "";
-                if (ctype.includes("application/json")) {
-                    const inline = await res.json();
-                    if (inline && inline.id === id) {
-                        this.pending.delete(id);
-                        if (inline.error) throw new Error(`MCP ${method} error: ${inline.error.message ?? JSON.stringify(inline.error)}`);
-                        return inline.result;
-                    }
-                }
-            } catch { /* fall through to SSE-delivered response */ }
-            const payload = await responsePromise;
+            const ctype = (res.headers.get("content-type") || "").toLowerCase();
+            let payload = null;
+            if (ctype.includes("application/json")) {
+                payload = await res.json().catch(() => null);
+            } else if (ctype.includes("text/event-stream")) {
+                payload = this._parseEventStream(await res.text(), id);
+            } else {
+                const text = await res.text().catch(() => "");
+                if (text) { try { payload = JSON.parse(text); } catch { payload = null; } }
+            }
+            if (!payload) throw new Error(`MCP ${method}: no JSON-RPC response in reply`);
             if (payload.error) throw new Error(`MCP ${method} error: ${payload.error.message ?? JSON.stringify(payload.error)}`);
             return payload.result;
         }
         async _notify(method, params) {
-            if (!this.postUrl) return;
-            try { await fetch(this.postUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", method, params: params ?? {} }), signal: this.signal }); }
-            catch { /* best-effort */ }
+            try {
+                await fetch(this.url, {
+                    method: "POST",
+                    headers: this._headers(),
+                    body: JSON.stringify({ jsonrpc: "2.0", method, params: params ?? {} }),
+                    signal: this.signal,
+                });
+            } catch { /* best-effort */ }
         }
         async initialize() {
-            const result = await this._rpc("initialize", { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "goindia-excel-addin", version: "1.0.0" } });
+            const REQUESTED = "2025-06-18";
+            const result = await this._rpc("initialize", { protocolVersion: REQUESTED, capabilities: {}, clientInfo: { name: "goindia-excel-addin", version: "1.0.0" } });
+            // Use what the SERVER negotiated, not what we asked for — it is entitled to answer with
+            // an older version, and every later request has to name the agreed one.
+            this.protocolVersion = String(result?.protocolVersion || REQUESTED);
+            // The server ships a ~5,000-character operating manual in its initialize response, and
+            // this used to be thrown away with the rest of the result. It is not boilerplate: it
+            // carries the intended tool workflow (get_catalog -> get_schema -> run_query), a hard
+            // "2-3 attempts total" retry cap, the Indian-financial-year quarter mapping, the
+            // fincode lookup rules, and — the expensive one — that EVERY run_query runs in a FRESH
+            // Python environment, so nothing from a previous call still exists. A model that has
+            // not been told these things reinvents the workflow every turn, references variables that
+            // are already gone, and burns round trips recovering. Passing it through is the single
+            // biggest lever on how many tool calls a question costs.
+            this.serverInstructions = String(result?.instructions || "");
             await this._notify("notifications/initialized");
             return result;
         }
@@ -7295,7 +7645,14 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
             const isError = !!result?.isError || text.includes("Query execution failed") || text.includes("DatabaseError") || text.includes("Error:") || text.startsWith("❌");
             return { text, isError };
         }
-        async close() { this._closed = true; this.pending.clear(); }
+        // Best-effort session teardown: DELETE with the session header frees it server-side
+        // instead of leaking one session per chat turn.
+        async close() {
+            this._closed = true;
+            if (!this.sessionId) return;
+            try { await fetch(this.url, { method: "DELETE", headers: this._headers(), signal: this.signal }); }
+            catch { /* already gone, or the turn was aborted */ }
+        }
     }
     const toOpenAITools = (mcpTools) => mcpTools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.input_schema } }));
 
@@ -7307,6 +7664,79 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
     // card lifecycle exactly like the old write_excel_sheet did (see the dispatch split in send()
     // below) rather than the generic per-tool card the read-only tools get there.
     const TEXT_CAP = 3500;
+    // Per-tool caps for MCP results. A blanket 3,500 was catastrophic for get_catalog: it returns
+    // ~52,000 chars listing 20 data domains, so 3,500 cut it off inside the SECOND domain and hid
+    // annual_financials (char 3,813) — the exact table most questions need — along with earnings
+    // calls, broker reports, shareholding and 16 others. The model was told to "pick the relevant
+    // table" while seeing 6.7% of the menu, so it burned round trips groping through the one
+    // registry it could still see. Paying ~13k tokens once beats five wasted turns that each
+    // re-send the whole conversation.
+    const MCP_RESULT_CAPS = { get_catalog: 60000, get_schema: 40000 };
+    const mcpCapFor = (name) => MCP_RESULT_CAPS[name] || 8000;
+
+    // ── Tool-call debug log ──
+    // Diagnosing why a question cost 15 turns has meant reading cost lines and guessing, because
+    // the one thing that actually explains it — what each tool was CALLED WITH and what it
+    // answered — was never recorded anywhere. The chat cards show a tick or a cross and nothing
+    // else, and a failing tool's error text is exactly what gets lost.
+    //
+    // A task pane cannot write to disk directly, so this accumulates in memory (mirrored to
+    // localStorage so a reload or a crash does not lose it) and saveChatLog() hands it over as a
+    // real file. Errors and args are kept in FULL — a truncated error is precisely the useless
+    // artefact this exists to replace — while successful payloads are previewed, since a 52,000
+    // character catalog dump helps nobody and would blow the storage quota on its own.
+    const DEBUG_LOG_KEY = "goia_chatDebugLog";
+    const DEBUG_LOG_MAX = 500;
+    const DEBUG_OK_PREVIEW = 1200;
+    let debugLog = [];
+    try { debugLog = JSON.parse(localStorage.getItem(DEBUG_LOG_KEY) || "[]"); } catch (e) { debugLog = []; }
+    const debugAppend = (rec) => {
+        debugLog.push({ t: new Date().toISOString(), ...rec });
+        if (debugLog.length > DEBUG_LOG_MAX) debugLog = debugLog.slice(-DEBUG_LOG_MAX);
+        try { localStorage.setItem(DEBUG_LOG_KEY, JSON.stringify(debugLog)); }
+        catch (e) {
+            // Quota blown by a few large payloads — halve the history and retry once rather than
+            // silently stopping. Losing the oldest half beats losing all future logging.
+            debugLog = debugLog.slice(-Math.floor(DEBUG_LOG_MAX / 2));
+            try { localStorage.setItem(DEBUG_LOG_KEY, JSON.stringify(debugLog)); } catch (e2) { /* give up on persistence, keep in memory */ }
+        }
+    };
+    const debugFormat = () => {
+        const out = [`DataGPT debug log — ${debugLog.length} entries — saved ${new Date().toISOString()}`, "=".repeat(78), ""];
+        for (const r of debugLog) {
+            if (r.kind === "question") { out.push("", "#".repeat(78), `# QUESTION @ ${r.t}`, `# ${r.question}`, "#".repeat(78)); continue; }
+            if (r.kind === "phase") { out.push("", `--- phase "${r.phase}" | ${r.toolCount} tools ---`); continue; }
+            if (r.kind === "turn") { out.push(`  [turn ${r.iter}] cost=$${r.cost} tokens=${r.tokens} calls=${r.calls} finish=${r.finish ?? "?"} content=${r.contentChars ?? "?"}ch`); continue; }
+            if (r.kind === "tool") {
+                out.push(`  ${r.ok ? "OK  " : "FAIL"} ${r.name}  (${r.ms}ms)`);
+                out.push(`       args: ${r.args}`);
+                out.push(`       ${r.ok ? "result" : "ERROR"}: ${r.result}`);
+                continue;
+            }
+            out.push(`  ${JSON.stringify(r)}`);
+        }
+        return out.join("\n");
+    };
+    const saveChatLog = () => {
+        const text = debugFormat();
+        try {
+            const url = URL.createObjectURL(new Blob([text], { type: "text/plain;charset=utf-8" }));
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = `datagpt-log-${new Date().toISOString().replace(/[:.]/g, "-")}.txt`;
+            document.body.appendChild(a); a.click(); a.remove();
+            setTimeout(() => URL.revokeObjectURL(url), 5000);
+            console.log(`[Chat] 💾 saved ${debugLog.length} entries`);
+        } catch (e) {
+            // Some Office hosts block a page-initiated download. Printing it is a poor second but
+            // still recoverable — the text can be copied straight out of the console.
+            console.warn("[Chat] download blocked, printing instead:", e);
+            console.log(text);
+        }
+        return text;
+    };
+    window.saveChatLog = saveChatLog;
+    window.clearChatLog = () => { debugLog = []; try { localStorage.removeItem(DEBUG_LOG_KEY); } catch (e) { /* nothing to clear */ } console.log("[Chat] debug log cleared"); };
     const capText = (s, n = TEXT_CAP) => {
         s = (s || "").trim();
         return s.length > n ? s.slice(0, n) + "\n…[truncated]" : s;
@@ -7417,20 +7847,39 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
         { type: "function", function: { name: "undo_last_change", description: "Revert the most recent write_cells or fill_formula change made this session, restoring exactly what was there before. Regular Ctrl+Z does not reliably undo programmatic add-in writes, so this is the only dependable way to back out a bad edit.", parameters: { type: "object", properties: {} } } },
         { type: "function", function: { name: "trace_dependencies", description: "Trace formula lineage for a single cell — precedents (what feeds it, upstream) or dependents (what it feeds, downstream). Use this to explain WHY a value is what it is by tracing the real chain of cells behind it, instead of reading one formula at a time and guessing.", parameters: { type: "object", properties: { cell: { type: "string", description: "Cell to trace, e.g. \"D10\" or \"Sheet2!F5\". Must be a single cell, not a range." }, mode: { type: "string", enum: ["precedents", "dependents"], description: "Trace direction. Default precedents." }, depth: { type: "number", description: "How many levels to trace. Default 2, max 5." } }, required: ["cell"] } } },
         { type: "function", function: { name: "search_workbook", description: "Search for text/values (or formula text) across every visible sheet in the workbook. Use this to find where something is calculated or referenced — e.g. \"where is EBITDA calculated?\" — without reading every sheet one by one.", parameters: { type: "object", properties: { query: { type: "string", description: "Search term." }, search_formulas: { type: "boolean", description: "Search formula text instead of displayed values. Useful for finding cross-sheet references." }, use_regex: { type: "boolean", description: "Treat query as a case-insensitive regular expression." }, sheet_name: { type: "string", description: "Restrict the search to this sheet. Omit to search every visible sheet." }, max_results: { type: "number", description: "Maximum matches to return. Default 20." } }, required: ["query"] } } },
-        { type: "function", function: { name: "format_cells", description: "Apply VISUAL formatting to a range — font (bold/italic/underline/color/size/name), fill color, number format, alignment, borders, column width/row height, or merge. Does NOT change cell values or formulas — use write_cells for that.", parameters: { type: "object", properties: { range: { type: "string", description: "Range to format, e.g. \"A1:D1\" or \"Sheet2!B3:B20\"." }, bold: { type: "boolean" }, italic: { type: "boolean" }, underline: { type: "boolean" }, font_color: { type: "string", description: "Hex color, e.g. \"#0000FF\"." }, font_size: { type: "number" }, font_name: { type: "string" }, fill_color: { type: "string", description: "Hex background color, e.g. \"#FFFF00\"." }, number_format: { type: "string", description: "A preset (\"currency\", \"percent\", \"number\", \"integer\", \"text\") or a raw Excel number-format string, e.g. \"#,##0.00\"." }, horizontal_alignment: { type: "string", enum: ["Left", "Center", "Right", "General"] }, vertical_alignment: { type: "string", enum: ["Top", "Center", "Bottom"] }, wrap_text: { type: "boolean" }, borders: { type: "string", enum: ["thin", "medium", "thick", "none"], description: "Border weight applied to all four edges plus inside gridlines." }, border_color: { type: "string", description: "Hex color for borders set via `borders`. Default black." }, column_width: { type: "number", description: "Column width in points." }, row_height: { type: "number", description: "Row height in points." }, merge: { type: "boolean", description: "Merge (true) or unmerge (false) the range." } }, required: ["range"] } } },
-        { type: "function", function: { name: "create_chart", description: "Create a chart from a data range — the core way to turn a comparison table into a visual. Use this whenever the user asks to \"chart\", \"graph\", \"visualize\", or \"plot\" something.", parameters: { type: "object", properties: { source_range: { type: "string", description: "Data range for the chart, e.g. \"A1:D12\" or \"Sheet1!A1:D12\" (include header row/column for series names)." }, chart_type: { type: "string", enum: ["column", "column_stacked", "bar", "bar_stacked", "line", "line_markers", "area", "area_stacked", "pie", "doughnut", "scatter", "radar"], description: "Chart type. Default column." }, title: { type: "string", description: "Chart title." }, x_axis_title: { type: "string" }, y_axis_title: { type: "string" }, legend_position: { type: "string", enum: ["right", "left", "top", "bottom", "none"] } }, required: ["source_range"] } } },
+        { type: "function", function: { name: "format_cells", description: "Apply VISUAL formatting to a range — font (bold/italic/underline/color/size/name), fill color, number format, alignment, borders, column width/row height, or merge. Does NOT change cell values or formulas — use write_cells for that.", parameters: { type: "object", properties: { range: { type: "string", description: "Range to format, e.g. \"A1:D1\" or \"Sheet2!B3:B20\"." }, bold: { type: "boolean" }, italic: { type: "boolean" }, underline: { type: "boolean" }, font_color: { type: "string", description: "Hex color, e.g. \"#0000FF\"." }, font_size: { type: "number" }, font_name: { type: "string" }, fill_color: { type: "string", description: "Hex background color, e.g. \"#FFFF00\"." }, number_format: { type: "string", description: "A preset (\"currency\", \"percent\", \"number\", \"integer\", \"text\") or a raw Excel number-format string, e.g. \"#,##0.00\". For Indian rupee figures prefer lakh/crore grouping — plain \"#,##0\" shows 778716 as 778,716 where an Indian reader expects 7,78,716; use [>=10000000]##\\,##\\,##\\,##0;[>=100000]##\\,##\\,##0;##,##0 instead." }, horizontal_alignment: { type: "string", enum: ["Left", "Center", "Right", "General"] }, vertical_alignment: { type: "string", enum: ["Top", "Center", "Bottom"] }, wrap_text: { type: "boolean" }, borders: { type: "string", enum: ["thin", "medium", "thick", "none"], description: "Border weight applied to all four edges plus inside gridlines." }, border_color: { type: "string", description: "Hex color for borders set via `borders`. Default black." }, column_width: { type: "number", description: "Column width in points." }, row_height: { type: "number", description: "Row height in points." }, merge: { type: "boolean", description: "Merge (true) or unmerge (false) the range." } }, required: ["range"] } } },
+        { type: "function", function: { name: "create_chart", description: "Create a chart from a data range — the core way to turn a comparison table into a visual. Use this whenever the user asks to \"chart\", \"graph\", \"visualize\", or \"plot\" something.", parameters: { type: "object", properties: { source_range: { type: "string", description: "Data range for the chart, e.g. \"A1:D12\" or \"Sheet1!A1:D12\". ALWAYS include the header row and the label column — that is the ONLY way each series gets a name (Revenue, PAT, ...) instead of \"Series1\". A range starting on a data row produces an unlabelled chart." }, chart_type: { type: "string", enum: ["column", "column_stacked", "bar", "bar_stacked", "line", "line_markers", "area", "area_stacked", "pie", "doughnut", "scatter", "radar"], description: "Chart type. Default column." }, title: { type: "string", description: "Chart title." }, x_axis_title: { type: "string" }, y_axis_title: { type: "string" }, legend_position: { type: "string", enum: ["right", "left", "top", "bottom", "none"] }, position: { type: "string", description: "Optional top-left cell for the chart, e.g. \"J2\". Omit to have charts auto-placed in a column below the data without overlapping." }, secondary_series: { type: "array", items: { type: "string" }, description: "Series names (matching the header cells in source_range) to plot on a SECONDARY axis. Use when one series is orders of magnitude smaller than another — revenue in the tens of thousands alongside PAT in the hundreds, or a margin % beside absolute figures. On a column/bar chart these series are automatically drawn as a LINE, because a secondary-axis bar would otherwise render on top of the primary bars and hide them; you do not need to ask for that." }, secondary_chart_type: { type: "string", enum: ["column", "bar", "line", "line_markers", "area", "scatter"], description: "Override how the secondary series is drawn. Defaults to line_markers on a column/bar chart." }, secondary_axis_title: { type: "string", description: "Axis title for the secondary axis." } }, required: ["source_range"] } } },
         { type: "function", function: { name: "conditional_format", description: "Add or clear conditional formatting rules — highlight cells that meet a condition (e.g. \"highlight negative numbers in red\"), or apply a color scale/gradient across a range (e.g. \"color-scale this range\").", parameters: { type: "object", properties: { action: { type: "string", enum: ["add", "clear"], description: "\"add\" a rule, or \"clear\" every rule in the range." }, range: { type: "string", description: "Target range, e.g. \"A1:D10\" or \"Sheet2!B2:B50\"." }, type: { type: "string", enum: ["cell_value", "formula", "color_scale"], description: "Rule type for action=\"add\"." }, operator: { type: "string", enum: ["Between", "NotBetween", "EqualTo", "NotEqualTo", "GreaterThan", "LessThan", "GreaterThanOrEqual", "LessThanOrEqual"], description: "Required for type=\"cell_value\"." }, value: { description: "Comparison value for type=\"cell_value\", e.g. 0 or \"=$B$2\"." }, value2: { description: "Second value, for Between/NotBetween." }, formula: { type: "string", description: "Custom formula for type=\"formula\", e.g. \"=A1<0\"." }, fill_color: { type: "string", description: "Hex fill color applied when the rule matches (cell_value/formula rules)." }, font_color: { type: "string" }, bold: { type: "boolean" }, italic: { type: "boolean" }, underline: { type: "boolean" }, min_color: { type: "string", description: "Color-scale low-end hex color. Default red." }, mid_color: { type: "string", description: "Color-scale midpoint hex color. Default yellow." }, max_color: { type: "string", description: "Color-scale high-end hex color. Default green." } }, required: ["action", "range"] } } },
-        { type: "function", function: { name: "modify_structure", description: "Insert/delete rows or columns, or rename/delete/hide/unhide a sheet. Deleting anything asks for confirmation first (unless auto-apply is on) since it can destroy data — inserting, renaming, hiding, and unhiding do not, since nothing is lost.", parameters: { type: "object", properties: { action: { type: "string", enum: ["insert_row", "delete_row", "insert_column", "delete_column", "rename_sheet", "delete_sheet", "hide_sheet", "unhide_sheet"] }, sheet: { type: "string", description: "Target sheet name. Required for sheet actions; for row/column actions, omit to use the active sheet." }, position: { type: "number", description: "1-indexed row number (insert_row/delete_row) or 1-indexed column number (insert_column/delete_column)." }, count: { type: "number", description: "Number of rows/columns to insert or delete. Default 1." }, new_name: { type: "string", description: "New name, for rename_sheet." } }, required: ["action"] } } },
+        { type: "function", function: { name: "modify_structure", description: "Insert/delete rows or columns, rename/delete/hide/unhide a sheet, freeze panes, or delete charts. Deleting anything asks for confirmation first (unless auto-apply is on) since it can destroy data — inserting, renaming, hiding, and unhiding do not, since nothing is lost.", parameters: { type: "object", properties: { action: { type: "string", enum: ["insert_row", "delete_row", "insert_column", "delete_column", "rename_sheet", "delete_sheet", "hide_sheet", "unhide_sheet", "freeze_rows", "freeze_columns", "unfreeze", "delete_chart", "delete_all_charts"] }, sheet: { type: "string", description: "Target sheet name. Required for sheet actions; for row/column actions, omit to use the active sheet." }, position: { type: "number", description: "1-indexed row number (insert_row/delete_row) or 1-indexed column number (insert_column/delete_column)." }, count: { type: "number", description: "Number of rows/columns to insert or delete, or to freeze. Default 1." }, chart_name: { type: "string", description: "Chart name, for delete_chart. get_workbook_overview lists the charts on a sheet." }, new_name: { type: "string", description: "New name, for rename_sheet." } }, required: ["action"] } } },
         { type: "function", function: { name: "named_ranges", description: "Manage named ranges — lets you (and the AI) refer to \"WACC\" instead of a guessed cell address. Deleting a name asks for confirmation first since any formula referencing it by name would break.", parameters: { type: "object", properties: { action: { type: "string", enum: ["add", "update", "delete", "list"] }, name: { type: "string", description: "The named range's name. Required for add/update/delete." }, reference: { type: "string", description: "Cell/range reference for add/update, e.g. \"Sheet1!$B$8\" or \"='Assumptions'!$B$8\"." }, scope: { type: "string", description: "Optional sheet name to scope the name to that sheet instead of the whole workbook." } }, required: ["action"] } } },
         { type: "function", function: { name: "autofit", description: "Auto-fit column widths and/or row heights to their content — use after writing a new sheet/table where columns are too narrow to read.", parameters: { type: "object", properties: { range: { type: "string", description: "Range/sheet to auto-fit, e.g. \"A1:F1\" or \"Sheet2!A:F\". Omit to auto-fit the active sheet's whole used range." }, columns: { type: "boolean", description: "Auto-fit column widths. Default true." }, rows: { type: "boolean", description: "Auto-fit row heights. Default true." } } } } },
         { type: "function", function: { name: "tables", description: "Convert a range into a proper Excel Table (sortable/filterable, with structured references) — use when the user asks to make a range \"a proper table,\" or wants to sort a range that already is one. \"delete\" only removes the Table wrapper (filters/styling) — the underlying data is left exactly as-is, same as Excel's own \"Convert to Range.\"", parameters: { type: "object", properties: { action: { type: "string", enum: ["create", "sort", "rename", "delete"] }, range: { type: "string", description: "Source range for action=\"create\", e.g. \"A1:E20\" or \"Sheet1!A1:E20\"." }, has_headers: { type: "boolean", description: "Whether the first row is a header row. Default true." }, name: { type: "string", description: "Table name — assigned name for create, or the target table's current name for sort/rename/delete." }, new_name: { type: "string", description: "New name, for action=\"rename\"." }, sort_column: { type: "number", description: "0-indexed column within the table to sort by, for action=\"sort\". Default 0." }, sort_ascending: { type: "boolean", description: "Sort ascending. Default true." } }, required: ["action"] } } },
         { type: "function", function: { name: "comments", description: "Add, reply to, resolve/reopen, delete, or list cell comments — good for leaving a note explaining WHY a change was made, pairing with undo_last_change's audit trail.", parameters: { type: "object", properties: { action: { type: "string", enum: ["add", "reply", "resolve", "reopen", "delete", "list"] }, cell: { type: "string", description: "Single cell the comment is attached to, e.g. \"B2\" or \"Sheet1!B2\". Required for add/reply/resolve/reopen/delete." }, content: { type: "string", description: "Comment/reply text. Required for add/reply." }, sheet: { type: "string", description: "Sheet to list comments from, for action=\"list\". Omit to use the active sheet." } }, required: ["action"] } } },
     ];
+    // Not an Excel tool, but it lives in this registry so it inherits the same dispatch, card
+    // handling and per-phase allowlist. It is offered in the RESEARCH phase (see the phase wiring),
+    // because that is where a company shortlist gets resolved and where getting it wrong is
+    // expensive — every ranking and comparison after it inherits the mistake.
+    EXCEL_TOOLS.push({
+        type: "function",
+        function: {
+            name: "confirm_companies",
+            description: "Ask the user to confirm a shortlist of companies before you analyse them. Use this ONLY when the user's request named a category rather than specific companies (e.g. \"companies with gold exposure\", \"large-cap IT firms\", \"my sector peers\") and you have resolved a candidate list. Do NOT use it when the user already named the companies. Returns the final list after the user removes or adds any. Analyse exactly the returned list.",
+            parameters: {
+                type: "object",
+                properties: {
+                    companies: { type: "array", items: { type: "string" }, description: "Candidate company names you resolved, best matches first." },
+                    question: { type: "string", description: "One short line asking the user to confirm, e.g. \"These are the gold-exposed companies I found — remove any you don't want, or add others.\"" },
+                },
+                required: ["companies"],
+            },
+        },
+    });
     const EXCEL_TOOL_NAMES = new Set(EXCEL_TOOLS.map(t => t.function.name));
     // These three manage their own confirm-card/running-card lifecycle (see each function below),
     // the same way the old write_excel_sheet did via maybeConfirmAndWrite — everything else in
     // EXCEL_TOOL_NAMES gets the generic "Running X…" wrapper send() applies itself.
-    const EXCEL_SELF_MANAGED_UI_TOOLS = new Set(["create_sheet", "write_cells", "fill_formula", "undo_last_change", "modify_structure", "named_ranges"]);
+    const EXCEL_SELF_MANAGED_UI_TOOLS = new Set(["create_sheet", "write_cells", "fill_formula", "undo_last_change", "modify_structure", "named_ranges", "confirm_companies"]);
 
     async function toolWorkbookOverview({ sheet: sheetName } = {}) {
         let text;
@@ -7550,6 +7999,18 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
     // blocked write never touched Excel at all, so there's nothing to confirm; the model sees the
     // existing data and can ask the user whether to proceed with allow_overwrite:true. Only an
     // ACTUAL pending write (empty target, or allow_overwrite already true) reaches the confirm gate.
+    // Would Excel turn this string into a date? Covers the label shapes a financial sheet actually
+    // uses — "Sep 2024", "Sep-24", "26 Aug 2026", "2024-09", "Q1 2025" — deliberately NOT a general
+    // date parser, because a real date the model meant as a date should still be stored as one.
+    const DATE_LABEL_RE = new RegExp(
+        "^(" +
+        "\\d{1,2}[ \\-/]?(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*[ \\-/]?\\d{2,4}" + "|" + // 26 Aug 2026
+        "(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*[ \\-/]?\\d{2,4}" + "|" +                // Sep 2024, Sep-24
+        "\\d{4}[ \\-/]\\d{1,2}" + "|" +                                                                  // 2024-09
+        "q[1-4][ \\-/]?(fy)?\\d{2,4}" +                                                                  // Q1 2025, Q1FY25
+        ")$", "i");
+    const looksLikeDateLabel = (v) => typeof v === "string" && DATE_LABEL_RE.test(v.trim());
+
     async function toolWriteCells({ start_cell, values, allow_overwrite }) {
         if (!start_cell || !Array.isArray(values) || !values.length) return { error: "start_cell and a non-empty values array are required" };
         const startCellRef = start_cell.includes("!") ? start_cell.slice(start_cell.indexOf("!") + 1) : start_cell;
@@ -7597,7 +8058,16 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
             let written;
             await Excel.run(async (ctx) => {
                 const sheet = ctx.workbook.worksheets.getItem(check.sheetName);
-                sheet.getRange(check.address).values = padded;
+                const target = sheet.getRange(check.address);
+                // Excel silently coerces anything it can read as a date. A price table labelled
+                // "Sep 2024", "Mar 2025", "26 Aug 2026" came back as 45536, 45717, 46260 — raw
+                // serial numbers — while "Feb 2026 (peak)" survived only because the suffix made it
+                // unparseable. The result was a column of mixed serials and text, and charts with a
+                // nonsense category axis. Forcing those cells to text ("@") BEFORE the write keeps
+                // the label the model actually asked for. Applied per-cell so genuine numbers,
+                // formulas and real dates are untouched.
+                target.numberFormat = padded.map(row => row.map(v => (looksLikeDateLabel(v) ? "@" : "General")));
+                target.values = padded;
                 await ctx.sync();
                 const verify = sheet.getRange(check.address);
                 verify.load("values,formulas");
@@ -8065,12 +8535,76 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
             await Excel.run(async (ctx) => {
                 const { sheet, range } = chatGetRangeAndSheet(ctx, p.source_range);
                 sheet.load("name");
+                // Existing charts and the data extent both matter for placement — see below.
+                const existing = sheet.charts;
+                existing.load("items/name");
+                const used = sheet.getUsedRange();
+                used.load("rowCount,columnCount");
+                await ctx.sync();
+
                 const chart = sheet.charts.add(excelType, range, "Auto");
                 if (p.title) chart.title.text = p.title;
+                // Charts were added with no placement at all, so Office dropped every one of them
+                // at the same default spot — three charts on a sheet landed stacked on top of each
+                // other and over the data. Honour an explicit position, otherwise lay them out in a
+                // column below the data, each in its own band.
+                try {
+                    if (p.position) {
+                        chart.setPosition(p.position);
+                    } else {
+                        const CH = 16; // rows per chart band
+                        const top = (used.rowCount || 1) + 2 + existing.items.length * (CH + 1);
+                        chart.setPosition(`A${top}`, `H${top + CH - 1}`);
+                    }
+                } catch (e) { /* placement is cosmetic — never fail the chart over it */ }
                 if (p.legend_position === "none") chart.legend.visible = false;
                 else if (p.legend_position) { chart.legend.visible = true; chart.legend.position = p.legend_position; }
                 if (p.x_axis_title) chart.axes.categoryAxis.title.text = p.x_axis_title;
                 if (p.y_axis_title) chart.axes.valueAxis.title.text = p.y_axis_title;
+                // Series whose magnitude differs by orders of magnitude (revenue vs PAT, revenue vs
+                // margin %) are invisible on a shared axis. Matching by NAME rather than index
+                // because the model knows its column headers, not the series ordering Excel chose.
+                const wantSecondary = Array.isArray(p.secondary_series) ? p.secondary_series.map(x => String(x || "").trim().toLowerCase()).filter(Boolean) : [];
+                if (wantSecondary.length) {
+                    const series = chart.series;
+                    series.load("items/name");
+                    await ctx.sync();
+                    // On a COLUMN or BAR chart a secondary-axis series still occupies the same
+                    // category slot as the primary one, so it renders ON TOP of those bars —
+                    // exactly how a PAT series of ~113 disappeared behind a revenue bar of
+                    // ~778,716. The conventional fix is a combo chart: keep the big series as
+                    // columns and render the secondary one as a line. Done automatically because
+                    // the user should not have to know this to get a readable chart.
+                    const baseIsBars = /Column|Bar/i.test(excelType);
+                    const secondaryType = p.secondary_chart_type
+                        ? (CHAT_CHART_TYPE_MAP[p.secondary_chart_type] || null)
+                        : (baseIsBars ? "LineMarkers" : null);
+                    let matched = 0;
+                    for (const sItem of series.items) {
+                        if (!wantSecondary.includes(String(sItem.name || "").trim().toLowerCase())) continue;
+                        matched++;
+                        sItem.axisGroup = Excel.ChartAxisGroup.secondary;
+                        if (secondaryType) sItem.chartType = secondaryType;
+                    }
+                    // MUST sync before touching the secondary axis: it does not exist until the
+                    // axisGroup assignment above is committed. Reading it in the same batch threw
+                    // "The requested resource doesn't exist" — and because Office.js surfaces such
+                    // errors at sync() rather than at the call, the surrounding try/catch never saw
+                    // it and the whole chart failed instead of just losing its axis title.
+                    if (matched) {
+                        try {
+                            await ctx.sync();
+                            if (p.secondary_axis_title) {
+                                chart.axes.getItem("Value", "Secondary").title.text = p.secondary_axis_title;
+                                await ctx.sync();
+                            }
+                        } catch (e) {
+                            // Older host without ExcelApi 1.8 — the chart still renders, just on
+                            // one axis. Never worth failing the whole chart over.
+                            console.warn("[Chat] secondary axis unsupported:", e && e.message);
+                        }
+                    }
+                }
                 chart.name = `${p.title || "Chart"}_${Date.now() % 100000}`;
                 chart.load("name");
                 await ctx.sync();
@@ -8135,11 +8669,14 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
         }
     }
 
-    const CHAT_STRUCTURE_DESTRUCTIVE = new Set(["delete_row", "delete_column", "delete_sheet"]);
+    // Charts are visible work, so removing them is gated like the other deletes.
+    const CHAT_STRUCTURE_DESTRUCTIVE = new Set(["delete_row", "delete_column", "delete_sheet", "delete_chart", "delete_all_charts"]);
     async function toolModifyStructure(p) {
         if (!p || !p.action) return { error: "action is required" };
         if (CHAT_STRUCTURE_DESTRUCTIVE.has(p.action) && !autoApplyEdits) {
-            const desc = p.action === "delete_sheet" ? `delete the sheet "${p.sheet}"`
+            const desc = p.action === "delete_all_charts" ? `delete ALL charts on "${p.sheet || "the active sheet"}"`
+                : p.action === "delete_chart" ? `delete the chart "${p.chart_name}"`
+                : p.action === "delete_sheet" ? `delete the sheet "${p.sheet}"`
                 : p.action === "delete_row" ? `delete row(s) ${p.position}-${(p.position || 0) + (p.count || 1) - 1} on "${p.sheet || "the active sheet"}"`
                     : `delete column(s) starting at ${chatColToLetter((p.position || 1) - 1)} on "${p.sheet || "the active sheet"}"`;
             const approved = await addConfirmCard(`DataGPT wants to ${desc}. This can destroy data.`);
@@ -8152,6 +8689,50 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
                 const getSheet = () => p.sheet ? ctx.workbook.worksheets.getItem(p.sheet) : ctx.workbook.worksheets.getActiveWorksheet();
                 const count = Math.max(1, parseInt(p.count, 10) || 1);
                 switch (p.action) {
+                    // Freezing is not structural in the destructive sense — nothing moves and no
+                    // data changes — so these deliberately sit outside CHAT_STRUCTURE_DESTRUCTIVE
+                    // and never prompt for confirmation.
+                    case "delete_chart": {
+                        if (!p.chart_name) throw new Error("chart_name is required for delete_chart");
+                        const sheet = getSheet(); sheet.load("name");
+                        sheet.charts.getItem(p.chart_name).delete();
+                        await ctx.sync();
+                        result = { message: `Deleted chart "${p.chart_name}" from "${sheet.name}"` };
+                        break;
+                    }
+                    case "delete_all_charts": {
+                        const sheet = getSheet(); sheet.load("name");
+                        const charts = sheet.charts;
+                        charts.load("items/name");
+                        await ctx.sync();
+                        const names = charts.items.map(c => c.name);
+                        // Backwards: deleting re-indexes the collection underneath us.
+                        for (let i = charts.items.length - 1; i >= 0; i--) charts.items[i].delete();
+                        await ctx.sync();
+                        result = { message: `Deleted ${names.length} chart(s) from "${sheet.name}"`, deleted: names };
+                        break;
+                    }
+                    case "freeze_rows": {
+                        const sheet = getSheet(); sheet.load("name");
+                        sheet.freezePanes.freezeRows(count);
+                        await ctx.sync();
+                        result = { message: `Froze the top ${count} row(s) on "${sheet.name}"` };
+                        break;
+                    }
+                    case "freeze_columns": {
+                        const sheet = getSheet(); sheet.load("name");
+                        sheet.freezePanes.freezeColumns(count);
+                        await ctx.sync();
+                        result = { message: `Froze the first ${count} column(s) on "${sheet.name}"` };
+                        break;
+                    }
+                    case "unfreeze": {
+                        const sheet = getSheet(); sheet.load("name");
+                        sheet.freezePanes.removeFreezePanes();
+                        await ctx.sync();
+                        result = { message: `Removed frozen panes on "${sheet.name}"` };
+                        break;
+                    }
                     case "insert_row": {
                         if (!p.position) throw new Error("position is required for insert_row");
                         const sheet = getSheet(); sheet.load("name");
@@ -8452,6 +9033,15 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
 
     async function callTool(name, args) {
         switch (name) {
+            case "confirm_companies": {
+                const list = Array.isArray(args.companies) ? args.companies.map(x => String(x || "").trim()).filter(Boolean) : [];
+                if (!list.length) return { error: "companies must be a non-empty array of names" };
+                const confirmed = await addCompanyConfirmCard(
+                    String(args.question || "Are these the companies you meant? Remove any that don't belong, or add others."),
+                    list,
+                );
+                return { confirmed, removed: list.filter(x => !confirmed.includes(x)) };
+            }
             case "get_workbook_overview": return toolWorkbookOverview({ sheet: args.sheet_name });
             case "read_range": return toolReadRange(args);
             case "create_sheet": return toolCreateSheet(args);
@@ -8480,6 +9070,30 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
         const q = input.value.trim();
         if (!q) return;
 
+        // ── /log — save the debug log without touching DevTools ──
+        // saveChatLog() is on window, but reaching it means opening DevTools AND, in Office on the
+        // web, switching the console's frame selector to the task pane's iframe — logs from the
+        // iframe DISPLAY in the top-frame console, so it looks like the right place while anything
+        // typed there evaluates somewhere the function does not exist. Too sharp an edge for a
+        // debugging aid, so the chat box takes the command directly.
+        if (/^\/log\b/i.test(q)) {
+            const arg = q.replace(/^\/log\b/i, "").trim().toLowerCase();
+            addMsg("user", q);
+            input.value = ""; input.style.height = "auto";
+            if (arg === "clear") {
+                window.clearChatLog();
+                addMsg("bot", "Debug log cleared.");
+            } else {
+                const entries = debugLog.length;
+                saveChatLog();
+                addMsg("bot", entries
+                    ? `Saved **${entries}** log entries to your downloads as \`datagpt-log-….txt\`.\n\nIf no file appeared, this host blocked the download — the full log was printed to the DevTools console instead. Use \`/log clear\` to start a fresh one.`
+                    : "The debug log is empty — ask a question first, then run `/log`.");
+            }
+            stream.scrollTop = stream.scrollHeight;
+            return; // never reaches the model: this is a local command, not a question
+        }
+
         // Fall back to the main Company-tab dropdown if the user never touched the chat's own picker.
         if (!primaryCo) {
             const t = byId("dropdownToggle");
@@ -8490,9 +9104,77 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
         input.value = ""; input.style.height = "auto";
         history.push({ role: "user", content: q });
         persistHistory();
-        const thinking = addMsg("bot", "…");
-        busy = true; sendBtn.disabled = true;
+        debugAppend({ kind: "question", question: q });
+        newStepGroup();
+        showThinking();
+        setBusy(true);
         const abortController = new AbortController();
+        currentAbort = abortController; // must follow the declaration — const is not hoisted
+
+        // ── Clarifying question ──
+        // A vague question is the most expensive kind: the model picks a period or an entity,
+        // spends a full research cycle on it, and gets told it guessed wrong — so the whole cycle
+        // runs twice. One cheap call up front to ask "which period?" costs a fraction of a paisa
+        // and replaces an entire wasted investigation.
+        //
+        // Deliberately ends the turn rather than blocking mid-flight waiting for an answer. The
+        // reply simply arrives as the user's next message, and since history is already fed to the
+        // model, the follow-up carries full context with no extra plumbing — and the user keeps a
+        // normal composer instead of a modal they cannot escape.
+        if (!skipClarifierOnce) {
+            try {
+                const clarRes = await fetch(OPENROUTER_URL, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${OPENROUTER_KEY}` },
+                    signal: abortController.signal,
+                    body: JSON.stringify({
+                        model: CLARIFIER_MODEL,
+                        temperature: 0,
+                        max_tokens: 400,          // reasoning model — see the classifier's note
+                        reasoning: { effort: "minimal" },
+                        usage: { include: true },
+                        response_format: { type: "json_object" },
+                        messages: [
+                            {
+                                role: "system",
+                                content: `You screen questions for an Excel financial-research assistant before it spends expensive data lookups. Reply with ONLY a JSON object: {"ask":bool,"question":string,"options":[string]}.\n` +
+                                    `Set ask=true ONLY when the question is genuinely ambiguous in a way that would change which data gets fetched, and a one-line answer from the user would resolve it. The commonest case by far is an unspecified TIME PERIOD ("compare revenue" — over what years?). Others: an ambiguous company name matching several listed entities, or an unstated basis (standalone vs consolidated) where it would materially change the answer.\n` +
+                                    `Set ask=false for anything answerable as asked, anything about the open workbook, follow-ups whose context is already in the conversation, and general or conversational messages. Do NOT ask out of mere politeness or for detail you could sensibly default. When in doubt, ask=false — an unnecessary question is more annoying than a sensible default.\n` +
+                                    `"question" is one short sentence. "options" is 2-4 concrete tappable answers, most likely first, each a phrase the user could send as-is (e.g. "Last 3 years", "Last 5 years", "FY2026 only"). Omit options only if none sensibly apply.\n` +
+                                    `Examples: "compare revenue and profit of X and Y" -> {"ask":true,"question":"Over which period should I compare them?","options":["Last 3 years","Last 5 years","Latest financial year only"]}. "what was Reliance's FY2025 revenue" -> {"ask":false,"question":"","options":[]}. "make B2:B10 bold" -> {"ask":false,"question":"","options":[]}.`,
+                            },
+                            ...history.slice(-4).map(m => ({ role: m.role, content: String(m.content ?? "").slice(0, 500) })),
+                            { role: "user", content: q },
+                        ],
+                    }),
+                });
+                if (clarRes.ok) {
+                    const clarData = await clarRes.json();
+                    const clarCost = Number(clarData.usage?.cost || 0);
+                    const parsed = JSON.parse(clarData.choices?.[0]?.message?.content || "{}");
+                    console.log(`[Chat] ❓ clarify=${parsed.ask === true} (clarifier $${clarCost.toFixed(6)})`);
+                    if (parsed.ask === true && parsed.question) {
+                        // Charge for the screening call even though the turn stops here — it is
+                        // real spend, and skipping it would make the wallet quietly wrong.
+                        if (clarCost > 0) deductChatCost({ question: q, costUsd: clarCost });
+                        hideThinking();
+                        const bubble = addMsg("bot", String(parsed.question));
+                        renderClarifyOptions(bubble, Array.isArray(parsed.options) ? parsed.options : []);
+                        history.push({ role: "assistant", content: String(parsed.question) });
+                        persistHistory();
+                        // The user's answer is the next message; screening it again would just
+                        // risk a second question about the same thing.
+                        skipClarifierOnce = true;
+                        stream.scrollTop = stream.scrollHeight;
+                        setBusy(false); currentAbort = null;
+                        return;
+                    }
+                }
+            } catch (e) {
+                console.warn("[Chat] clarifier failed — continuing without asking:", e);
+            }
+        }
+        skipClarifierOnce = false;
         let mcpClient = null;
         try {
             const contextNote = primaryCo
@@ -8501,9 +9183,94 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
                 : "No company is currently selected in the add-in.";
 
             // Connect to GoIndia's MCP server directly and pull its tool list in for this turn.
-            let mcpOpenAITools = [], mcpUnavailableReason = "";
-            const access = await ensureMcpAccess();
-            if (access.flag !== 3) {
+            // ── Tool-set classifier ──
+            // The two tool families cost ~5,900 tokens of schema between them (MCP ~2,100, Excel
+            // ~3,800) and are re-sent on EVERY iteration of the loop below — so on a long
+            // investigation the definitions alone can run to six figures of tokens. Most questions
+            // only ever need ONE family: "what was Reliance's revenue" never touches Excel, and
+            // "make B2:B10 bold" never touches the research platform. One cheap call decides which
+            // families to send, and an Excel-only question additionally skips opening the MCP
+            // connection entirely (worth ~1s of latency on its own).
+            //
+            // This deliberately does NOT try to plan or order the tools. The model already
+            // sequences correctly on its own (it won't chart numbers it hasn't fetched), and real
+            // requests interleave the families anyway — "update my model with the latest revenue"
+            // is read-sheet, then fetch, then write. Constraining the ORDER would force retries
+            // that cost more than the schemas saved; only OMISSION is safe.
+            //
+            // Fails OPEN in every direction: any error, timeout, or unparseable reply falls back to
+            // sending both families, i.e. exactly the old behaviour. A misclassification must never
+            // be able to make a question unanswerable.
+            const CLASSIFIER_MODEL = "openai/gpt-5-mini";
+            let needsData = true, needsExcel = true;
+            try {
+                const clsRes = await fetch(OPENROUTER_URL, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${OPENROUTER_KEY}` },
+                    signal: abortController.signal,
+                    body: JSON.stringify({
+                        model: CLASSIFIER_MODEL,
+                        temperature: 0,
+                        // gpt-5-mini is a REASONING model: reasoning tokens are spent from this
+                        // same budget before any content is produced. At a "sensible for one line
+                        // of JSON" value like 60 it burns the entire allowance thinking and returns
+                        // content:null with finish_reason "length" — which, because this block
+                        // fails open, would look like a working feature that never once narrowed
+                        // the tool set. Hence a budget far larger than the reply needs...
+                        max_tokens: 400,
+                        // ...and effort "minimal", which takes reasoning to 0 tokens for what is a
+                        // trivial routing decision: measured 1.3s and $0.000063 per call, against
+                        // 4.2s and $0.000373 on the default effort, with identical answers.
+                        reasoning: { effort: "minimal" },
+                        usage: { include: true },
+                        response_format: { type: "json_object" },
+                        messages: [
+                            {
+                                role: "system",
+                                // The literal word "json" MUST appear somewhere in these messages:
+                                // response_format json_object is rejected by the provider without it
+                                // ("input messages must contain the word 'json'"), and because this
+                                // whole block fails open, that 400 would be invisible — every
+                                // classification silently falling back to both tool families while
+                                // appearing to work.
+                                content: `Decide which tool families an Excel research assistant needs for the user's latest message. Reply with ONLY a JSON object of the form {"data":bool,"excel":bool}.\n` +
+                                    `data = needs GoIndia's research platform (company financials, earnings calls, sentiment, broker reports, sector/market figures) — anything the assistant cannot answer from the conversation or the open workbook alone.\n` +
+                                    `excel = needs to read or change the user's open workbook (reading cells, writing values/formulas, formatting, charts, sheets, auditing, undo).\n` +
+                                    `Both are often true: fetching figures AND putting them in the sheet. When genuinely unsure, answer true — a missing tool family is far worse than an unused one.\n` +
+                                    `Examples: "what was Reliance's revenue last year" -> {"data":true,"excel":false}. "make B2:B10 bold" -> {"data":false,"excel":true}. "chart Reliance's revenue" -> {"data":true,"excel":true}. "why is C7 wrong" -> {"data":false,"excel":true}. "summarise what you just told me" -> {"data":false,"excel":false}.`,
+                            },
+                            // Recent turns included so follow-ups resolve ("now chart it" only makes
+                            // sense against what came before).
+                            ...history.slice(-4).map(m => ({ role: m.role, content: String(m.content ?? "").slice(0, 500) })),
+                            { role: "user", content: q },
+                        ],
+                    }),
+                });
+                if (clsRes.ok) {
+                    const clsData = await clsRes.json();
+                    const clsCost = clsData.usage?.cost;
+                    if (clsCost != null) totalCostUsd += Number(clsCost) || 0;
+                    const parsed = JSON.parse(clsData.choices?.[0]?.message?.content || "{}");
+                    // Only narrow on an explicit false — anything else leaves the family enabled.
+                    if (parsed.data === false) needsData = false;
+                    if (parsed.excel === false) needsExcel = false;
+                    // A "neither" verdict (pure conversational follow-up) still gets Excel tools:
+                    // cheap insurance, and the model may still want to glance at the sheet.
+                    if (!needsData && !needsExcel) needsExcel = true;
+                    console.log(`[Chat] 🧭 tools: data=${needsData} excel=${needsExcel} (classifier $${Number(clsCost || 0).toFixed(6)})`);
+                }
+            } catch (e) {
+                console.warn("[Chat] classifier failed — sending both tool families:", e);
+            }
+
+            let mcpOpenAITools = [], mcpUnavailableReason = "", mcpServerInstructions = "";
+            const access = needsData ? await ensureMcpAccess() : null;
+            if (!needsData) {
+                // Not an error, and deliberately NOT surfaced as an "unavailable" reason — the
+                // system prompt branches on mcpOpenAITools.length, and telling the model research
+                // data is "unavailable" would make it refuse questions it was never asked.
+                mcpUnavailableReason = "";
+            } else if (access.flag !== 3) {
                 mcpUnavailableReason = access.flag === 2 ? "MCP access has been revoked for this account."
                     : access.flag === 1 ? "this account doesn't have an active MCP research subscription."
                     : "couldn't verify MCP research access for this account.";
@@ -8516,10 +9283,12 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
                     await mcpClient.open();
                     await mcpClient.initialize();
                     mcpOpenAITools = toOpenAITools(await mcpClient.listTools());
-                    mcpCard.className = "chat-card done"; mcpSt.textContent = "✓";
+                    mcpServerInstructions = mcpClient.serverInstructions || "";
+                    await settleCard(mcpCard, "done", "✓");
+                    console.log(`[Chat] 📖 server instructions: ${mcpServerInstructions.length} chars`);
                 } catch (e) {
                     mcpUnavailableReason = String(e.message || e);
-                    mcpCard.className = "chat-card err"; mcpSt.textContent = "✕";
+                    await settleCard(mcpCard, "err", "✕");
                 }
             }
 
@@ -8527,7 +9296,14 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
                 `You are GoIndia Stocks' in-Excel research assistant. ${contextNote}\n` +
                 (mcpOpenAITools.length
                     ? `You have direct tool access to GoIndia's research data platform (financials, earnings calls, sentiment, broker reports, sector/market data, and more) via the tools below, plus tools to read/write the user's open workbook. Never invent or guess figures — fetch them.\n`
-                    : `GoIndia's research data tools are unavailable this turn (${mcpUnavailableReason}) — you only have the Excel read/write tools below. If the user's request needs data you don't already have from this conversation, say so rather than inventing numbers.\n`) +
+                    // Three cases, not two. When the classifier judged this question doesn't need
+                    // research data, the tools are absent by CHOICE, not broken — saying
+                    // "unavailable" there would make the model refuse a question it can answer, and
+                    // the reason string is empty anyway. It still gets the never-invent-figures
+                    // rule, plus a way out if the classifier got it wrong.
+                    : mcpUnavailableReason
+                        ? `GoIndia's research data tools are unavailable this turn (${mcpUnavailableReason}) — you only have the Excel read/write tools below. If the user's request needs data you don't already have from this conversation, say so rather than inventing numbers.\n`
+                        : `This question was routed as not needing GoIndia's research data platform, so only the tools below are loaded. Answer from the conversation and the workbook. Never invent or guess figures — if it turns out you genuinely need company financials or market data you don't have, say so plainly and suggest the user re-ask, rather than making numbers up.\n`) +
                 `Rules:\n` +
                 `- If a data tool needs a company identifier you don't have, look it up via the available tools first — never guess.\n` +
                 `- Call get_workbook_overview at the start of a task (or read_range on the specific area) before writing any formula that references existing cells — never guess row/column positions. Prefer a named range from the overview over a guessed cell address when one exists.\n` +
@@ -8538,10 +9314,93 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
                 `- Use trace_dependencies to explain WHY a value is what it is (trace its precedents) instead of re-reading formulas one cell at a time. Use search_workbook to locate where something is calculated or referenced instead of reading every sheet.\n` +
                 `- Visual/structural requests have their own tools — format_cells (bold, currency, colors, borders), conditional_format (highlight/color-scale by value), create_chart (visualize a comparison), autofit (fix narrow columns after writing new data), tables (make a range sortable/filterable), named_ranges (so a cell can be called "WACC" instead of guessed by address), modify_structure (insert/delete rows/columns, rename/hide a sheet), and comments (leave a note explaining a change). Prefer these over write_cells for anything that isn't a value or formula.\n` +
                 `- Compute derived figures yourself (YoY growth, CAGR, margins, ratios, averages) from the numbers you fetch.\n` +
-                `- Be concise in your final answer.`;
+                // Hoisted out of the platform's own instruction block below. Both rules are stated
+                // down there, but they sit at the very end of ~5,000 characters and were observed
+                // being broken anyway: one replay lost a whole round trip to
+                // "Truncation detected: [:3] slices string output". Repeating the two rules that
+                // actually cost round trips, up here where they are short and unmissable, is worth
+                // the handful of tokens.
+                // Ordering guidance, not a hard pipeline. Stated as a prompt rule rather than
+                // enforced by withholding tools, because real requests interleave: "update my
+                // model with the latest revenue" is read-sheet, then fetch, then write. Costs
+                // nothing and no extra round trip, unlike deciding the order in a separate call.
+                `- When a question names companies, resolve them with search_company EARLY (it is cheap, and every data table is keyed by fincode, not by name) — you may call it in the same batch as get_catalog rather than waiting for the catalog to come back.\n` +
+                // The one genuinely Excel-specific shortcut available here. The add-in's Download
+                // Data feature writes "Key Financials", "Quarterly Data" and "Annual Data" sheets
+                // for a company; when those are already present for the company being asked about,
+                // the answer is sitting in the workbook and a research round trip is pure waste.
+                `- FIRST check the workbook: if get_workbook_overview shows "Key Financials", "Annual Data" or "Quarterly Data" sheets already downloaded for a company in the question, read those figures with read_range instead of fetching them again. Only go to the research tools for companies or periods the workbook does not already cover.\n` +
+                `- In run_query code: NEVER slice or truncate a helper function's output (no result[:3], no data[0:500]) — the tool REJECTS any code containing a string slice and the call is wasted. Print or return the full value.\n` +
+                // Observed failure: `SELECT * FROM stocks_info WHERE ...` was rejected outright and
+                // cost a whole round trip, then the TOP 20 retry dumped one enormous row of ~70
+                // columns nobody wanted. Both halves of that are worth heading off.
+                `- In SQL: every SELECT needs TOP N, and "SELECT *" is REJECTED without it. Name the columns you actually need rather than selecting everything — a wide table like stocks_info has dozens of columns and dumping them wastes the turn.\n` +
+                // Observed: estimate = "no" failed with Invalid column name 'no'. This is SQL
+                // Server, where double quotes delimit an IDENTIFIER, so "no" was read as a column
+                // rather than the string. Easy to write by accident when the SQL is being built
+                // inside a Python f-string, which is exactly how these queries get assembled.
+                `- This is SQL Server (T-SQL): string literals take SINGLE quotes — estimate = 'no'. DOUBLE quotes mean an identifier, so estimate = "no" fails with Invalid column name 'no'. When building SQL inside a Python f-string, keep the outer string double-quoted and the SQL literals single-quoted.\n` +
+                // Observed: filter_id IN (1, 5, 12, 23) was guessed, and pulled back
+                // "Employee Cost Growth" — a real metric_registry row, but a GROWTH metric, which
+                // lives in yearly_growth (Type='C'), not annual_financials (Type='Y'). Selecting it
+                // as a column of annual_financials failed.
+                `- Never guess filter_id values in metric_registry — look metrics up by NAME, and always filter by the Type that matches the table you are about to query (Type='Y' for annual_financials, 'Q' for quarterly_financials, 'C' for the growth tables). A metric existing in the registry does NOT mean it is a column of the table you want: growth/CAGR metrics live in yearly_growth and quarterly_growth, not in annual_financials.\n` +
+                // Observed: queried sector_metric_master for "metric_id" and stocks_info for
+                // "company_name". Neither exists (they are "id" and "CompName"). Both cost a turn,
+                // and in the first case get_schema was called for that very table one turn LATER.
+                `- Call get_schema for a table BEFORE writing SQL against it, and use the exact column names it gives you. Do not infer a column name from the table's description or from what a similar table calls it — "metric_id" and "company_name" both look obvious and both do not exist.\n` +
+                // Observed: groupby(...).mean() failed with "dtype 'str' does not support mean" —
+                // these tables return numeric-looking columns as TEXT, the same trap to_float()
+                // exists for on the add-in's own API responses.
+                `- Numeric columns frequently come back as TEXT. Before any arithmetic, aggregation or sorting, coerce them: df[col] = pd.to_numeric(df[col], errors='coerce').\n` +
+                // Observed: dom['data_date'].str[:7] was rejected as "truncation". That is a
+                // legitimate pandas column operation, not truncating a tool's output — the server's
+                // check is a plain text match for slice syntax and cannot tell the difference.
+                // Cheaper to avoid the syntax than to argue with it.
+                `- Avoid [:n] slice syntax ANYWHERE in run_query code, even legitimate pandas ones like series.str[:7] — the server rejects it on sight as truncation. Use pd.to_datetime(x).dt.strftime('%Y-%m'), .str.slice(), or an equivalent instead.\n` +
+                // Observed: it named a top-5 before the data supporting the ranking had been
+                // fetched (the previous result was cut off before two of the five appeared).
+                // The gold question resolved ten "gold-exposed" companies and ranked a bullion
+                // refiner top by revenue — its turnover is pass-through throughput, so every margin
+                // comparison after it was apples-to-oranges. One confirmation would have caught it.
+                `- When the user names a CATEGORY of companies rather than specific ones ("companies with gold exposure", "large-cap IT", "cement peers"), resolve your candidate list and then call confirm_companies BEFORE analysing them. Analyse exactly the list it returns. Skip this when the user already named the companies.
+` +
+                `- When you do rank a resolved list, sanity-check that the entities are comparable businesses. A refiner or trading house whose revenue is pass-through turnover should not be ranked by revenue against retailers — call it out rather than letting it top the table.
+` +
+                `- Any ranking ("top 5 by revenue", "largest", "best performing") must come from figures you have actually fetched in THIS conversation. Never rank from prior knowledge and then fetch to confirm — if the data you have is incomplete, fetch the rest first or say the ranking is partial.\n` +
+                // Observed failure, and by far the most expensive one: search_company returned
+                // THREE "Tata Motors" entities, the model picked one, found it only had two years,
+                // and then spent SIX round trips hunting a better-populated listing — re-running
+                // search_company, scanning company_name LIKE, querying a different fincode — before
+                // reporting the ORIGINAL entity's figures anyway. Every one of those turns was
+                // discarded work.
+                `- Sparse history is a FACT to report, not a problem to solve. If the entity you resolved has fewer years than asked for, say so and move on with what exists. Do NOT go hunting for a better-populated listing of the same company: do not re-run search_company, do not scan company_name for variants, do not try sibling fincodes. A demerged or restructured company genuinely has a short restated history, and the user is better served by an honest "only FY25-26 available for this entity" than by figures quietly taken from a different legal entity.\n` +
+                `- When search_company returns several entities for one name, pick the plain listed parent (the exact name, no "DVR"/"Partly Paid"/"- Rights" suffix) and say which one you used.\n` +
+                `- Every run_query runs in a FRESH Python process: nothing from a previous call still exists. Fetch and process everything you need inside ONE script rather than building state across calls.\n` +
+                `- Be concise in your final answer.` +
+                // Appended LAST so the research platform's own rules are the most recent thing the
+                // model reads, and so nothing above can be mistaken for overriding them. Only
+                // present when the MCP handshake actually returned them (see initialize), so an
+                // Excel-only or MCP-unavailable turn carries none of this weight. Costs ~1,250
+                // tokens per request, which pays for itself many times over if it removes even one
+                // wasted round trip — each of those re-sends the whole prompt AND the tool schemas.
+                (mcpOpenAITools.length && mcpServerInstructions
+                    ? `\n\nThe following operating rules come from GoIndia's research data platform itself and govern how its tools above must be used. Follow them exactly — they override your own habits about how to sequence or retry these tools. They do NOT apply to the Excel tools.\n\n${mcpServerInstructions}`
+                    : "");
 
-            const combinedTools = EXCEL_TOOLS.concat(mcpOpenAITools);
-            const convo = [{ role: "system", content: system }, ...history.slice(-8)];
+            // These two READ-ONLY tools are kept even when Excel was ruled out. get_workbook_overview
+            // is the model's only way to discover it CAN see the sheet — without it, a misrouted
+            // "what's in my sheet?" would have it insist it has no workbook access rather than just
+            // looking. read_range comes with it because the overview alone is useless: the
+            // check-the-workbook-first rule in the system prompt tells the model to read already
+            // downloaded figures instead of re-fetching them, and it cannot do that with no way to
+            // read a range. Two small schemas; the other 16 (all of which WRITE) still drop out.
+            const ALWAYS_EXCEL_TOOLS = new Set(["get_workbook_overview", "read_range", "confirm_companies"]);
+            const excelToolsForTurn = needsExcel
+                ? EXCEL_TOOLS
+                : EXCEL_TOOLS.filter(t => ALWAYS_EXCEL_TOOLS.has(t.function?.name));
+            const combinedTools = excelToolsForTurn.concat(mcpOpenAITools);
+            console.log(`[Chat] 🧰 sending ${combinedTools.length} tools (${excelToolsForTurn.length} excel + ${mcpOpenAITools.length} mcp)`);
             let full = "";
             // Summed across every OpenRouter call this question takes (tool-calling round trips
             // included, plus the forced-final-answer fallback below if it fires) — deducted from
@@ -8554,73 +9413,248 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
             // (see the fallback below) even though the model was mid-investigation, not stuck or
             // erroring; raised again since even 10 was cutting off legitimately multi-step work,
             // then again from 20 to 30 for the same reason.
-            const MAX_TOOL_ITERS = 30;
-            for (let iter = 0; iter < MAX_TOOL_ITERS; iter++) {
-                const res = await fetch(OPENROUTER_URL, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${OPENROUTER_KEY}` },
-                    body: JSON.stringify({ model: AI_MODEL, messages: convo, tools: combinedTools, temperature: 0.2, max_tokens: 3000, usage: { include: true } })
-                });
-                if (!res.ok) throw new Error(`OpenRouter ${res.status}: ${(await res.text()).slice(0, 160)}`);
-                const data = await res.json();
-                const cost = data.usage?.cost;
-                if (cost != null) totalCostUsd += Number(cost) || 0;
-                console.log(`[Chat] 💰 turn ${iter + 1} cost: ${cost != null ? "$" + Number(cost).toFixed(5) : "n/a"} | tokens: ${data.usage?.total_tokens ?? "?"}`);
-
-                const msg = data.choices?.[0]?.message;
-                if (!msg) break;
-                convo.push(msg);
-
-                const calls = msg.tool_calls || [];
-                if (!calls.length) { full = msg.content || ""; break; }
-
-                for (const call of calls) {
-                    let args = {};
-                    try { args = JSON.parse(call.function.arguments || "{}"); } catch (e) { /* leave empty */ }
-                    let result;
-                    if (EXCEL_SELF_MANAGED_UI_TOOLS.has(call.function.name)) {
-                        try { result = await callTool(call.function.name, args); } // renders its own confirm/running card
-                        catch (e) { result = { error: String(e.message || e) }; }
-                    } else if (EXCEL_TOOL_NAMES.has(call.function.name)) {
-                        const card = addCard(`${toolLabel(call.function.name, args)}…`, "run");
-                        try { result = await callTool(call.function.name, args); await settleCard(card, "done", "✓"); }
-                        catch (e) { result = { error: String(e.message || e) }; await settleCard(card, "err", "✕"); }
-                    } else {
-                        // MCP-provided tool
-                        const card = addCard(`Running "${call.function.name}"…`, "run");
-                        try {
-                            const r = await mcpClient.callTool(call.function.name, args);
-                            result = r.isError ? { error: r.text } : { text: capText(r.text) };
-                            await settleCard(card, r.isError ? "err" : "done", r.isError ? "✕" : "✓");
-                        } catch (e) { result = { error: String(e.message || e) }; await settleCard(card, "err", "✕"); }
-                    }
-                    convo.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(result).slice(0, 6000) });
-                }
-            }
-
-            // Ran out of iterations while the model was still calling tools (never hit the
-            // !calls.length break above) — force one last text-ONLY turn (no "tools" param at all,
-            // so it physically cannot call another one) so whatever was actually discovered along
-            // the way still reaches the user, instead of silently showing "(no response)" for a
-            // question that was genuinely being worked on, not stuck or erroring.
-            if (!full) {
+            // These streams get dropped mid-turn no matter what: measured dead at 31s, 46s and 61s,
+            // and the 61s case had two successful heartbeat pings behind it, so keeping traffic
+            // flowing is not sufficient. A long research question reliably outlives one connection.
+            // Rather than let every remaining tool call fail once that happens, rebuild the client
+            // and retry the call once — the session is re-established from scratch (new session_id,
+            // fresh initialize/tools-list), which is fine because the server holds no state we
+            // depend on between calls. Only ONE retry: if the fresh connection also fails, that is
+            // a real outage and the model should hear about it rather than sit in a reconnect loop.
+            const callMcpWithRetry = async (name, args) => {
                 try {
+                    return await mcpClient.callTool(name, args);
+                } catch (e) {
+                    if (!mcpClient || !mcpClient._streamDead) throw e; // a genuine tool error, not a dropped stream
+                    console.warn(`[Chat] 🔌 MCP stream dropped (${mcpClient._streamDead}) — reconnecting once`);
+                    try { await mcpClient.close(); } catch (err) { /* already gone */ }
+                    const fresh = new McpClient(`${MCP_SERVER_URL}?token=${encodeURIComponent(access.mcp_api_key)}&skills=false`, abortController.signal);
+                    await fresh.open();
+                    await fresh.initialize();
+                    await fresh.listTools();
+                    mcpClient = fresh; // so the turn's finally block closes the live one, not the corpse
+                    return await fresh.callTool(name, args);
+                }
+            };
+
+            // Why the LAST model call stopped. Read after the phases to tell "nothing to say"
+            // apart from "cut off at max_tokens", which look identical from outside.
+            let lastFinish = "";
+
+            // ── Phase runner ──
+            // The tool loop, extracted so it can be run more than once per question with a
+            // DIFFERENT tool set and a fresh context each time. See the two-phase pipeline
+            // below for why that matters.
+            const runPhase = async ({ system, phaseTools, seed, label }) => {
+                const convo = [{ role: "system", content: system }, ...seed];
+                let full = "";
+                // Per-phase: a phase that never fetches a catalog has nothing to trim.
+                const catalogMsgIdx = [];
+                // A phase must not be able to run a tool it was not handed. The model will still
+                // ATTEMPT one it remembers from the prompt, and callTool() dispatches purely by
+                // name — so without this check the research phase happily created sheets and wrote
+                // cells with guessed, wrong argument shapes, doing the write phase's job badly
+                // before the write phase even started.
+                const offeredTools = new Set(phaseTools.map(t => t.function && t.function.name).filter(Boolean));
+                console.log(`[Chat] ▶ phase "${label}": ${phaseTools.length} tools`);
+                debugAppend({ kind: "phase", phase: label, toolCount: phaseTools.length });
+                startStepGroup(label); // research and write summarise as separate collapsibles
+                const MAX_TOOL_ITERS = 30;
+                for (let iter = 0; iter < MAX_TOOL_ITERS; iter++) {
+                    // A Stop during a long tool call should not be followed by one more model call.
+                    if (abortController.signal.aborted) break;
                     const res = await fetch(OPENROUTER_URL, {
                         method: "POST",
                         headers: { "Content-Type": "application/json", "Authorization": `Bearer ${OPENROUTER_KEY}` },
-                        body: JSON.stringify({
-                            model: AI_MODEL,
-                            messages: [...convo, { role: "user", content: "Give your best answer now based on everything gathered above — no more tool calls." }],
-                            temperature: 0.2, max_tokens: 3000, usage: { include: true },
-                        }),
+                        body: JSON.stringify({ model: AI_MODEL, messages: convo, tools: phaseTools, temperature: 0.2, max_tokens: 8000, usage: { include: true } })
                     });
-                    if (res.ok) {
-                        const data = await res.json();
-                        full = data.choices?.[0]?.message?.content || "";
-                        const cost = data.usage?.cost;
-                        if (cost != null) totalCostUsd += Number(cost) || 0;
+                    if (!res.ok) throw new Error(`OpenRouter ${res.status}: ${(await res.text()).slice(0, 160)}`);
+                    const data = await res.json();
+                    const cost = data.usage?.cost;
+                    if (cost != null) totalCostUsd += Number(cost) || 0;
+                    console.log(`[Chat] 💰 turn ${iter + 1} cost: ${cost != null ? "$" + Number(cost).toFixed(5) : "n/a"} | tokens: ${data.usage?.total_tokens ?? "?"}`);
+                    debugAppend({ kind: "turn", phase: label, iter: iter + 1, cost: cost != null ? Number(cost).toFixed(5) : "n/a", tokens: data.usage?.total_tokens ?? "?", calls: (data.choices?.[0]?.message?.tool_calls || []).length, finish: data.choices?.[0]?.finish_reason ?? "?", contentChars: (data.choices?.[0]?.message?.content || "").length });
+
+                    lastFinish = data.choices?.[0]?.finish_reason || "";
+                    const msg = data.choices?.[0]?.message;
+                    if (!msg) break;
+                    convo.push(msg);
+
+                    const calls = msg.tool_calls || [];
+                    if (!calls.length) {
+                        full = msg.content || "";
+                        if (!full && iter < MAX_TOOL_ITERS - 1) {
+                            console.warn(`[Chat] empty turn ${iter + 1} (finish=${lastFinish}) — nudging once`);
+                            debugAppend({ kind: "tool", phase: label, name: "(empty response)", ok: false, ms: 0, args: `finish=${lastFinish}`, result: "no tool calls and no text — retrying" });
+                            convo.push({ role: "user", content: "Continue with the remaining steps of the task." });
+                            continue;
+                        }
+                        break;
                     }
-                } catch (e) { /* fall through to "(no response)" below if even this fails */ }
+
+                    for (const call of calls) {
+                        let args = {};
+                        try { args = JSON.parse(call.function.arguments || "{}"); } catch (e) { /* leave empty */ }
+                        let result;
+                        const startedAt = Date.now();
+                        if (!offeredTools.has(call.function.name)) {
+                            // Told plainly, so the model corrects course instead of retrying the
+                            // same unavailable tool with different guessed arguments.
+                            result = { error: `Tool "${call.function.name}" is not available in this step. Do not call it. Use only the tools you were given.` };
+                            debugAppend({ kind: "tool", phase: label, name: call.function.name, ok: false, ms: 0, args: JSON.stringify(args), result: "REFUSED - not offered in this phase" });
+                            convo.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(result) });
+                            continue;
+                        }
+                        if (EXCEL_SELF_MANAGED_UI_TOOLS.has(call.function.name)) {
+                            try { result = await callTool(call.function.name, args); } // renders its own confirm/running card
+                            catch (e) { result = { error: String(e.message || e) }; }
+                        } else if (EXCEL_TOOL_NAMES.has(call.function.name)) {
+                            const card = addCard(`${toolLabel(call.function.name, args)}…`, "run", call.function.name);
+                            try { result = await callTool(call.function.name, args); await settleCard(card, "done", "✓"); }
+                            catch (e) { result = { error: String(e.message || e) }; await settleCard(card, "err", "✕"); }
+                        } else {
+                            // MCP-provided tool
+                            const card = addCard(`Running "${call.function.name}"…`, "run", call.function.name);
+                            try {
+                                const r = await callMcpWithRetry(call.function.name, args);
+                                result = r.isError ? { error: r.text } : { text: capText(r.text, mcpCapFor(call.function.name)) };
+                                await settleCard(card, r.isError ? "err" : "done", r.isError ? "✕" : "✓");
+                            } catch (e) { result = { error: String(e.message || e) }; await settleCard(card, "err", "✕"); }
+                        }
+                        // Was a blanket .slice(0, 6000), which silently re-truncated everything the
+                        // per-tool caps had just been widened to allow — get_catalog would have been
+                        // cut at 6,000 chars no matter what MCP_RESULT_CAPS said. The caps above are
+                        // the real bound now; this is just a backstop against a pathological result.
+                        // Every branch above converges here, so this is the one place that sees
+                        // both what went in and what came back, whichever kind of tool it was.
+                        const failed = !!(result && result.error);
+                        debugAppend({
+                            kind: "tool",
+                            phase: label,
+                            name: call.function.name,
+                            ok: !failed,
+                            ms: Date.now() - startedAt,
+                            args: JSON.stringify(args),
+                            // Full text on failure — the whole point is to stop losing the error.
+                            result: failed ? String(result.error) : String(result && result.text != null ? result.text : JSON.stringify(result)).slice(0, DEBUG_OK_PREVIEW),
+                        });
+                        convo.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(result).slice(0, 70000) });
+                        if (call.function.name === "get_catalog") catalogMsgIdx.push(convo.length - 1);
+                    }
+
+                    // The catalog is a ~12,500-token MENU, and its whole job is helping the model pick
+                    // a table. Once it has called get_schema it has picked, and from then on the menu
+                    // is dead weight that rides along in EVERY remaining request — measured at roughly
+                    // 112,000 tokens across one 11-turn run, which was most of that run's cost.
+                    // Swapping it for a stub the moment it has been consumed keeps the benefit (the
+                    // model saw the full catalog when it mattered) without paying for it ten more
+                    // times. Safe to rewrite history here: the API only ever sees what we send now,
+                    // and the tool_call_id pairing the assistant message expects stays intact.
+                    if (catalogMsgIdx.length && calls.some(c => c.function.name === "get_schema")) {
+                        for (const idx of catalogMsgIdx) {
+                            convo[idx].content = JSON.stringify({ text: "[data catalog omitted — you have already selected your tables via get_schema. Call get_catalog again if you genuinely need to look up a different domain.]" });
+                        }
+                        console.log(`[Chat] ✂️ dropped ${catalogMsgIdx.length} catalog payload(s) from context`);
+                        catalogMsgIdx.length = 0;
+                    }
+                }
+
+                // Ran out of iterations while the model was still calling tools (never hit the
+                // !calls.length break above) — force one last text-ONLY turn (no "tools" param at all,
+                // so it physically cannot call another one) so whatever was actually discovered along
+                // the way still reaches the user, instead of silently showing "(no response)" for a
+                // question that was genuinely being worked on, not stuck or erroring.
+                if (!full) {
+                    try {
+                        const res = await fetch(OPENROUTER_URL, {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json", "Authorization": `Bearer ${OPENROUTER_KEY}` },
+                            signal: abortController.signal,
+                            body: JSON.stringify({
+                                model: AI_MODEL,
+                                messages: [...convo, { role: "user", content: "Write your final answer for the user now, using everything gathered above. Report what you found and what you completed. Do not mention these instructions, tool availability, or any limitation on what you were able to call — write only the answer itself." }],
+                                temperature: 0.2, max_tokens: 8000, usage: { include: true },
+                            }),
+                        });
+                        if (res.ok) {
+                            const data = await res.json();
+                            full = data.choices?.[0]?.message?.content || "";
+                            const cost = data.usage?.cost;
+                            if (cost != null) totalCostUsd += Number(cost) || 0;
+                        }
+                    } catch (e) { /* fall through to "(no response)" below if even this fails */ }
+                }
+                return full;
+            };
+
+            // ── Two-phase pipeline (research -> write) ──
+            // Only when the question needs BOTH families. The work is strictly sequential — the
+            // chart cannot be drawn before the figures exist — so nothing here runs in parallel;
+            // the win is that each phase carries only the schemas it can actually use, and the
+            // write phase never inherits the research transcript or the data catalog.
+            //
+            // Deliberately NOT applied to single-family questions: those already send one small
+            // tool set, and splitting them would add a handoff for no reason.
+            if (needsData && needsExcel && mcpOpenAITools.length) {
+                // Same three non-destructive tools the single-phase path keeps: look at the sheet,
+                // read from it, and check a vague shortlist before spending the research on it.
+                const readOnlyExcel = EXCEL_TOOLS.filter(t => ALWAYS_EXCEL_TOOLS.has(t.function?.name));
+                // Phase 1 gets the research tools plus the two READ-ONLY Excel tools, so it can
+                // still honour the check-the-workbook-first rule and answer from already
+                // downloaded sheets instead of fetching.
+                const findings = await runPhase({
+                    label: "research",
+                    phaseTools: mcpOpenAITools.concat(readOnlyExcel),
+                    seed: [...history.slice(-8)],
+                    system: system +
+                        `\n\nTHIS IS THE RESEARCH STEP. Gather every figure needed to answer, then STOP and report them — do not attempt to write to the workbook, and do not describe what you are about to do. A separate step handles the workbook using only what you report here, and it CANNOT fetch anything you leave out. So state the numbers in full, with the company, the metric, the unit and the period for each, plus any caveat (a year genuinely missing from the database, a figure that is an estimate). Report the data, nothing else.\n` +
+                        // The Rules block above lists every Excel tool by name, and the model acted
+                        // on that list even though this phase was handed only two of them —
+                        // inventing argument shapes for create_sheet/write_cells/create_chart from
+                        // memory and failing on all of them. The dispatcher now refuses un-offered
+                        // tools outright; this stops the model wasting turns discovering that.
+                        `IGNORE every workbook-editing tool named earlier (create_sheet, write_cells, fill_formula, format_cells, conditional_format, create_chart, autofit, tables, named_ranges, modify_structure, comments, undo_last_change). They are NOT available to you in this step and calling them is refused. Your only non-research tools here are get_workbook_overview and read_range (for checking whether data is already downloaded) and confirm_companies.\n` +
+                        // The Rules block already says this, and it was ignored — it sits ~25 rules
+                        // deep. Repeated here because this suffix is short, specific to this step,
+                        // and read last. Getting the shortlist wrong is the most expensive mistake
+                        // available at this point: every figure, ranking and comparison after it
+                        // inherits the error.
+                        `SHORTLIST CHECK — if the user described a CATEGORY of companies instead of naming them ("companies with gold exposure", "large-cap IT", "cement peers"), you MUST call confirm_companies with your candidate list before you fetch financials for them, and then use exactly the list it returns. This is not optional and it is not a fallback for when you are unsure — do it whenever the companies were inferred rather than named. Skip it only when the user named the companies outright.`,
+                });
+                // Phase 2 starts from a CLEAN context: the question and the figures, with no
+                // research transcript, no catalog and no MCP schemas. It also cannot fetch, which
+                // is why it is told to say so rather than invent a number it was not given.
+                full = await runPhase({
+                    label: "write",
+                    phaseTools: EXCEL_TOOLS,
+                    seed: [{ role: "user", content: `${q}\n\n--- Figures already retrieved for you ---\n${findings}\n--- end of figures ---\n\nUse ONLY these figures. You have no access to the research tools, so if something you need is missing, say so plainly instead of inventing it.` }],
+                    system: system.replace(/\n\nThe following operating rules come from GoIndia[\s\S]*$/, "") +
+                        // Observed: asked for a sheet named "Gold Impact", it made "Gold Prices" —
+                        // and signed off with "I only had the figures you supplied — no access to
+                        // research tools", which is this pipeline's internals leaking into a reply
+                        // to someone who has no idea the work was split in two.
+                        `\n\nTHIS IS THE WORKBOOK STEP. The figures have already been fetched and are given to you below. Do the workbook work that was asked for — create sheets, write the values, format, chart — then give the user a short answer that includes the figures themselves, so the reply stands on its own without them having to open the sheet.\n` +
+                                // Observed: asked for "Gold Impact", produced "Gold Analysis" — twice now,
+                        // so the instruction needs to be blunt rather than merely present.
+                        `Follow the user's explicit instructions EXACTLY: if they named a sheet, use that EXACT name — "Gold Impact" means a sheet called "Gold Impact", not "Gold Analysis" or "Gold Prices". If they asked for a specific chart type or range, use it. Never substitute your own naming.\n` +
+                        // Observed: a chart titled "FY2026 Revenue" whose range spanned FY24 Rev,
+                        // FY24 PAT, FY25 Rev, FY25 PAT and FY26 Rev — five unnamed series, with
+                        // revenue (778,716) and PAT (113) on one axis so every PAT bar vanished.
+                        `Charting rules:\n` +
+                        `- The source_range MUST start at the header row and include the label column, or the series come out as "Series1"/"Series2" with no indication of which is Revenue and which is PAT.\n` +
+                        `- Never put series of wildly different magnitude on one axis — revenue in the tens of thousands next to PAT in the hundreds flattens the smaller one to nothing. Either make separate charts, or pass the smaller series' names in create_chart's secondary_series (with secondary_axis_title).\n` +
+                        `- "Freeze the top row" and similar are modify_structure with action freeze_rows / freeze_columns / unfreeze.\n` +
+                        `- The title must describe exactly what is plotted. If the range covers FY24-FY26 revenue, do not title it "FY2026 Revenue".\n` +
+                        `- Write the whole table ONCE, in one write_cells call, before formatting or charting. Writing a block and then re-writing rows inside it shifts everything below and leaves charts pointing at stale ranges.\n` +
+                        `Write as if you did the whole task yourself. The user does not know the work was split into steps — never mention "the figures you supplied", "the research step", or not having research tools. If something genuinely is missing from the figures, describe it as a gap in the available data.`,
+                });
+            } else {
+                full = await runPhase({
+                    label: needsData ? "research" : "workbook",
+                    phaseTools: combinedTools,
+                    seed: [...history.slice(-8)],
+                    system,
+                });
             }
 
             // (No fenced-```excel``` fallback anymore — that existed only to catch write_excel_sheet
@@ -8629,28 +9663,31 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
             // to fall back to; if the model doesn't call a tool properly, it simply doesn't act —
             // the same failure mode as any other tool-calling miss.)
             //
-            // "thinking" was appended to the stream FIRST, before any of this turn's tool-progress
-            // cards — left in place, the answer would fill in at the TOP of a growing list of cards
-            // instead of at the bottom, so as the window grew taller the user had to scroll back UP
-            // to notice it had finished. Move it to the end now that every card for this turn has
-            // already been added, so the answer always lands as the last, most-visible thing.
-            stream.appendChild(thinking.parentElement); // move the .chat-msg wrapper, not just the inner .chat-bubble — moving the bubble alone detaches it from the wrapper whose .chat-msg.bot .chat-bubble rule supplies its background/border
+            // The indicator was pinned to the bottom throughout, so the answer simply takes its
+            // place — no repositioning needed, and it always lands as the last, most-visible thing.
+            hideThinking();
+            addMsg("bot", full || (lastFinish === "length"
+                ? "_The model ran out of output space mid-answer. Try asking for a smaller piece of this — e.g. one chart at a time._"
+                : "_No response was produced. Try rephrasing, or ask for a smaller step._"));
             stream.scrollTop = stream.scrollHeight;
-            thinking.innerHTML = renderMarkdown(full || "(no response)");
             history.push({ role: "assistant", content: full });
             persistHistory();
             // Query is fully complete (tool calls done, final answer rendered) — deduct+log the
             // summed cost now. Fire-and-forget, same as the financial-model deduction elsewhere.
+            console.log("[Chat] 💾 run saveChatLog() to download this session's tool-call log");
             if (totalCostUsd > 0) deductChatCost({ question: q, costUsd: totalCostUsd });
         } catch (e) {
-            stream.appendChild(thinking.parentElement); // move the .chat-msg wrapper, not just the inner .chat-bubble — moving the bubble alone detaches it from the wrapper whose .chat-msg.bot .chat-bubble rule supplies its background/border
+            hideThinking();
+            // A user-initiated Stop is not an error and must not be dressed as one.
+            const aborted = abortController.signal.aborted || e.name === "AbortError";
+            addMsg("bot", aborted ? "_Stopped._" : "⚠ " + e.message);
             stream.scrollTop = stream.scrollHeight;
-            thinking.innerHTML = renderMarkdown("⚠ " + e.message);
+            if (aborted) console.log("[Chat] ⏹ stopped by user");
             console.error("[Chat] error", e);
         } finally {
             if (mcpClient) { try { await mcpClient.close(); } catch (e) { /* already torn down */ } }
             try { abortController.abort(); } catch (e) { /* no-op if already settled */ }
-            busy = false; sendBtn.disabled = !chatBalanceSufficient;
+            setBusy(false); currentAbort = null;
         }
     }
 })();

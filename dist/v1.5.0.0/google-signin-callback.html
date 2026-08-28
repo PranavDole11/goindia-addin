@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=Edge" />
+    <title>Signing in…</title>
+    <!-- Office.js is required here, not optional — messageParent below only exists on
+         Office.context.ui, which isn't populated until this loads and Office.onReady fires. -->
+    <script type="text/javascript" src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+    <style>
+        body {
+            margin: 0; display: flex; align-items: center; justify-content: center; height: 100vh;
+            font-family: Arial, sans-serif; color: #555; font-size: 13px; background: #fff; text-align: center; padding: 0 20px;
+        }
+    </style>
+</head>
+<body>
+    <div id="msg">Finishing sign-in…</div>
+    <script>
+        // Google's implicit-flow (response_type=id_token) result arrives in the URL FRAGMENT
+        // (#id_token=...&...), not the query string — errors can land in either, depending on
+        // how early Google's own auth flow fails. messageParent only accepts a string, so the raw
+        // id_token (a JWT) is passed through as-is; the task pane already knows how to decode it
+        // (see parseJwt/handleCredentialResponse) — that logic is unchanged from the old GSI
+        // button flow, which handed the task pane the exact same kind of JWT.
+        const hashParams = new URLSearchParams(location.hash.replace(/^#/, ""));
+        const queryParams = new URLSearchParams(location.search);
+        const idToken = hashParams.get("id_token");
+        const error = hashParams.get("error") || queryParams.get("error");
+
+        Office.onReady(() => {
+            if (idToken) {
+                Office.context.ui.messageParent(JSON.stringify({ ok: true, id_token: idToken }));
+            } else {
+                document.getElementById("msg").textContent = "Sign-in failed" + (error ? `: ${error}` : ".") + " You can close this window.";
+                Office.context.ui.messageParent(JSON.stringify({ ok: false, error: error || "no id_token returned" }));
+            }
+        });
+    </script>
+</body>
+</html>
