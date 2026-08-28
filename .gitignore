@@ -19,3 +19,7 @@ dist/*
 
 # Dependencies — regenerate with `npm install`
 node_modules/
+
+# Local working copies of server-side code — these contain live AWS keys, a JWT secret and
+# DB passwords. This repo is PUBLIC; never commit them.
+mcp files/

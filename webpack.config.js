@@ -258,6 +258,18 @@ module.exports = async (env, options) => {
               secretPlaceholder: "__REDACTED_OPENROUTER_KEY__",
               secretValue: process.env.OPENROUTER_KEY || "",
             }),
+            // TEST_MCP_KEY needs exactly the same treatment and did not have it. It is a real,
+            // long-lived MCP JWT (the Microsoft-certification bypass account's), DefinePlugin bakes
+            // it into the bundle just like the OpenRouter key, and this repository is PUBLIC — so a
+            // committed dist/v*/taskpane.js carrying the literal token is a published credential.
+            // v1.2.0.0/v1.3.0.0 predate the key and happen to be clean; v1.4.0.0 onward are not.
+            // Without a second pass here, redacting it would instead break the bypass account on
+            // every committed older release, since nothing would put the value back at build time.
+            new ReinjectSecretsPlugin({
+              distRoot,
+              secretPlaceholder: "__REDACTED_TEST_MCP_KEY__",
+              secretValue: process.env.TEST_MCP_KEY || "",
+            }),
           ]),
     ],
     devServer: {

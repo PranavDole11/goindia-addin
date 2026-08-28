@@ -1,13 +1,13 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <OfficeApp xmlns="http://schemas.microsoft.com/office/appforoffice/1.1" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:bt="http://schemas.microsoft.com/office/officeappbasictypes/1.0" xmlns:ov="http://schemas.microsoft.com/office/taskpaneappversionoverrides" xsi:type="TaskPaneApp">
-  <Id>d2b44c70-d52e-4581-a233-f09e592bf9e5</Id>
+  <Id>e6da381b-1909-47c4-82b7-71d53cd3306c</Id>
   <Version>1.4.0.0</Version>
   <ProviderName>Go India Stocks</ProviderName>
   <DefaultLocale>en-US</DefaultLocale>
-  <DisplayName DefaultValue="GoIndia Stocks for Excel"/>
+  <DisplayName DefaultValue="GoIndia Stocks for Excel (LOCAL DEV)"/>
   <Description DefaultValue="Get company data in excel at the click of a button"/>
-  <IconUrl DefaultValue="https://goindia-addin.netlify.app/assets/logo32.png"/>
-  <HighResolutionIconUrl DefaultValue="https://goindia-addin.netlify.app/assets/logo64.png"/>
+  <IconUrl DefaultValue="https://localhost:3000/assets/logo32.png"/>
+  <HighResolutionIconUrl DefaultValue="https://localhost:3000/assets/logo64.png"/>
   <SupportUrl DefaultValue="https://www.goindiastocks.com/exceladdin"/>
   <AppDomains>
     <AppDomain>https://pranavdole11.github.io</AppDomain>
@@ -16,7 +16,7 @@
     <Host Name="Workbook"/>
   </Hosts>
   <DefaultSettings>
-    <SourceLocation DefaultValue="https://goindia-addin.netlify.app/taskpane.html"/>
+    <SourceLocation DefaultValue="https://localhost:3000/taskpane.html"/>
   </DefaultSettings>
   <Permissions>ReadWriteDocument</Permissions>
   <VersionOverrides xmlns="http://schemas.microsoft.com/office/taskpaneappversionoverrides" xsi:type="VersionOverridesV1_0">
@@ -160,33 +160,33 @@
     </Hosts>
     <Resources>
       <bt:Images>
-        <bt:Image id="Icon.16x16" DefaultValue="https://goindia-addin.netlify.app/assets/logo16.png"/>
-        <bt:Image id="Icon.32x32" DefaultValue="https://goindia-addin.netlify.app/assets/logo32.png"/>
-        <bt:Image id="Icon.80x80" DefaultValue="https://goindia-addin.netlify.app/assets/logo64.png"/>
-        <bt:Image id="Icon.Download.16x16" DefaultValue="https://goindia-addin.netlify.app/assets/icon-download-16.png"/>
-        <bt:Image id="Icon.Download.32x32" DefaultValue="https://goindia-addin.netlify.app/assets/icon-download-32.png"/>
-        <bt:Image id="Icon.Download.80x80" DefaultValue="https://goindia-addin.netlify.app/assets/icon-download-80.png"/>
-        <bt:Image id="Icon.Chat.16x16" DefaultValue="https://goindia-addin.netlify.app/assets/icon-chat-16.png"/>
-        <bt:Image id="Icon.Chat.32x32" DefaultValue="https://goindia-addin.netlify.app/assets/icon-chat-32.png"/>
-        <bt:Image id="Icon.Chat.80x80" DefaultValue="https://goindia-addin.netlify.app/assets/icon-chat-80.png"/>
-        <bt:Image id="Icon.Account.16x16" DefaultValue="https://goindia-addin.netlify.app/assets/icon-account-16.png"/>
-        <bt:Image id="Icon.Account.32x32" DefaultValue="https://goindia-addin.netlify.app/assets/icon-account-32.png"/>
-        <bt:Image id="Icon.Account.80x80" DefaultValue="https://goindia-addin.netlify.app/assets/icon-account-80.png"/>
-        <bt:Image id="Icon.Exit.16x16" DefaultValue="https://goindia-addin.netlify.app/assets/icon-exit-16.png"/>
-        <bt:Image id="Icon.Exit.32x32" DefaultValue="https://goindia-addin.netlify.app/assets/icon-exit-32.png"/>
-        <bt:Image id="Icon.Exit.80x80" DefaultValue="https://goindia-addin.netlify.app/assets/icon-exit-80.png"/>
-        <bt:Image id="Icon.Feedback.16x16" DefaultValue="https://goindia-addin.netlify.app/assets/icon-feedback-16.png"/>
-        <bt:Image id="Icon.Feedback.32x32" DefaultValue="https://goindia-addin.netlify.app/assets/icon-feedback-32.png"/>
-        <bt:Image id="Icon.Feedback.80x80" DefaultValue="https://goindia-addin.netlify.app/assets/icon-feedback-80.png"/>
+        <bt:Image id="Icon.16x16" DefaultValue="https://localhost:3000/assets/logo16.png"/>
+        <bt:Image id="Icon.32x32" DefaultValue="https://localhost:3000/assets/logo32.png"/>
+        <bt:Image id="Icon.80x80" DefaultValue="https://localhost:3000/assets/logo64.png"/>
+        <bt:Image id="Icon.Download.16x16" DefaultValue="https://localhost:3000/assets/icon-download-16.png"/>
+        <bt:Image id="Icon.Download.32x32" DefaultValue="https://localhost:3000/assets/icon-download-32.png"/>
+        <bt:Image id="Icon.Download.80x80" DefaultValue="https://localhost:3000/assets/icon-download-80.png"/>
+        <bt:Image id="Icon.Chat.16x16" DefaultValue="https://localhost:3000/assets/icon-chat-16.png"/>
+        <bt:Image id="Icon.Chat.32x32" DefaultValue="https://localhost:3000/assets/icon-chat-32.png"/>
+        <bt:Image id="Icon.Chat.80x80" DefaultValue="https://localhost:3000/assets/icon-chat-80.png"/>
+        <bt:Image id="Icon.Account.16x16" DefaultValue="https://localhost:3000/assets/icon-account-16.png"/>
+        <bt:Image id="Icon.Account.32x32" DefaultValue="https://localhost:3000/assets/icon-account-32.png"/>
+        <bt:Image id="Icon.Account.80x80" DefaultValue="https://localhost:3000/assets/icon-account-80.png"/>
+        <bt:Image id="Icon.Exit.16x16" DefaultValue="https://localhost:3000/assets/icon-exit-16.png"/>
+        <bt:Image id="Icon.Exit.32x32" DefaultValue="https://localhost:3000/assets/icon-exit-32.png"/>
+        <bt:Image id="Icon.Exit.80x80" DefaultValue="https://localhost:3000/assets/icon-exit-80.png"/>
+        <bt:Image id="Icon.Feedback.16x16" DefaultValue="https://localhost:3000/assets/icon-feedback-16.png"/>
+        <bt:Image id="Icon.Feedback.32x32" DefaultValue="https://localhost:3000/assets/icon-feedback-32.png"/>
+        <bt:Image id="Icon.Feedback.80x80" DefaultValue="https://localhost:3000/assets/icon-feedback-80.png"/>
       </bt:Images>
       <bt:Urls>
         <bt:Url id="App.PrivacyUrl" DefaultValue="https://www.goindiastocks.com/exceladdin"/>
         <bt:Url id="GetStarted.LearnMoreUrl" DefaultValue="https://go.microsoft.com/fwlink/?LinkId=276812"/>
-        <bt:Url id="Commands.Url" DefaultValue="https://goindia-addin.netlify.app/commands.html"/>
-        <bt:Url id="Taskpane.DataGPT.Url" DefaultValue="https://goindia-addin.netlify.app/taskpane.html?view=datagpt"/>
-        <bt:Url id="Taskpane.Download.Url" DefaultValue="https://goindia-addin.netlify.app/taskpane.html?view=download"/>
-        <bt:Url id="Taskpane.Profile.Url" DefaultValue="https://goindia-addin.netlify.app/taskpane.html?view=profile"/>
-        <bt:Url id="Taskpane.Feedback.Url" DefaultValue="https://goindia-addin.netlify.app/taskpane.html?view=feedback"/>
+        <bt:Url id="Commands.Url" DefaultValue="https://localhost:3000/commands.html"/>
+        <bt:Url id="Taskpane.DataGPT.Url" DefaultValue="https://localhost:3000/taskpane.html?view=datagpt"/>
+        <bt:Url id="Taskpane.Download.Url" DefaultValue="https://localhost:3000/taskpane.html?view=download"/>
+        <bt:Url id="Taskpane.Profile.Url" DefaultValue="https://localhost:3000/taskpane.html?view=profile"/>
+        <bt:Url id="Taskpane.Feedback.Url" DefaultValue="https://localhost:3000/taskpane.html?view=feedback"/>
       </bt:Urls>
       <bt:ShortStrings>
         <bt:String id="GetStarted.Title" DefaultValue="Get started with Go India's add-in!"/>
