@@ -179,6 +179,10 @@ module.exports = async (env, options) => {
         // ensureMcpAccess() in taskpane.js. Same caveat as OPENROUTER_KEY: this still ends up
         // baked into the shipped dist/taskpane.js bundle, there's no way around that client-side.
         "process.env.TEST_MCP_KEY": JSON.stringify(process.env.TEST_MCP_KEY || ""),
+        // api.goindiastocks.com's bearer token. Same caveat as the two above: baked into the
+        // shipped bundle, readable via devtools/view-source/a one-line curl against the hosted
+        // file — there is no server here to keep it secret from the browser at runtime.
+        "process.env.GOINDIASTOCKS_API_TOKEN": JSON.stringify(process.env.GOINDIASTOCKS_API_TOKEN || ""),
       }),
       new HtmlWebpackPlugin({
         filename: "taskpane.html",
@@ -269,6 +273,14 @@ module.exports = async (env, options) => {
               distRoot,
               secretPlaceholder: "__REDACTED_TEST_MCP_KEY__",
               secretValue: process.env.TEST_MCP_KEY || "",
+            }),
+            // Same treatment, added proactively this time rather than after the fact: any
+            // dist/v*/ folder committed from here on would otherwise bake the real
+            // api.goindiastocks.com bearer token straight into git history the moment it's built.
+            new ReinjectSecretsPlugin({
+              distRoot,
+              secretPlaceholder: "__REDACTED_GOINDIASTOCKS_API_TOKEN__",
+              secretValue: process.env.GOINDIASTOCKS_API_TOKEN || "",
             }),
           ]),
     ],

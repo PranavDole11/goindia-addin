@@ -1,8 +1,12 @@
 [build.environment]
-  # This is a static client-side add-in with no backend proxy for OpenRouter/MCP calls, so
-  # OPENROUTER_KEY and TEST_MCP_KEY are intentionally baked into the shipped JS bundle at build
-  # time (see webpack.config.js's DefinePlugin) — there is no way around that client-side. Netlify's
-  # secret scanner otherwise treats any configured env var value found in build output as a leak and
-  # fails the build; these two are expected to be there; anything else it flags should still be
-  # investigated, not blanket-disabled.
-  SECRETS_SCAN_OMIT_KEYS = "OPENROUTER_KEY,TEST_MCP_KEY"
+  # This is a static client-side add-in with no backend proxy for OpenRouter/MCP/goindiastocks
+  # calls, so OPENROUTER_KEY, TEST_MCP_KEY and GOINDIASTOCKS_API_TOKEN are intentionally baked into
+  # the shipped JS bundle at build time (see webpack.config.js's DefinePlugin) — there is no way
+  # around that client-side. Netlify's secret scanner otherwise treats any configured env var value
+  # found in build output as a leak and fails the build; these three are expected to be there;
+  # anything else it flags should still be investigated, not blanket-disabled.
+  #
+  # GOINDIASTOCKS_API_TOKEN must also be set as an actual env var in Netlify's own site settings
+  # (Site configuration -> Environment variables) for production builds to pick it up — this file
+  # only tells the secret scanner to allow it through, it does not supply the value itself.
+  SECRETS_SCAN_OMIT_KEYS = "OPENROUTER_KEY,TEST_MCP_KEY,GOINDIASTOCKS_API_TOKEN"

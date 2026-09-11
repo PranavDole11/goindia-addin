@@ -37,4 +37,4 @@ Notes
 - Test in Excel desktop or Excel on the web. All backend calls use HTTPS.
 - Test account is pre-configured to simulate customer use.
 
-Contact: help@goindiaadvisors.com
+Contact: hello@goindiaadvisors.com
