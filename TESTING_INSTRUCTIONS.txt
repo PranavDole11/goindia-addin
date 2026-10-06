@@ -27,12 +27,6 @@ C. Feedback and Profile
 11. Click Feedback, enter any text, submit. A confirmation appears.
 12. Click Profile to view the username, wallet balance with recent charges, and the Disclaimer. Confirm the Privacy Policy link in the manifest opens correctly.
 
-Expected Results
-- Add-in loads without errors; login via credentials or Google works.
-- Company selection fetches correct data; FM sheets compute fully if enabled.
-- DataGPT returns a relevant answer and respects the selected write mode.
-- Feedback submits; Profile shows Rs 0.00 with AI Financial Model and DataGPT both still usable.
-
 Notes
 - Test in Excel desktop or Excel on the web. All backend calls use HTTPS.
 - Test account is pre-configured to simulate customer use.

@@ -978,6 +978,37 @@
                     </div>
                 </div>
 
+                <!-- Download Table feature — COMMENTED OUT for now (2026-09), DataGPT changes ship
+                     first. Resume by uncommenting this section and the matching CSS block below
+                     (search "Download Table"), and the manifest/taskpane.js pieces noted there. -->
+                <!--
+                Ribbon "Download Table" view (?view=downloadtable). One dropdown fed by the backend's
+                allow-list (GIS.dbo.AddinDownloadableTables) and one button: the chosen table is
+                written, as it is, to a NEW sheet. Deliberately no free-text table name anywhere —
+                only what the backend lists can be picked. Wired up by setupDownloadTableView()
+                in taskpane.js; reuses the Feedback view's box styles (.fb-*).
+                <div id="downloadTableSection" style="display:none;">
+                    <div class="fb-box">
+                        <div class="fb-header">Download Table</div>
+                        <div class="fb-body">
+                            <div class="fb-field">
+                                <label class="fb-label" for="dtSelect">Table</label>
+                                <select id="dtSelect" class="fb-input" disabled>
+                                    <option value="">Loading tables…</option>
+                                </select>
+                                <div class="dt-purpose" id="dtPurpose"></div>
+                                <div class="dt-info" id="dtInfo"></div>
+                            </div>
+                            <div class="fb-status" id="dtStatus" style="display:none;"></div>
+                            <button type="button" class="dt-link" id="dtRetry" style="display:none;">Try again</button>
+                        </div>
+                        <div class="fb-footer">
+                            <button type="button" class="fb-submit" id="dtDownload" disabled>Download to a new sheet</button>
+                        </div>
+                    </div>
+                </div>
+                -->
+
                 <!-- AI Financial Model automated checks popup — dismissible, reopenable via
                      #modelChecksBtn (see renderModelChecks in taskpane.js) -->
                 <div id="modelChecksModal" class="dz-overlay">
@@ -1199,6 +1230,17 @@
                     .fb-status { font-size: 11.5px; padding: 8px 10px; border-radius: 8px; }
                     .fb-status.ok { background: #eafaf0; color: #1a7a3d; border: 1px solid #bfe8cf; }
                     .fb-status.err { background: #fff0f0; color: #b80000; border: 1px solid #f3caca; }
+                    /* Download Table feature — COMMENTED OUT for now (2026-09), DataGPT changes ship
+                       first. Resume by uncommenting this block and the matching HTML section above
+                       (search "Download Table"), and the manifest/taskpane.js pieces noted there.
+                    body[data-view="downloadtable"] #loginWrapper { padding-left: 0.5rem; padding-right: 0.5rem; }
+                    body[data-view="downloadtable"] #addinUI { display: flex; flex-direction: column; padding: 18px 6px; }
+                    select.fb-input { background: #fff; cursor: pointer; }
+                    select.fb-input:disabled { cursor: default; opacity: 0.7; }
+                    .dt-purpose { font-size: 12px; color: #4a5563; line-height: 1.5; }
+                    .dt-info { font-size: 11.5px; color: #6b7686; }
+                    .dt-link { align-self: flex-start; background: none; border: none; box-shadow: none; padding: 0; margin: 0; color: #2f6fd0; font-size: 12px; font-family: inherit; text-decoration: underline; cursor: pointer; }
+                    */
                     .dz-footer {
                         display: flex; justify-content: flex-end; gap: 10px;
                         padding: 12px 16px; border-top: 1px solid #eee;
@@ -1523,22 +1565,37 @@
                     /* Collapsible progress group: a one-line summary of finished steps, with the
                        currently-running step shown beneath it. Completed rows live in .chat-steps-body
                        and stay hidden until the summary is clicked. */
-                    /* "Working" indicator — a single pulsing dot, sitting below the step summary.
-                       Not styled as a chat bubble on purpose: an empty bubble reads as a message
-                       the assistant already sent. */
+                    /* "Working" indicator — a pulsing dot, sitting below the step summary. Not
+                       styled as a chat bubble on purpose: an empty bubble reads as a message the
+                       assistant already sent. The dot alone covers the whole turn (question asked
+                       -> answer bubble appears); a "Thinking…" label joins it ONLY while the
+                       model's own chain-of-thought is actually streaming (see showReasoningText/
+                       hideReasoningText in the JS), then drops away again once it moves on to
+                       producing the answer or calling a tool — the dot alone carries on for that
+                       part, same as it always did. This briefly showed the live chain-of-thought
+                       ITSELF instead of just a label, in a small scrolling boxed window — removed
+                       again: the model is fast enough that the stream flew by too quickly to read. */
                     /* Indented to line up with the collapsed step list above it (.chat-steps-body
                        uses the same 14px), so it reads as "the next step" rather than a stray dot. */
-                    .chat-thinking { display: flex; align-items: center; padding: 5px 2px 5px 14px; }
+                    .chat-thinking { display: flex; align-items: center; gap: 6px; padding: 5px 2px 5px 14px; }
                     .chat-thinking-dot {
                         width: 11px; height: 11px; border-radius: 50%; background: #173760;
-                        animation: chatThinkingPulse 1.1s ease-in-out infinite;
+                        animation: chatThinkingDotPulse 1.1s ease-in-out infinite;
                     }
-                    @keyframes chatThinkingPulse {
+                    .chat-thinking-text {
+                        font-size: 11px; font-weight: 600; color: #8a94a3;
+                        animation: chatThinkingTextPulse 1.1s ease-in-out infinite;
+                    }
+                    @keyframes chatThinkingDotPulse {
                         0%, 100% { opacity: 0.25; transform: scale(0.8); }
                         50%      { opacity: 1;    transform: scale(1.25); }
                     }
+                    @keyframes chatThinkingTextPulse {
+                        0%, 100% { opacity: 0.4; }
+                        50%      { opacity: 1; }
+                    }
                     @media (prefers-reduced-motion: reduce) {
-                        .chat-thinking-dot { animation: none; opacity: 0.7; }
+                        .chat-thinking-dot, .chat-thinking-text { animation: none; opacity: 0.7; }
                     }
 
                     .chat-steps { margin: 2px 0 6px; }
@@ -1638,18 +1695,16 @@
                                  header's right-hand flex slot so the title keeps its position. -->
                             <span class="chat-header-actions"></span>
                         </div>
-                        <!-- TEMPORARY: company/compare selection hidden for now per request —
-                             re-enable by removing the display:none below (on this wrapper too,
-                             not just the two fields — it's hidden itself now that Clear Chat,
-                             its only other visible content, moved down into #chatModeWrap). -->
+                        <!-- TEMPORARY: compare selection hidden for now per request — re-enable by
+                             removing the display:none below (on this wrapper too, not just the
+                             field — it's hidden itself now that Clear Chat, its only other visible
+                             content, moved down into #chatModeWrap). The "Acting on" manual picker
+                             that used to sit alongside this was removed outright, not just hidden:
+                             DataGPT resolves its own subject company now (auto-pinned from what
+                             the user actually types, restored from this workbook's own session
+                             notes across reloads — see primaryCo) and no longer needs a manual
+                             override wired to it. -->
                         <div class="chat-ctx" style="display:none;">
-                            <div class="chat-ctx-field" style="display:none;">
-                                <span class="chat-ctx-label">Acting on</span>
-                                <div class="chat-co-wrap">
-                                    <input type="text" id="chatCompanyInput" class="chat-co-input" placeholder="Search company…" autocomplete="off">
-                                    <ul id="chatCompanyList" class="chat-co-list"></ul>
-                                </div>
-                            </div>
                             <div class="chat-ctx-field" style="display:none;">
                                 <span class="chat-ctx-label">Compare with</span>
                                 <div class="chat-co-wrap">

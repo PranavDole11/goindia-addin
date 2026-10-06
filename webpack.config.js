@@ -288,6 +288,18 @@ module.exports = async (env, options) => {
       headers: {
         "Access-Control-Allow-Origin": "*",
       },
+      // Dev-only: lets the sideloaded local build call the website's DataGPT chat routes
+      // same-origin (see DATAGPT_CHAT_URL in taskpane.js), because www.goindiastocks.com does not
+      // answer CORS preflight for our origin yet. Has no effect on production builds.
+      // timeout/proxyTimeout: DataGPT's own SSE response can sit silent for a while mid-stream
+      // (e.g. while the backend runs a slow tool call) with no bytes sent to keep the connection
+      // alive — node-http-proxy's default idle timeout was closing that gap early, surfacing as an
+      // ECONNRESET in this terminal and a "first datagpt call in a turn fails, the retry succeeds"
+      // pattern client-side. Matched to DATAGPT_TIMEOUT_MS so the proxy never cuts a stream shorter
+      // than the client's own deliberate abort would anyway.
+      proxy: [
+        { context: ["/api/chatai"], target: "https://www.goindiastocks.com", changeOrigin: true, secure: true, timeout: 300000, proxyTimeout: 300000 },
+      ],
       server: {
         type: "https",
         options: env.WEBPACK_BUILD || options.https !== undefined ? options.https : await getHttpsOptions(),

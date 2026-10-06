@@ -938,6 +938,24 @@ const gapiHeaders = (extra) => ({ "Authorization": `Bearer ${GOINDIASTOCKS_API_T
 const WALLET_BASE_URL = "https://api.goindiastocks.com/wallet";
 const WALLET_DEDUCT_URL = `${WALLET_BASE_URL}/excel_deduct_model_cost`;
 const WALLET_DEDUCT_CHAT_URL = `${WALLET_BASE_URL}/excel_deduct_chat_cost`;
+// ── Download Table feature — COMMENTED OUT for now (2026-09) ──
+// DataGPT changes are shipping first; this is paused, not abandoned. To resume: uncomment this
+// block, the "downloadtable" entry in RIBBON_VIEW_ALLOWLIST, the "if (view === "downloadtable")"
+// block in applyRibbonView(), and writeDownloadedTableToSheet() further down — all four are
+// marked the same way. The manifest button/resources and the taskpane.html section/CSS are
+// commented out separately (manifest.xml, manifest_local.xml, taskpane.html).
+/*
+// Local dev override for the Download Table feature ONLY — not WALLET_BASE_URL itself, so testing
+// this locally doesn't also redirect every other wallet call (balance, feedback, cost history, …)
+// to a local backend that may not implement them. Unlike DATAGPT_CHAT_URL's relative-path + dev-
+// proxy trick (its target refuses CORS entirely), this needs neither: backend/main.py's
+// CORSMiddleware already sets allow_origins=["*"], so this dev taskpane (https://localhost:3000)
+// can call the local backend directly, and browsers exempt "localhost" from mixed-content blocking
+// regardless of scheme — so http:// here, from an https:// page, is not blocked either.
+const DOWNLOAD_TABLE_BASE_URL = (typeof location !== "undefined" && location.hostname === "localhost")
+    ? "http://localhost:8000/wallet"
+    : WALLET_BASE_URL;
+*/
 
 // Pure usage tracking (login / download-data clicks) — SQL-only, never shown in the add-in's own
 // UI, queried directly for usage analysis. Fire-and-forget on purpose: a logging failure must never
@@ -1260,6 +1278,26 @@ document.getElementById("logoutBtn").addEventListener("click", () => {
     document.getElementById("addinUI").style.display = "none";
     document.getElementById("logoutBtn").style.display = "none";
     document.getElementById("loginScreen").style.display = "flex";
+    // #chatFeature (the DataGPT chat fab + panel) is a SIBLING of #memberContent/#addinUI under
+    // #loginWrapper, NOT a descendant — confirmed by tracing the real HTML's div nesting (not
+    // just indentation): #addinUI's own div actually closes right after the profile/wallet/model
+    // UI, long before #chatFeature appears. Hiding memberContent/addinUI above never touches it.
+    // On the ribbon's "Ask DataGPT" view specifically, #chatPanel is ALSO `position:fixed;
+    // inset:0` (see taskpane.html's body[data-view="datagpt"] rule) — a full-viewport overlay
+    // that stays visually on top of the login screen this handler just tried to show, regardless
+    // of memberContent/addinUI's state. This is the actual reported bug: logging out while on
+    // that view left the chat panel covering the whole screen, looking like logout did nothing.
+    const chatPanel = document.getElementById("chatPanel");
+    if (chatPanel) chatPanel.style.display = "none";
+    const chatFab = document.getElementById("chatFab");
+    if (chatFab) chatFab.style.display = "";
+    // Also strip ?view=datagpt from the URL before reloading below — reload() re-requests the
+    // SAME url, and this add-in auto-reopens the chat panel whenever that query param is present
+    // (see the "Ribbon handshake" comment further down), which would otherwise immediately undo
+    // the hiding above the instant the page comes back, independent of being logged out.
+    try { history.replaceState(null, "", location.pathname); } catch (e) { /* non-fatal */ }
+    document.body.dataset.view = "main";
+    location.reload();
 });
 
 let lastMatchedCompany = null;
@@ -1483,6 +1521,7 @@ const RIBBON_VIEW_ALLOWLIST = {
     ],
     profile: ["profileSection", "profileExtras"],
     feedback: ["feedbackSection"],
+    // downloadtable: ["downloadTableSection"], // Download Table feature — commented out, see the note near DOWNLOAD_TABLE_BASE_URL
 };
 // Several login-success paths below unconditionally reveal #logoutBtn once #addinUI itself
 // becomes visible — this runs that reveal through the current ribbon view's allowlist instead,
@@ -1630,8 +1669,193 @@ function applyRibbonView() {
         }
     }
 
+    // Download Table feature — COMMENTED OUT for now, see the note near DOWNLOAD_TABLE_BASE_URL.
+    /*
+    // Ribbon's Download Table view — one dropdown fed by the backend's allow-list
+    // (GIS.dbo.AddinDownloadableTables via /wallet/excel_download_tables), one button. No table
+    // name is ever typed or sent by the client; only what the backend lists can be picked, and the
+    // backend re-checks it against the same allow-list before running anything. See
+    // writeDownloadedTableToSheet below for what happens after a successful download.
+    if (view === "downloadtable") {
+        const section = document.getElementById("downloadTableSection");
+        if (section) section.style.display = "block";
+
+        const select = document.getElementById("dtSelect");
+        const purposeEl = document.getElementById("dtPurpose");
+        const infoEl = document.getElementById("dtInfo");
+        const statusEl = document.getElementById("dtStatus");
+        const retryBtn = document.getElementById("dtRetry");
+        const downloadBtn = document.getElementById("dtDownload");
+        if (select && purposeEl && infoEl && statusEl && retryBtn && downloadBtn) {
+            let tables = [];
+            const showDtStatus = (cls, text) => {
+                statusEl.className = cls ? `fb-status ${cls}` : "fb-status";
+                statusEl.textContent = text || "";
+                statusEl.style.display = text ? "block" : "none";
+            };
+            const selectedTable = () => tables.find(t => String(t.table_id) === select.value);
+            const setOptions = (opts) => {
+                select.textContent = "";
+                for (const [value, label] of opts) {
+                    const opt = document.createElement("option");
+                    opt.value = value; opt.textContent = label;
+                    select.appendChild(opt);
+                }
+            };
+
+            const onTableChange = () => {
+                const t = selectedTable();
+                purposeEl.textContent = t ? (t.purpose || "") : "";
+                downloadBtn.disabled = !t;
+            };
+
+            const loadTables = async () => {
+                select.disabled = true;
+                downloadBtn.disabled = true;
+                retryBtn.style.display = "none";
+                setOptions([["", "Loading tables…"]]);
+                purposeEl.textContent = "";
+                showDtStatus("", "");
+                try {
+                    const res = await fetch(`${DOWNLOAD_TABLE_BASE_URL}/excel_download_tables`, { headers: gapiHeaders() });
+                    if (!res.ok) throw new Error(`Server returned ${res.status}`);
+                    const data = await res.json();
+                    tables = Array.isArray(data.tables) ? data.tables : [];
+                    if (!tables.length) {
+                        setOptions([["", "No tables available"]]);
+                        showDtStatus("err", "No tables are available to download right now.");
+                        return;
+                    }
+                    setOptions([["", "Select a table…"], ...tables.map(t => [String(t.table_id), t.display_name])]);
+                    select.disabled = false;
+                    onTableChange();
+                } catch (e) {
+                    console.warn("[DownloadTable] list failed:", e);
+                    setOptions([["", "Couldn't load tables"]]);
+                    showDtStatus("err", "Couldn't load the table list.");
+                    retryBtn.style.display = "inline-block";
+                }
+            };
+
+            select.addEventListener("change", onTableChange);
+            retryBtn.addEventListener("click", loadTables);
+
+            downloadBtn.addEventListener("click", async () => {
+                const t = selectedTable();
+                if (!t) return;
+                downloadBtn.disabled = true;
+                select.disabled = true;
+                showDtStatus("", "");
+                const originalLabel = downloadBtn.textContent;
+                downloadBtn.textContent = "Downloading…";
+                try {
+                    const res = await fetch(`${DOWNLOAD_TABLE_BASE_URL}/excel_download_table`, {
+                        method: "POST",
+                        headers: gapiHeaders({ "Content-Type": "application/json" }),
+                        body: JSON.stringify({ table_id: t.table_id }),
+                    });
+                    if (!res.ok) {
+                        let detail = "";
+                        try { detail = (await res.json()).detail || ""; } catch (e) { // body wasn't JSON
+                        }
+                        throw new Error(detail || `Server returned ${res.status}`);
+                    }
+                    const data = await res.json();
+                    const sheetName = await writeDownloadedTableToSheet(data);
+                    let msg = `Downloaded ${data.row_count.toLocaleString()} row${data.row_count === 1 ? "" : "s"} to "${sheetName}".`;
+                    if (data.truncated) msg += ` Stopped at this table's ${data.limit.toLocaleString()}-row limit — more rows exist.`;
+                    if (Array.isArray(data.skipped_columns) && data.skipped_columns.length) {
+                        msg += ` ${data.skipped_columns.length} column${data.skipped_columns.length === 1 ? "" : "s"} of a type Excel can't hold as a flat value ${data.skipped_columns.length === 1 ? "wasn't" : "weren't"} included: ${data.skipped_columns.join(", ")}.`;
+                    }
+                    showDtStatus("ok", msg);
+                } catch (e) {
+                    console.warn("[DownloadTable] download failed:", e);
+                    showDtStatus("err", e.message && e.message !== "Failed to fetch" ? e.message : "Couldn't download that table — please try again.");
+                } finally {
+                    downloadBtn.disabled = false;
+                    select.disabled = false;
+                    downloadBtn.textContent = originalLabel;
+                }
+            });
+
+            loadTables();
+        }
+    }
+    */
+
     return view;
 }
+
+// Download Table feature — COMMENTED OUT for now, see the note near DOWNLOAD_TABLE_BASE_URL.
+/*
+// Writes a /wallet/excel_download_table response, as is, into a brand-new sheet: a bold header
+// row from data.columns, then data.rows starting at A2 — one flat layout, no join/cardinality
+// logic, matching what the backend already flattened. Never overwrites an existing sheet: if
+// data.display_name is taken, "(2)", "(3)", … is appended until a free name is found, the same
+// way a duplicate download (or a sheet the user already has) is handled elsewhere in the add-in.
+// Returns the sheet name actually used.
+async function writeDownloadedTableToSheet(data) {
+    const rawName = String(data.display_name || "Downloaded Table").replace(/[\\/?*[\]:]/g, " ").trim().slice(0, 31) || "Downloaded Table";
+    const columns = Array.isArray(data.columns) ? data.columns : [];
+    const rows = Array.isArray(data.rows) ? data.rows : [];
+
+    let sheetName;
+    await Excel.run(async (ctx) => {
+        ctx.workbook.worksheets.load("items/name");
+        await ctx.sync();
+        const existing = new Set(ctx.workbook.worksheets.items.map(s => s.name.toLowerCase()));
+        sheetName = rawName;
+        for (let n = 2; existing.has(sheetName.toLowerCase()); n++) {
+            const suffix = ` (${n})`;
+            sheetName = rawName.slice(0, 31 - suffix.length) + suffix;
+        }
+
+        const sheet = ctx.workbook.worksheets.add(sheetName);
+        sheet.activate();
+
+        if (columns.length) {
+            const headerRange = sheet.getRangeByIndexes(0, 0, 1, columns.length);
+            headerRange.values = [columns.map(c => c.name)];
+            headerRange.format.font.bold = true;
+            headerRange.format.fill.color = "#173760";
+            headerRange.format.font.color = "#FFFFFF";
+        }
+
+        // Cells default to General; a text-typed column ("CompName", a date already rendered as
+        // ISO text, …) that happens to look numeric would otherwise be silently reinterpreted by
+        // Excel — same guard write_cells already applies. Set ONCE per text column, over that
+        // column's whole data range, rather than recomputed every chunk below: a per-chunk 2D
+        // array covering every column (not just the text ones) was the actual cause of "The
+        // request payload size has exceeded the limit" on a wide table — it doubled the payload of
+        // every chunk for no reason, since the vast majority of columns never needed reformatting.
+        if (rows.length) {
+            columns.forEach((c, i) => {
+                if (c && c.type === "text") sheet.getRangeByIndexes(1, i, rows.length, 1).numberFormat = Array.from({ length: rows.length }, () => ["@"]);
+            });
+        }
+
+        // Written in chunks rather than one multi-thousand-row assignment: keeps any single
+        // Excel.run's payload modest even at this table's row cap (up to 100,000). Sized by CELL
+        // count, not a flat row count — a fixed 4000-row chunk was fine for a narrow table but,
+        // multiplied by a wide one's column count, was itself enough to exceed Office.js's request
+        // payload limit (see the number-format note above for the other half of that same bug).
+        const CHUNK_CELL_BUDGET = 200000;
+        const CHUNK = Math.max(1, Math.min(5000, Math.floor(CHUNK_CELL_BUDGET / Math.max(1, columns.length))));
+        for (let start = 0; start < rows.length; start += CHUNK) {
+            const chunk = rows.slice(start, start + CHUNK);
+            if (chunk.length && columns.length) {
+                const target = sheet.getRangeByIndexes(1 + start, 0, chunk.length, columns.length);
+                target.values = chunk.map(row => row.map(v => (v === null || v === undefined ? "" : v)));
+            }
+            await ctx.sync();
+        }
+
+        if (columns.length) sheet.getRangeByIndexes(0, 0, Math.max(1, rows.length + 1), columns.length).format.autofitColumns();
+        await ctx.sync();
+    });
+    return sheetName;
+}
+*/
 
 Office.onReady(async (info) => {
     if (info.host !== Office.HostType.Excel) return;
@@ -1772,6 +1996,10 @@ Office.onReady(async (info) => {
     }
     function closeModelModal() { modelModal.style.display = "none"; }
 
+    // OPERATIONAL_DASHBOARD_URL / groupOperationalSections are declared in LIVE code, right before
+    // handleOperationalRefresh below (this whole modal block is disabled) — see that declaration
+    // for why they exist; both are in scope here via the shared enclosing closure if this block is
+    // ever re-enabled.
     // Fetch the operational data for the selected company and list the actual METRIC
     // names (grouped under their section) so the user can pick exactly which metrics to
     // feed the model. Uses the same dashboard API the model itself reads.
@@ -1783,22 +2011,22 @@ Office.onReady(async (info) => {
         const fincode = toggle.dataset.value;
         const list = document.getElementById("opMetricList");
         try {
-            const res = await fetch("https://api.goindiastocks.com/pms/get_dashboard", {
+            const res = await fetch(OPERATIONAL_DASHBOARD_URL, {
                 method: "POST",
                 headers: gapiHeaders({ "Content-Type": "application/json" }),
                 body: JSON.stringify({ fincode: parseInt(fincode) })
             });
             const data = await res.json();
 
-            const groupsHtml = (data.table_data || []).map(section => {
-                const metrics = (section.rows || []).filter(r => r && r.metric_name);
+            const groupsHtml = groupOperationalSections(data.table_data).map(group => {
+                const metrics = group.entries.flatMap(entry => (entry.rows || []).filter(r => r && r.metric_name));
                 if (!metrics.length) return "";
                 const items = metrics.map(r => {
                     const unit = r.unit ? ` <span class="fm-unit">(${esc(r.unit)})</span>` : "";
                     return `<label class="fm-suboption"><input type="checkbox" class="fm-op-metric" value="${esc(r.metric_name)}" checked><span>${esc(r.metric_name)}${unit}</span></label>`;
                 }).join("");
                 return `<div class="fm-op-group">
-                    <label class="fm-op-group-head"><input type="checkbox" class="fm-op-group-toggle" checked><span>${esc(section.section_name || "Section")}</span></label>
+                    <label class="fm-op-group-head"><input type="checkbox" class="fm-op-group-toggle" checked><span>${esc(group.name)}</span></label>
                     ${items}
                 </div>`;
             }).filter(Boolean).join("");
@@ -1900,6 +2128,118 @@ Office.onReady(async (info) => {
         handleRefresh();
     };
 
+    // ── Operational dashboard API ──
+    // get_dashboard_v2 restructures the SAME underlying data from the v1 /pms/get_dashboard this
+    // add-in used before: instead of one table_data entry per section with a union of every row's
+    // periods (blank-filled for whichever rows don't have all of them), each section can now span
+    // SEVERAL table_data entries — one per distinct "signature" of populated periods among its
+    // rows, so no entry ever has a blank cell. A row whose own signature is a single period is
+    // dropped entirely rather than becoming its own 1-column entry (verified directly against real
+    // responses for two fincodes — e.g. Reliance's "Energy Businesses" section alone splits into
+    // 16 entries; every row that survives keeps its exact original period set, just regrouped).
+    // v1 (/pms/get_dashboard) is left untouched and still used by older add-in versions.
+    // Net effect here: a consumer that renders one visual block per table_data entry needs to
+    // re-group by section_name first (groupOperationalSections), or its section header would
+    // print once per entry instead of once per section. A consumer that just accumulates a flat
+    // list/Set across every entry (operationalSections/operationalSegments further down) already
+    // tolerates the new shape as-is — nothing there needed to change.
+    const OPERATIONAL_DASHBOARD_URL = "https://api.goindiastocks.com/pms/get_dashboard_v2";
+    function groupOperationalSections(tableData) {
+        const order = [];
+        const byName = new Map();
+        for (const entry of tableData || []) {
+            const sectionName = entry.section_name || "Section";
+            if (!byName.has(sectionName)) { byName.set(sectionName, { name: sectionName, entries: [] }); order.push(sectionName); }
+            byName.get(sectionName).entries.push(entry);
+        }
+        return order.map(sectionName => byName.get(sectionName));
+    }
+
+    // Annual-only "FY26"/"FY2026" period labels (never a quarter/YTD/date string) — the same
+    // restriction the AI Model's own deterministic segment lookup applies, since those are the
+    // only period shapes a fixed annual historical-year column can unambiguously link to.
+    const parseAnnualPeriodFY = (label) => {
+        const m = /^fy\s*(\d{2}|\d{4})$/i.exec(String(label || "").trim());
+        if (!m) return null;
+        const y = parseInt(m[1], 10);
+        return y < 100 ? 2000 + y : y;
+    };
+
+    // Writes the "Operational Data" worksheet from a get_dashboard_v2 response (shared by the
+    // ribbon's own refresh button AND the AI Model build, so the sheet a human reads and the data
+    // the model is actually fed always come from the SAME fetch and the SAME layout). Returns an
+    // index — normLabel(metric_name) -> {sheet, label, colByFY, row} — built DURING the same write
+    // pass (not by re-reading the sheet back afterward) so it's exact by construction: every entry
+    // points at the EXACT cell just written for that metric's annual columns, letting the AI Model
+    // build LIVE-LINK a row to this sheet (the same `='Operational Data'!C15`-style formula Key
+    // Financials/Annual Data links already use) instead of hardcoding a transcribed number.
+    function writeOperationalDataSheet(sheet, name, tableData) {
+        const normLabel = (s) => String(s || "").trim().toLowerCase().replace(/\s+/g, " ");
+        const linkIndex = new Map();
+        const nameCell = sheet.getRange("A1");
+        nameCell.values = [[name]];
+        nameCell.format.font.bold = true;
+        nameCell.format.font.size = 14;
+        nameCell.format.fill.color = "#bed1f8";
+        sheet.getRange("A:A").format.columnWidth = 180;
+
+        let row = 3;
+        // v2 can split ONE section across several table_data entries (one per distinct set
+        // of populated periods, so no entry ever has a blank cell) — group back by
+        // section_name first so its header prints ONCE, with each entry's own
+        // cleanly-scoped mini-table underneath, instead of the same section header
+        // repeating for every entry (up to 16, for a large section).
+        for (const group of groupOperationalSections(tableData)) {
+            sheet.getRange(`A${row}`).values = [[group.name]];
+            sheet.getRange(`A${row}`).format.font.bold = true;
+            sheet.getRange(`A${row}`).format.font.size = 13;
+            sheet.getRange(`A${row}`).format.fill.color = "#d9ead3";
+            row++;
+
+            for (const section of group.entries) {
+                const headers = ["Metric", "Unit", ...section.periods];
+                const lastCol = getExcelColumnLetter(headers.length);
+                const headerRange = sheet.getRange(`A${row}:${lastCol}${row}`);
+                headerRange.values = [headers];
+                headerRange.format.fill.color = "#e0e0e0";
+                headerRange.format.font.bold = true;
+                row++;
+
+                // Annual-only column map for THIS sub-table (e.g. {2026: "C"}) — reused below for
+                // every row written in it, since all rows in one sub-table share the same periods.
+                const colByFY = {};
+                section.periods.forEach((p, i) => {
+                    const fy = parseAnnualPeriodFY(p);
+                    if (fy != null) colByFY[fy] = getExcelColumnLetter(3 + i);
+                });
+
+                if (section.rows?.length > 0) {
+                    const vals = section.rows.map(r => [
+                        r.metric_name, r.unit, ...section.periods.map(p => r[p] ?? "")
+                    ]);
+                    sheet.getRange(`A${row}:${lastCol}${row + vals.length - 1}`).values = vals;
+                    if (Object.keys(colByFY).length) {
+                        for (let i = 0; i < section.rows.length; i++) {
+                            const metricRow = row + i;
+                            const key = normLabel(section.rows[i].metric_name);
+                            // First occurrence wins (same convention as the Key Financials/Annual
+                            // Data index) — good enough since segmentAnnualSeries already resolves
+                            // to one specific, best-matched (section, metric) pair before this is
+                            // ever consulted, not a generic label search across the whole sheet.
+                            if (key && !linkIndex.has(key)) {
+                                linkIndex.set(key, { sheet: "Operational Data", label: section.rows[i].metric_name, colByFY, row: metricRow });
+                            }
+                        }
+                    }
+                    row += vals.length;
+                }
+                row += 1;
+            }
+            row += 1;
+        }
+        return linkIndex;
+    }
+
     // --- Operational Data Handler ---
     async function handleOperationalRefresh() {
         const toggle = document.getElementById("dropdownToggle");
@@ -1908,7 +2248,7 @@ Office.onReady(async (info) => {
         if (!fincode) return showWarning("Select a company first.");
 
         try {
-            const res = await fetch("https://api.goindiastocks.com/pms/get_dashboard", {
+            const res = await fetch(OPERATIONAL_DASHBOARD_URL, {
                 method: "POST",
                 headers: gapiHeaders({ "Content-Type": "application/json" }),
                 body: JSON.stringify({ fincode: parseInt(fincode) })
@@ -1929,38 +2269,7 @@ Office.onReady(async (info) => {
                     sheet = workbook.worksheets.add("Operational Data");
                 }
 
-                const nameCell = sheet.getRange("A1");
-                nameCell.values = [[name]];
-                nameCell.format.font.bold = true;
-                nameCell.format.font.size = 14;
-                nameCell.format.fill.color = "#bed1f8";
-                sheet.getRange("A:A").format.columnWidth = 180;
-
-                let row = 3;
-                for (const section of (data.table_data || [])) {
-                    sheet.getRange(`A${row}`).values = [[section.section_name]];
-                    sheet.getRange(`A${row}`).format.font.bold = true;
-                    sheet.getRange(`A${row}`).format.font.size = 13;
-                    sheet.getRange(`A${row}`).format.fill.color = "#d9ead3";
-                    row++;
-
-                    const headers = ["Metric", "Unit", ...section.periods];
-                    const lastCol = getExcelColumnLetter(headers.length);
-                    const headerRange = sheet.getRange(`A${row}:${lastCol}${row}`);
-                    headerRange.values = [headers];
-                    headerRange.format.fill.color = "#e0e0e0";
-                    headerRange.format.font.bold = true;
-                    row++;
-
-                    if (section.rows?.length > 0) {
-                        const vals = section.rows.map(r => [
-                            r.metric_name, r.unit, ...section.periods.map(p => r[p] ?? "")
-                        ]);
-                        sheet.getRange(`A${row}:${lastCol}${row + vals.length - 1}`).values = vals;
-                        row += vals.length;
-                    }
-                    row += 2;
-                }
+                writeOperationalDataSheet(sheet, name, data.table_data);
 
                 await context.sync();
             });
@@ -2136,7 +2445,7 @@ Office.onReady(async (info) => {
         // Q&A, broker notes, management interviews) and derive judgment calls (growth/margin/capex
         // assumptions) — a stronger reasoning model.
         // All calls route through OpenRouter (a direct-to-Google API path was tried and reverted).
-        const STATIC_MODEL = "google/gemini-2.5-flash";
+        const STATIC_MODEL = "google/gemini-3.5-flash-lite";
         const DYNAMIC_MODEL = "openai/gpt-5.6-sol";
         // Cross-PROVIDER last-resort fallback for every call (not just Assumptions). A same-provider
         // fallback (e.g. flash -> pro) is useless against a Google-infra-wide blip — observed in
@@ -2350,7 +2659,11 @@ Office.onReady(async (info) => {
             };
             const { map: idxKF, rawList: rawKF, byRow: byRowKF } = buildIndex(grids["Key Financials"], "Key Financials");
             const { map: idxAnnual, rawList: rawAnnual, byRow: byRowAnnual } = buildIndex(grids["Annual Data"], "Annual Data");
-            const resolveLink = (label) => idxKF.get(normLabel(label)) || idxAnnual.get(normLabel(label)) || null;
+            // Populated once the operational dashboard is (re)fetched/written further below (Step
+            // 1a) — declared here, read by reference, so resolveLink/autoLink see it the moment
+            // it's filled in, the same way they already read idxKF/idxAnnual.
+            let idxOperational = new Map();
+            const resolveLink = (label) => idxKF.get(normLabel(label)) || idxAnnual.get(normLabel(label)) || idxOperational.get(normLabel(label)) || null;
             const entryAtRow = (sheetName, excelRow) => {
                 const byRow = sheetName === "Key Financials" ? byRowKF : (sheetName === "Annual Data" ? byRowAnnual : null);
                 return byRow ? (byRow.get(excelRow) || null) : null;
@@ -2475,7 +2788,7 @@ Office.onReady(async (info) => {
                 aiStatus("Fetching operational data...");
                 const wantedMetrics = selection.operational.metrics; // null = all metrics
                 try {
-                    const opRes = await fetch("https://api.goindiastocks.com/pms/get_dashboard", {
+                    const opRes = await fetch(OPERATIONAL_DASHBOARD_URL, {
                         method: "POST",
                         headers: gapiHeaders({ "Content-Type": "application/json" }),
                         body: JSON.stringify({ fincode: parseInt(fincode) })
@@ -2484,32 +2797,69 @@ Office.onReady(async (info) => {
                         const opJson = await opRes.json();
                         const opLines = [];
                         const seenSegments = new Set();
-                        for (const section of (opJson.table_data || [])) {
-                            const rows = (section.rows || []).filter(row =>
-                                !Array.isArray(wantedMetrics) || wantedMetrics.includes(row.metric_name));
-                            if (!rows.length) continue; // skip sections with no selected metrics
-                            const periods = section.periods || [];
-                            opLines.push(`## ${section.section_name || "Section"}`);
-                            opLines.push(["Metric", "Unit", ...periods].join(" | "));
-                            for (const row of rows) {
-                                opLines.push([row.metric_name, row.unit, ...periods.map(p => row[p] ?? "")].join(" | "));
+                        // v2 can split one section_name across several table_data entries (see
+                        // groupOperationalSections above) — group first so its "## Heading" prints
+                        // ONCE per section for the LLM, not once per entry (up to 16 for a large
+                        // section), while operationalSections/operationalSegments below still get
+                        // exactly the same rows and deduped names they always did.
+                        for (const group of groupOperationalSections(opJson.table_data)) {
+                            let groupHeaderPrinted = false;
+                            for (const section of group.entries) {
+                                const rows = (section.rows || []).filter(row =>
+                                    !Array.isArray(wantedMetrics) || wantedMetrics.includes(row.metric_name));
+                                if (!rows.length) continue; // skip entries with no selected metrics
+                                const periods = section.periods || [];
+                                if (!groupHeaderPrinted) { opLines.push(`## ${group.name}`); groupHeaderPrinted = true; }
+                                // v2 can legitimately repeat the SAME metric_name under this section in
+                                // another sub-table with a different period scope (e.g. an annual cut vs.
+                                // a quarterly cut of "RIL Consolidated Revenue") — without a label per
+                                // sub-table, that repetition with silently different values is exactly
+                                // the kind of ambiguity that can make a model distrust this section in
+                                // favor of the unambiguous Key Financials/Annual Data sheets.
+                                opLines.push(`### ${section.table_tag || "Data"} — ${periods.join(", ")}`);
+                                opLines.push(["Metric", "Unit", ...periods].join(" | "));
+                                for (const row of rows) {
+                                    opLines.push([row.metric_name, row.unit, ...periods.map(p => row[p] ?? "")].join(" | "));
+                                }
+                                opLines.push("");
+                                operationalSections.push({
+                                    name: group.name,
+                                    periods,
+                                    rows: rows.map(row => ({
+                                        metric: row.metric_name || "",
+                                        unit: row.unit || "",
+                                        byPeriod: Object.fromEntries(periods.map(p => [p, row[p]])),
+                                    })),
+                                });
                             }
-                            opLines.push("");
-                            operationalSections.push({
-                                name: section.section_name || "Section",
-                                periods,
-                                rows: rows.map(row => ({
-                                    metric: row.metric_name || "",
-                                    unit: row.unit || "",
-                                    byPeriod: Object.fromEntries(periods.map(p => [p, row[p]])),
-                                })),
-                            });
-                            if (section.section_name && !seenSegments.has(section.section_name)) {
-                                seenSegments.add(section.section_name);
-                                operationalSegments.push(section.section_name);
+                            if (groupHeaderPrinted && !seenSegments.has(group.name)) {
+                                seenSegments.add(group.name);
+                                operationalSegments.push(group.name);
                             }
                         }
                         operationalText = opLines.join("\n").trim();
+
+                        // Keep the "Operational Data" worksheet in sync with the EXACT payload the
+                        // model is about to use (same fetch, same fincode), and capture the
+                        // metric->cell index WHILE writing it — exact by construction, no re-parsing
+                        // of printed text needed — so the Operational Model's historicals can
+                        // LIVE-LINK to this sheet below instead of only ever being hardcoded numbers.
+                        try {
+                            await Excel.run(async (context) => {
+                                const wb = context.workbook;
+                                wb.worksheets.load("items/name");
+                                await context.sync();
+                                const existingNames = wb.worksheets.items.map(s => s.name);
+                                const opSheet = existingNames.includes("Operational Data")
+                                    ? wb.worksheets.getItem("Operational Data")
+                                    : wb.worksheets.add("Operational Data");
+                                if (existingNames.includes("Operational Data")) opSheet.getUsedRange()?.clear();
+                                idxOperational = writeOperationalDataSheet(opSheet, companyName, opJson.table_data);
+                                await context.sync();
+                            });
+                        } catch (e) {
+                            console.warn("[AI Model] Could not write/refresh the 'Operational Data' sheet — segment historicals will fall back to hardcoded numbers instead of live cell links:", e);
+                        }
                     }
                 } catch (e) {
                     console.warn("[AI Model] Operational data fetch failed:", e);
@@ -2636,6 +2986,37 @@ Office.onReady(async (info) => {
                 const o = (rep.match(/[{[]/g) || []).length, c = (rep.match(/[}\]]/g) || []).length;
                 for (let i = 0; i < o - c; i++) { const lo = Math.max(rep.lastIndexOf("{"), rep.lastIndexOf("[")); rep += rep[lo] === "[" ? "]" : "}"; }
                 try { return JSON.parse(rep); } catch { return null; }
+            };
+
+            // Defends against an LLM quirk observed in practice: instead of ONE standalone
+            // {"section":"NAME"} divider followed by plain line items, every real line item in a
+            // section ALSO carries that section's own name on its "section" field (no standalone
+            // divider object at all) — writeDataSheet's "if (item.section) { print divider;
+            // continue }" check can't tell that apart from a genuine divider, so it discards the
+            // item's real content entirely and prints only the section title, once per item
+            // (confirmed live: a Valuation & DCF response rendered 8 consecutive "RELATIVE
+            // VALUATION" rows with zero actual P/E, EV/EBITDA, RoE, etc. data — exactly the number
+            // of real line items that section was supposed to have, each one stripped down to just
+            // its section tag). Normalize every parsed rows array before anything else touches it:
+            // split a row carrying BOTH "section" and real content into a standalone divider (only
+            // when the running section actually changed, so a correctly-formed response is
+            // untouched) plus the original item with its stray "section" field removed.
+            const normalizeRows = (rows) => {
+                const out = [];
+                let curSection = null;
+                for (const item of rows) {
+                    if (!item || typeof item !== "object") continue;
+                    const hasContent = item.key != null || item.label != null || item.formula != null
+                        || item.value != null || Array.isArray(item.historical) || Array.isArray(item.forecast);
+                    if (item.section && !hasContent) { out.push(item); curSection = item.section; continue; }
+                    if (item.section && item.section !== curSection) {
+                        out.push({ section: item.section });
+                        curSection = item.section;
+                    }
+                    const { section: _drop, ...rest } = item;
+                    out.push(rest);
+                }
+                return out;
             };
 
             // Per-workflow cost/token subtotals, so the console breaks out static vs dynamic spend.
@@ -3028,9 +3409,9 @@ The sheet is laid out ACROSS YEARS (columns ${periodLabels.join(", ")}). Other s
                     : Promise.resolve({ rows: [] }),
             ]);
             const assumRows = [
-                ...(Array.isArray(structJson.rows) ? structJson.rows : []),
-                ...(Array.isArray(judgJson.rows) ? judgJson.rows : []),
-                ...(Array.isArray(segDriversJson.rows) ? segDriversJson.rows : [])
+                ...normalizeRows(Array.isArray(structJson.rows) ? structJson.rows : []),
+                ...normalizeRows(Array.isArray(judgJson.rows) ? judgJson.rows : []),
+                ...normalizeRows(Array.isArray(segDriversJson.rows) ? segDriversJson.rows : [])
             ];
             // target_ev_ebitda is one of the mandatory "constant global input" keys the
             // Assumptions (Judgment) prompt already asks for explicitly — but compliance isn't
@@ -3397,6 +3778,34 @@ PURE-FORMULA ROWS — when this prompt gives you the COMPLETE formula for a row 
                 return best;
             };
 
+            // ── Pin known segment revenue/EBITDA data points for the Operational Model prompt ──
+            // Computed NOW (before that call, not just at the zero-fill-recovery step further
+            // below) so the prompt can tell the model exactly which historical years are already
+            // certain (never to be re-guessed) and which are genuine GAPS the operational dashboard
+            // simply didn't disclose (e.g. segment revenue reported for FY22/FY24/FY26 but not
+            // FY23/FY25) — gaps the user wants the model to ESTIMATE from the segment's own
+            // trajectory rather than leave blank/zero. segmentAnnualSeries's own result is reused
+            // verbatim at the override step below, so this is computed once, not twice.
+            const segmentDeterministic = {}; // "<tag>_<kind>" -> segmentAnnualSeries(tag, kind) result
+            if (isSotpCompany) {
+                for (const tag of segmentTags) {
+                    for (const kind of ["revenue", "ebitda"]) {
+                        const found = segmentAnnualSeries(tag, kind);
+                        if (found) segmentDeterministic[`${tag}_${kind}`] = found;
+                    }
+                }
+            }
+            const segmentAnchorNote = Object.keys(segmentDeterministic).length
+                ? `\nSEGMENT REVENUE/EBITDA — KNOWN DATA POINTS FROM THE OPERATIONAL DASHBOARD (authoritative — these exact years will be OVERWRITTEN with these exact figures after your response regardless of what you return, so do not spend effort re-deriving them):\n${Object.entries(segmentDeterministic).map(([rowKey, found]) => {
+                    const known = HIST.map((fy, i) => [fy, found.values[i]]).filter(([, v]) => v != null);
+                    const gapFYs = HIST.filter((fy, i) => found.values[i] == null);
+                    const knownStr = known.map(([fy, v]) => `FY${String(fy).slice(2)}=${Math.round(v)}`).join(", ");
+                    return gapFYs.length
+                        ? `${rowKey}: known ${knownStr} — GAP YEARS with no disclosure, ESTIMATE these from the segment's own known trajectory above (interpolate between the surrounding known years, or extrapolate its trend if a gap is at either end — never 0, never a flat repeat of a neighboring year, never a guess disconnected from the known figures): ${gapFYs.map(fy => `FY${String(fy).slice(2)}`).join(", ")}`
+                        : `${rowKey}: known ${knownStr} (complete, no gap years)`;
+                }).join("\n")}\nFor every row listed above, return all ${HIST_YEARS} historical values (known years AND your gap estimates) — your estimate for a GAP year is what actually gets used, so give it real consideration; the known years are provided for context only, since those will be overwritten regardless of what you return for them.\n`
+                : "";
+
             // Capex & FCF, generated entirely in code — first sheet converted this way. Every one of
             // its forecast formulas was ALREADY being dictated to the LLM verbatim (see the prompt
             // text this replaced), with no judgment call involved anywhere in it; only 2 of its 8
@@ -3507,7 +3916,7 @@ PURE-FORMULA ROWS — when this prompt gives you the COMPLETE formula for a row 
             const sotpEbitdaSumFormula = [...segmentTags.map(segEbitdaKey), "other_segments_ebitda"].map(k => `{R:${k}}`).join("+");
             const sotpMandatoryKeys = ["net_revenue", "ebitda", ...segmentTags.flatMap(t => [segRevKey(t), segEbitdaKey(t)]), "other_segments_revenue", "other_segments_ebitda"].join(", ");
             const operationalModelPrompt = isSotpCompany
-                ? `${periodsNote}\n\n${GRAMMAR}\n\n${CANON}\n\n${rowSchemaDoc}\n\nASSUMPTION KEYS:\n${assumKeyList}\n\n${finBlock}\nBuild the OPERATIONAL MODEL for ${companyName} as a SUM-OF-THE-PARTS segment breakdown — this company was determined to be a genuine multi-segment conglomerate (holding_discount > 0), so each segment below is forecast off its OWN dedicated growth/margin assumption instead of one company-wide blended rate.\nSEGMENTS AND THEIR DEDICATED KEYS — create ONE segment revenue/EBITDA row pair for EACH of these tags, using EXACTLY these row keys and formulas (do not rename, do not invent your own segment keys):\n${segmentTags.map(t => `- Segment "${t}": revenue row key="${segRevKey(t)}" (HISTORICAL: real reported figures for this segment from the OPERATIONAL DATA/segment disclosures above; FORECAST formula EXACTLY "{P:${segRevKey(t)}}*(1+{A:revenue_growth_${t}})"). EBITDA row key="${segEbitdaKey(t)}" (FORECAST formula EXACTLY "{R:${segRevKey(t)}}*{A:ebitda_margin_${t}}").`).join("\n")}\nOTHER SEGMENTS CATCH-ALL — the tagged segments above may not cover 100% of consolidated revenue (a residual/unallocated/corporate segment, or a minor business the Assumptions call didn't tag). You MUST ALSO include exactly ONE catch-all pair: revenue row key="other_segments_revenue" (HISTORICAL = total consolidated revenue for that year MINUS the sum of the tagged segments' revenue that same year — a small or near-zero number is fine if the tagged segments cover nearly everything; FORECAST formula EXACTLY "{P:other_segments_revenue}*(1+{A:revenue_growth})" — this ONE catch-all row uses the BLENDED company-wide keys, unlike every tagged segment above), EBITDA row key="other_segments_ebitda" (FORECAST formula EXACTLY "{R:other_segments_revenue}*{A:ebitda_margin}").\nTOTAL ROWS — the canonical TOTAL rows MUST use these EXACT dictated formulas, which SUM the segment rows above (do NOT invent your own, do NOT grow the total independently off the blended revenue_growth/ebitda_margin — that would let the total silently diverge from the sum of its own parts): net_revenue forecast = "${sotpRevenueSumFormula}", ebitda forecast = "${sotpEbitdaSumFormula}".\nOTHER DISCLOSURE ROWS — capacity, utilisation, volumes/throughput, realisations/ASP per segment, and cost-per-unit remain informational KPIs that do NOT feed revenue or EBITDA, same as always: each one's forecast MUST be a FLAT carry-forward of its last actual, written EXACTLY as "{P:<this row's own key>}". Do NOT attach a growth rate, and do NOT reference an invented assumption key — the ONLY {A:...} keys you may use are those in the ASSUMPTION KEYS list above. If you have no real driver for a KPI, a flat carry-forward IS the correct, honest forecast.\nNO BLANK FORECASTS — every assumption you reference via {A:...} must itself have a value in ALL ${HIST_YEARS + FC_YEARS} year columns, never left blank — a blank/missing forecast cell is read as ZERO by Excel and silently zeroes out everything downstream that multiplies by it.\nYou MUST include rows keyed exactly: ${sotpMandatoryKeys}.`
+                ? `${periodsNote}\n\n${GRAMMAR}\n\n${CANON}\n\n${rowSchemaDoc}\n\nASSUMPTION KEYS:\n${assumKeyList}\n\n${finBlock}\n${segmentAnchorNote}Build the OPERATIONAL MODEL for ${companyName} as a SUM-OF-THE-PARTS segment breakdown — this company was determined to be a genuine multi-segment conglomerate (holding_discount > 0), so each segment below is forecast off its OWN dedicated growth/margin assumption instead of one company-wide blended rate.\nSEGMENTS AND THEIR DEDICATED KEYS — create ONE segment revenue/EBITDA row pair for EACH of these tags, using EXACTLY these row keys and formulas (do not rename, do not invent your own segment keys):\n${segmentTags.map(t => `- Segment "${t}": revenue row key="${segRevKey(t)}" (HISTORICAL: real reported figures for this segment from the OPERATIONAL DATA/segment disclosures above; FORECAST formula EXACTLY "{P:${segRevKey(t)}}*(1+{A:revenue_growth_${t}})"). EBITDA row key="${segEbitdaKey(t)}" (FORECAST formula EXACTLY "{R:${segRevKey(t)}}*{A:ebitda_margin_${t}}").`).join("\n")}\nOTHER SEGMENTS CATCH-ALL — the tagged segments above may not cover 100% of consolidated revenue (a residual/unallocated/corporate segment, or a minor business the Assumptions call didn't tag). You MUST ALSO include exactly ONE catch-all pair: revenue row key="other_segments_revenue" (HISTORICAL = total consolidated revenue for that year MINUS the sum of the tagged segments' revenue that same year — a small or near-zero number is fine if the tagged segments cover nearly everything; FORECAST formula EXACTLY "{P:other_segments_revenue}*(1+{A:revenue_growth})" — this ONE catch-all row uses the BLENDED company-wide keys, unlike every tagged segment above), EBITDA row key="other_segments_ebitda" (FORECAST formula EXACTLY "{R:other_segments_revenue}*{A:ebitda_margin}").\nTOTAL ROWS — the canonical TOTAL rows MUST use these EXACT dictated formulas, which SUM the segment rows above (do NOT invent your own, do NOT grow the total independently off the blended revenue_growth/ebitda_margin — that would let the total silently diverge from the sum of its own parts): net_revenue forecast = "${sotpRevenueSumFormula}", ebitda forecast = "${sotpEbitdaSumFormula}".\nOTHER DISCLOSURE ROWS — capacity, utilisation, volumes/throughput, realisations/ASP per segment, and cost-per-unit remain informational KPIs that do NOT feed revenue or EBITDA, same as always: each one's forecast MUST be a FLAT carry-forward of its last actual, written EXACTLY as "{P:<this row's own key>}". Do NOT attach a growth rate, and do NOT reference an invented assumption key — the ONLY {A:...} keys you may use are those in the ASSUMPTION KEYS list above. If you have no real driver for a KPI, a flat carry-forward IS the correct, honest forecast.\nNO BLANK FORECASTS — every assumption you reference via {A:...} must itself have a value in ALL ${HIST_YEARS + FC_YEARS} year columns, never left blank — a blank/missing forecast cell is read as ZERO by Excel and silently zeroes out everything downstream that multiplies by it.\nYou MUST include rows keyed exactly: ${sotpMandatoryKeys}.`
                 : `${periodsNote}\n\n${GRAMMAR}\n\n${CANON}\n\n${rowSchemaDoc}\n\nASSUMPTION KEYS:\n${assumKeyList}\n\n${finBlock}\nBuild the OPERATIONAL MODEL for ${companyName}, including a per-segment/product-line breakdown where the company reports one (e.g. by business segment). Capacity, utilisation, volumes/throughput, realisations/ASP per segment, and cost-per-unit are DISCLOSURE rows — informational KPIs that do NOT feed revenue or EBITDA. Each disclosure row's forecast MUST be a FLAT carry-forward of its last actual, written EXACTLY as "{P:<this row's own key>}". Do NOT attach a growth rate, and above all do NOT reference an invented assumption key such as "{A:jio_arpu_growth}" or "{A:o2c_production_growth}" — those keys do not exist (the ONLY {A:...} keys you may use are those in the ASSUMPTION KEYS list), so they render as a #MISSING error. If you have no real driver for a KPI, a flat carry-forward IS the correct, honest forecast.\nFORECASTING SEGMENT/TOTAL REVENUE AND EBITDA — do NOT compute forecast revenue by multiplying a forecast "volume" row by a forecast "realisation/ASP" row: those two drivers' units have repeatedly ended up mismatched (observed real failures: a 10x, a 100x, and a 1000x understatement on three different segments of the same company in one run, because volume and realisation were each forecast independently and their product no longer matched revenue's own actual unit scale). Instead, forecast each segment's (and the total's) revenue as a GROWTH-RATE recurrence anchored to its OWN historical actual level, which is unit-safe by construction since it only ever multiplies a real linked/historical figure by a dimensionless growth rate — e.g. segment revenue: "{P:segment_key}*(1+{A:revenue_growth})". Forecast segment EBITDA the same way, off a margin assumption applied to that segment's OWN revenue row: "{R:segment_key_revenue}*{A:ebitda_margin}". The canonical TOTAL rows MUST use these EXACT dictated formulas (do NOT invent your own): net_revenue forecast = "{P:net_revenue}*(1+{A:revenue_growth})", and ebitda forecast = "{R:net_revenue}*{A:ebitda_margin}" (revenue times the margin assumption — this equals the sum of the segments, since the SAME company-wide margin is applied to every segment). NEVER write a growth-style recurrence for the total EBITDA row such as "{P:ebitda}*(1+{A:ebitda_growth})" — there is NO "ebitda_growth" assumption key, so it resolves to a #MISSING error that poisons pnl.ebitda, the DCF, and every sheet pulling op.ebitda.\nUSE THE EXACT ASSUMPTION KEYS "revenue_growth" AND "ebitda_margin" FROM THE ASSUMPTION KEYS LIST ABOVE for every segment revenue/EBITDA row. The ONLY growth/margin keys that exist are revenue_growth and ebitda_margin; do NOT invent "segment_x_growth", "ebitda_growth", or any other {A:...} key — an invented key exists nowhere and resolves to a #MISSING error. Applying the SAME company-wide growth/margin to every segment is the correct, deliberate simplification here.\nNO BLANK FORECASTS — every assumption you reference via {A:...} (growth rates, EBITDA margins, etc.) must itself have a value in ALL ${HIST_YEARS + FC_YEARS} year columns, never left blank — a blank/missing forecast cell is read as ZERO by Excel and silently zeroes out everything downstream that multiplies by it (e.g. an EBITDA margin left blank makes segment EBITDA compute to 0 even though revenue is fine).\nYou MUST include rows keyed exactly: net_revenue, ebitda (and volume if applicable, informational only — not used to derive net_revenue).`;
 
             // SOTP cross-check section for the Valuation & DCF prompt — ADDITIVE only: every row and
@@ -3545,7 +3954,7 @@ PURE-FORMULA ROWS — when this prompt gives you the COMPLETE formula for a row 
                     STATIC_MODEL)
             ]);
 
-            const opRows = Array.isArray(opJson.rows) ? opJson.rows : [];
+            const opRows = normalizeRows(Array.isArray(opJson.rows) ? opJson.rows : []);
             // ── Segment revenue/EBITDA zero-fill recovery ──────────────────────────────────────
             // The SOTP prompt tells the model to populate each <tag>_revenue / <tag>_ebitda row from
             // the OPERATIONAL DATA block and states outright that "zero is never an acceptable
@@ -3569,24 +3978,52 @@ PURE-FORMULA ROWS — when this prompt gives you the COMPLETE formula for a row 
                 for (const tag of segmentTags) {
                     for (const kind of ["revenue", "ebitda"]) {
                         const row = opRowByKey(`${tag}_${kind}`);
-                        if (!row || !isAllBlank(row)) continue;
+                        if (!row) continue;
                         // A segment with no revenue at all is the real failure; a segment that HAS
                         // revenue but no separately-disclosed EBITDA is normal (very few companies
                         // break EBITDA out by segment), so don't flag that as an error — the
                         // ebitda_margin_<tag> assumption already drives it off the revenue row.
                         const revenueRow = opRowByKey(`${tag}_revenue`);
                         const revenueMissingToo = isAllBlank(revenueRow);
-                        const found = segmentAnnualSeries(tag, kind);
+                        const found = segmentDeterministic[`${tag}_${kind}`];
+                        // v2's operational dashboard splits each section across many sub-tables, some
+                        // covering just a SINGLE period with no neighboring context — confirmed live
+                        // (Reliance) that this makes the per-sheet LLM call misplace real values into
+                        // the WRONG fiscal-year column (e.g. FY26-only "JPL Operating Revenue" =
+                        // 146885 landed in the FY2024A column, two years off) rather than returning
+                        // all-zero, so the old "only rescue when the row is all-zero" gate silently
+                        // let these wrong-but-nonzero values through — confirmed in the user's own
+                        // attached model. segmentAnnualSeries matches by EXPLICIT fiscal-year label
+                        // (never by position), so whenever it finds a match — at ANY of its own
+                        // confidence tiers, same as when this was all-zero-only — it is strictly more
+                        // trustworthy than the model's positional transcription and should win
+                        // unconditionally, not only when the model returned nothing at all.
                         if (found) {
-                            row.historical = found.values;
-                            // Never let autoLink's label/value matching re-point these at an unrelated
-                            // financial-statement row afterwards — segment revenue has no legitimate
-                            // counterpart there, and a previous run mislinked one to a Balance Sheet
-                            // debt line. Same rationale as forceMechanicalValue's own noAutoLink use.
+                            const wasAllBlank = isAllBlank(row);
+                            // Known years (found.values[i] != null) are authoritative — never
+                            // second-guessed. GAP years (found couldn't find a disclosure for that
+                            // FY at all) keep whatever the model returned for them — it was asked,
+                            // via segmentAnchorNote above, to infer those specific years from this
+                            // segment's own known trajectory rather than leave them blank/zero.
+                            const llmHist = Array.isArray(row.historical) ? row.historical : [];
+                            const merged = found.values.map((v, i) => {
+                                if (v != null) return v;
+                                const llmV = parseNum(llmHist[i]);
+                                return (llmV != null && llmV !== 0) ? llmV : null;
+                            });
+                            row.historical = merged;
+                            // Live-link whichever years the Operational Data sheet actually has a
+                            // cell for (built while writing that sheet, see idxOperational/Step 1a)
+                            // — bypasses autoLink's own label/value matching entirely, including its
+                            // value-based fuzzy fallback scan across Key Financials/Annual Data,
+                            // which previously mislinked a segment row to an unrelated Balance Sheet
+                            // debt line; a GAP year's LLM estimate has no such cell to link to and
+                            // simply stays a plain number via the historical array above.
+                            row.directLink = idxOperational.get(normLabel(found.label)) || undefined;
                             row.noAutoLink = true;
                             delete row.link;
-                            console.warn(`[AI Model] ${tag}_${kind} came back all-zero from the model — recovered ${found.covered} year(s) deterministically from the operational dashboard row "${found.label}" (section "${found.section}"): ${found.values.map(v => v == null ? "–" : Math.round(v)).join(", ")}.`);
-                        } else if (kind === "revenue" || !revenueMissingToo) {
+                            console.warn(`[AI Model] ${tag}_${kind} ${wasAllBlank ? "came back all-zero from the model" : "replaced with a deterministic lookup (matched by explicit fiscal-year label, more reliable than the model's own column placement)"} — recovered ${found.covered} known year(s) from the operational dashboard row "${found.label}" (section "${found.section}")${row.directLink ? ", live-linked to 'Operational Data'" : ""}: ${merged.map(v => v == null ? "–" : Math.round(v)).join(", ")}.`);
+                        } else if (isAllBlank(row) && (kind === "revenue" || !revenueMissingToo)) {
                             if (kind === "revenue") {
                                 zeroSegmentFlags.push(tag);
                                 console.warn(`[AI Model] ${tag}_revenue is all-zero and no annual Rs-Crore revenue row for it could be found in the operational dashboard — this segment will contribute nothing to net_revenue and its share will fall entirely into Other Segments. Flagged on the Summary Dashboard.`);
@@ -3636,8 +4073,8 @@ PURE-FORMULA ROWS — when this prompt gives you the COMPLETE formula for a row 
                 fixOtherSegments("net_revenue", "other_segments_revenue", "revenue", /^(net\s*revenue|total\s*revenue|revenue\s*from\s*operations|net\s*sales|total\s*income|revenue)$/i);
                 fixOtherSegments("ebitda", "other_segments_ebitda", "ebitda", /^ebitda$/i);
             }
-            const pnlRows = Array.isArray(pnlJson.rows) ? pnlJson.rows : [];
-            const bsRows = Array.isArray(bsJson.rows) ? bsJson.rows : [];
+            const pnlRows = normalizeRows(Array.isArray(pnlJson.rows) ? pnlJson.rows : []);
+            const bsRows = normalizeRows(Array.isArray(bsJson.rows) ? bsJson.rows : []);
             // Re-verify against the Operational call's ACTUAL output before trusting the segment
             // capex path — isSotpCompany only confirms the Assumptions call provided usable
             // segment-driver keys, not that the Operational Model call went on to comply with the
@@ -3653,8 +4090,8 @@ PURE-FORMULA ROWS — when this prompt gives you the COMPLETE formula for a row 
                 console.warn("[AI Model] isSotpCompany was true but the Operational Model call did not deliver all the dictated segment/other_segments revenue rows — falling back to the single blended Capex & FCF sheet for this run.");
             }
             const capexRows = opDeliveredSegments ? buildSegmentCapexRows() : buildCapexRows(); // code-generated, no LLM call (see buildCapexRows/buildSegmentCapexRows above)
-            const valRows = Array.isArray(valJson.rows) ? valJson.rows : [];
-            const summaryRows = Array.isArray(sumJson.rows) ? sumJson.rows : [];
+            const valRows = normalizeRows(Array.isArray(valJson.rows) ? valJson.rows : []);
+            const summaryRows = normalizeRows(Array.isArray(sumJson.rows) ? sumJson.rows : []);
             // Same whole-number-percentage guard the Assumptions sheet already ran (see
             // normalizePercentRows above) — applied to the remaining sheets now that each one's rows
             // are parsed. Most %-rows here are pure formulas and are skipped untouched; this only
@@ -5282,7 +5719,12 @@ PURE-FORMULA ROWS — when this prompt gives you the COMPLETE formula for a row 
                         // would happily rediscover an unrelated same-labeled row in Key Financials/
                         // Annual Data and silently override the authoritative sourced figures with a
                         // different, wrong one (this has actually happened).
-                        const linkEntry = (/%/.test(fmt) || item.noAutoLink) ? null : autoLink(item);
+                        // item.directLink (set by the segment revenue/EBITDA deterministic recovery
+                        // above) bypasses autoLink ENTIRELY, including its own value-based fuzzy
+                        // fallback scan — that scan only searches Key Financials/Annual Data, which a
+                        // segment-dashboard row has no legitimate match in at all, so even reaching
+                        // it risks exactly the kind of wrong mis-link noAutoLink above exists to stop.
+                        const linkEntry = item.directLink || ((/%/.test(fmt) || item.noAutoLink) ? null : autoLink(item));
                         if (linkEntry) {
                             recordLinkStat(sheetKey, "linked");
                             const histNums = Array.isArray(item.historical) ? item.historical : [];
@@ -5996,20 +6438,26 @@ PURE-FORMULA ROWS — when this prompt gives you the COMPLETE formula for a row 
                 // Operational data
                 let opText = "";
                 try {
-                    const opResp = await fetch("https://api.goindiastocks.com/pms/get_dashboard", {
+                    const opResp = await fetch(OPERATIONAL_DASHBOARD_URL, {
                         method: "POST",
                         headers: gapiHeaders({ "Content-Type": "application/json" }),
                         body: JSON.stringify({ fincode: comp.fincode })
                     });
                     const opData = await opResp.json();
-                    const categories = opData?.data || [];
-                    if (categories.length) {
+                    // Previously read opData?.data, a field that has never actually existed on
+                    // either the old or the new dashboard API (verified directly against live
+                    // responses) — categories was always [], so this comparison's operational
+                    // section has silently been empty this whole time. table_data is the field
+                    // both versions actually return; fixed here as part of switching to v2.
+                    const groups = groupOperationalSections(opData?.table_data).slice(0, 8);
+                    if (groups.length) {
                         const lines = [];
-                        categories.slice(0, 8).forEach(cat => {
-                            lines.push(`[${cat.category || ""}]`);
-                            (cat.metrics || []).slice(0, 10).forEach(m => {
-                                const pts = (m.data_points || []).slice(-4).map(dp => `${dp.data_date}:${dp.value}`).join(", ");
-                                lines.push(`  ${m.metric_name} (${m.unit || ""}) — ${pts}`);
+                        groups.forEach(group => {
+                            lines.push(`[${group.name}]`);
+                            const rows = group.entries.flatMap(entry => (entry.rows || []).map(r => ({ r, periods: entry.periods || [] })));
+                            rows.slice(0, 10).forEach(({ r, periods }) => {
+                                const pts = periods.slice(-4).map(p => `${p}:${r[p]}`).join(", ");
+                                lines.push(`  ${r.metric_name} (${r.unit || ""}) — ${pts}`);
                             });
                         });
                         opText = lines.join("\n");
@@ -6903,18 +7351,18 @@ Return ONLY a valid JSON object — no markdown, no explanation, no code fences.
 
 
 /* ═══════════════ DATAGPT CHAT (EXPERIMENTAL) ═══════════════
-   One agent, DeepSeek V4 Pro (via OpenRouter), with two tool sources merged into a single
-   tool-calling loop:
-   1. GoIndia's own MCP server (goindia-mcp.fly.dev/mcp, over the Streamable HTTP transport
-      that replaced HTTP+SSE) — reached through the wallet backend's server-to-server proxy
-      because the upstream sends no CORS headers (the same server gia-chat2_new.js's own
-      McpClient talks to; that file is a reference for the wire protocol only, its
-      /api/chatai/gia-chat2_new wrapper is a separate product with its own agent loop and is
-      NOT called from here). Covers the full backend/routers/mcp.py data
-      surface. Requires the user to hold an active MCP subscription (checked via dbcatalog's
-      /get-mcp-key); a fresh MCP connection is opened per turn, mirroring gia-chat2.js's own
-      "one client per chat turn" lifecycle.
-   2. Local Excel tools (list/read/write the open workbook) — unchanged, still the only
+   One agent, DeepSeek V4 Pro (via OpenRouter), one continuous tool-calling loop per question,
+   in two stages the model itself transitions between by calling a tool:
+   1. Gather — get_workbook_overview/read_range/search_workbook/confirm_companies (read-only) plus
+      ask_website_datagpt, a thin wrapper around fetchFromDataGPT() that asks GoIndiaStocks'
+      website DataGPT (a separate, stateless research-service call, capped at 3 per turn) for
+      whatever the workbook's own index and earlier session notes don't already cover. There is no
+      separate upfront planner/classifier call any more, and the model no longer calls GoIndia's
+      raw MCP tools (search_company, get_catalog, get_schema, run_query, …) directly at all — the
+      website's own DataGPT service resolves those itself. The model calls findings_ready once it
+      has enough, which is what flips the tool set for stage 2 — the write tools are structurally
+      ABSENT from the schema until then, not merely withheld by prompt instruction.
+   2. Act — the full Excel tool set (write_cells, create_chart, format_cells, …), still the only
       write path and still gated by the ask-before-edits confirmation flow.
    See the DataGPT plan doc for the original architecture proposal this has since diverged
    from (this file is the source of truth for the current design).
@@ -6932,113 +7380,17 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
 
     const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
     const OPENROUTER_KEY = process.env.OPENROUTER_KEY; // injected at build time from .env — see webpack.config.js
-    const AI_MODEL = "deepseek/deepseek-v4-pro-0813"; // DataGPT — stronger multi-step tool-calling across the wider tool surface below
+    const AI_MODEL = "deepseek/deepseek-v4.1-flash"; // DataGPT — stronger multi-step tool-calling across the wider tool surface below
 
     // ── Streaming chat completions ──
-    // Every model call in the agent loop below used to be a plain non-streaming fetch + res.json()
-    // — the whole reply arrived in one shot only once the model had finished generating, so the
-    // user watched a single pulsing dot for however long that took (sometimes over a minute on a
-    // long research turn) with zero feedback that anything was happening, unlike ChatGPT/Claude's
-    // own chat UIs where the answer visibly types out as it's produced.
-    //
-    // Adapted from gia-chat2_new.js's own streamOpenRouter (mcp files/gia-chat2_new.js) — that file
-    // already implements this exact SSE-parsing and tool-call-delta-reconstruction correctly and in
-    // production for a different product built on the same OpenRouter wire protocol, so this reuses
-    // its proven frame-parsing and per-index argument-accumulation rather than reinventing it.
-    // Returns the SAME {message, finishReason, usage} shape a non-streaming call's
-    // data.choices[0] + data.usage already gave the caller, so nothing downstream needs to know
-    // the network layer changed.
-    //
-    // onTextDelta is optional and deliberately separate from "the call returns content" — some
-    // callers (the two-phase pipeline's own internal research→write handoff, see runPhase's
-    // renderLive) must stream over the wire for consistency but MUST NOT show their text live: that
-    // text is scratch work meant only for a second model call, never the user, and revealing it
-    // would leak internal plumbing into the chat. Passing onTextDelta is what opts a call into
-    // being visibly typed; omitting it just buffers the same content silently, exactly like today.
-    async function streamChatTurn(body, { signal, onTextDelta } = {}) {
-        const res = await fetch(OPENROUTER_URL, {
-            method: "POST",
-            headers: { "Content-Type": "application/json", "Authorization": `Bearer ${OPENROUTER_KEY}` },
-            signal,
-            body: JSON.stringify({ ...body, stream: true }),
-        });
-        if (!res.ok || !res.body) {
-            const text = await res.text().catch(() => "");
-            throw new Error(`OpenRouter ${res.status}: ${text.slice(0, 160)}`);
-        }
-        let contentText = "";
-        const toolCalls = new Map(); // streaming index -> { id, name, argsRaw }
-        let finishReason = null;
-        let usage = null;
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder("utf-8");
-        let buf = "";
-        // [DONE] is the wire protocol's own explicit "nothing more follows" signal — it must end
-        // BOTH the frame loop and the outer read loop immediately. It didn't: the `continue` below
-        // only ever exited the innermost per-line for-loop, so after [DONE] this kept calling
-        // `await reader.read()` waiting for the underlying HTTP connection to physically close,
-        // which depends on network/proxy/keep-alive behavior, not on the model being done. All the
-        // real content and tool-call data was already fully assembled at that point — the only
-        // thing left running was a wait for a socket teardown that could take anywhere from
-        // instantly to (observed live) close to two minutes, entirely after the actual answer was
-        // ready. streamDone is set the moment [DONE] arrives and unwinds every loop right away;
-        // reader.cancel() then tells the connection it can close now rather than leaving it to
-        // whatever timeout the network path between here and OpenRouter happens to use.
-        let streamDone = false;
-        while (!streamDone) {
-            const { value, done } = await reader.read();
-            if (done) break;
-            buf += decoder.decode(value, { stream: true });
-            let nlIdx;
-            while (!streamDone && (nlIdx = buf.indexOf("\n\n")) !== -1) {
-                const frame = buf.slice(0, nlIdx);
-                buf = buf.slice(nlIdx + 2);
-                for (const line of frame.split(/\r?\n/)) {
-                    if (!line.startsWith("data:")) continue;
-                    const raw = line.slice(5).trim();
-                    if (!raw) continue;
-                    if (raw === "[DONE]") { streamDone = true; break; }
-                    let evt;
-                    try { evt = JSON.parse(raw); } catch { continue; }
-                    const choice = evt.choices?.[0];
-                    if (choice) {
-                        const delta = choice.delta ?? {};
-                        if (typeof delta.content === "string" && delta.content.length > 0) {
-                            contentText += delta.content;
-                            if (onTextDelta) onTextDelta(delta.content);
-                        }
-                        if (Array.isArray(delta.tool_calls)) {
-                            for (const tc of delta.tool_calls) {
-                                const idx = tc.index ?? 0;
-                                let slot = toolCalls.get(idx);
-                                if (!slot) { slot = { id: tc.id ?? null, name: "", argsRaw: "" }; toolCalls.set(idx, slot); }
-                                if (tc.id && !slot.id) slot.id = tc.id;
-                                if (tc.function?.name) slot.name = tc.function.name;
-                                if (typeof tc.function?.arguments === "string") slot.argsRaw += tc.function.arguments;
-                            }
-                        }
-                        if (choice.finish_reason) finishReason = choice.finish_reason;
-                    }
-                    if (evt.usage) usage = evt.usage;
-                }
-            }
-        }
-        if (streamDone) { try { await reader.cancel(); } catch (e) { /* connection may already be closing on its own */ } }
-        const tool_calls = [...toolCalls.entries()]
-            .sort((a, b) => a[0] - b[0])
-            .map(([, slot], i) => ({
-                id: slot.id || `call_${i}`,
-                type: "function",
-                function: { name: slot.name, arguments: slot.argsRaw || "{}" },
-            }));
-        const message = { role: "assistant", content: contentText || null };
-        if (tool_calls.length) message.tool_calls = tool_calls;
-        return { message, finishReason, usage };
-    }
-    // Cheap screening model, used twice before the main loop: once to pick the tool set
-    // (see the classifier in send()) and once to decide whether to ask a clarifying question.
-    // Both are one-line JSON verdicts, so the smallest capable model is the right call.
-    const CLARIFIER_MODEL = "openai/gpt-5-mini";
+    // Streams the reply so the user sees it type out live instead of a single pulsing dot for
+    // however long the model takes. Adapted from gia-chat2_new.js's proven SSE-parsing and
+    // tool-call-delta-reconstruction. Returns the same {message, finishReason, usage} shape a
+    // non-streaming call gave, so callers don't need to know the network layer changed.
+    // onTextDelta is optional: passing it opts a call into visibly typing (e.g. the user-facing
+    // reply); internal scratch calls (like the two-phase research→write handoff) omit it so their
+    // text is buffered silently instead of leaking into the chat.
+    const CLARIFIER_MODEL = "openai/gpt-5.4-nano";
     // Set when we have just asked a clarifying question, so the user's ANSWER is not itself
     // screened — otherwise a reply like "Last 3 years" reads as vague on its own and we would
     // ask again, forever.
@@ -7047,8 +7399,7 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
     const byId = (id) => document.getElementById(id);
     const fab = byId("chatFab"), panel = byId("chatPanel"), stream = byId("chatStream"),
         input = byId("chatInput"), sendBtn = byId("chatSend");
-    const companyInput = byId("chatCompanyInput"), companyList = byId("chatCompanyList"),
-        compareInput = byId("chatCompareInput"), compareList = byId("chatCompareList"), compareClear = byId("chatCompareClear");
+    const compareInput = byId("chatCompareInput"), compareList = byId("chatCompareList"), compareClear = byId("chatCompareClear");
     if (!fab || !panel) return;
 
     // Whether workbook edits are applied immediately or held for a per-write confirmation.
@@ -7090,16 +7441,214 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
     }
 
     // Chat history survives taskpane reloads (window close, Excel restart) via localStorage.
+    // The chat panel is re-rendered from it, so up to 40 messages are kept for DISPLAY; the models
+    // only ever see the last RAW_WINDOW_TURNS turns (rawWindow) plus the compact turn notes below,
+    // so nothing older is needed for context. Each stored copy is clipped: 40 replies that each
+    // carry a table could otherwise fill localStorage on their own.
     const CHAT_HISTORY_KEY = "goia_chatHistory";
     const MAX_HISTORY = 40;
-    let history = [];                          // {role, content}
+    // How much RAW conversation the models see before falling back to compacted turn notes. A turn
+    // is one user message plus one assistant reply, so this is twice as many messages.
+    const RAW_WINDOW_TURNS = 8;
+    const RAW_WINDOW_MESSAGES = RAW_WINDOW_TURNS * 2;
+    const MAX_STORED_MESSAGE_CHARS = 4000;
+    const clipStored = (m) => {
+        const c = String(m && m.content != null ? m.content : "");
+        return { ...m, content: c.length > MAX_STORED_MESSAGE_CHARS ? c.slice(0, MAX_STORED_MESSAGE_CHARS) + "…" : c };
+    };
+    let history = [];                          // {role, content, turn?}
     try {
         const saved = JSON.parse(localStorage.getItem(CHAT_HISTORY_KEY) || "[]");
-        if (Array.isArray(saved)) history = saved.slice(-MAX_HISTORY);
+        if (Array.isArray(saved)) history = saved.filter(m => m && typeof m.role === "string").slice(-MAX_HISTORY).map(clipStored);
     } catch (e) { /* ignore corrupt data */ }
     const persistHistory = () => {
-        try { localStorage.setItem(CHAT_HISTORY_KEY, JSON.stringify(history.slice(-MAX_HISTORY))); } catch (e) { /* storage full/unavailable */ }
+        try { localStorage.setItem(CHAT_HISTORY_KEY, JSON.stringify(history.slice(-MAX_HISTORY).map(clipStored))); } catch (e) { /* storage full/unavailable */ }
     };
+    // Every question gets a turn number, stamped on both its messages and its memory note, so the
+    // notes for turns that are still inside the raw window are not fed a second time.
+    let nextTurn = 1 + history.reduce((mx, m) => Math.max(mx, Number(m.turn) || 0), 0);
+    // What the models are given: role and content only (a stray `turn` field could be rejected by a provider).
+    const rawWindow = (n = RAW_WINDOW_MESSAGES) => history.slice(-n).map(({ role, content }) => ({ role, content }));
+
+    // ── Session memory (turn notes) ──
+    // One short note per finished turn (what was asked, how it was answered, and the answer text
+    // itself) so later turns and follow-ups can see what was already found without re-deriving it.
+    // Notes go to our models only, never the website; the workbook stays the source of truth for
+    // raw numbers. Stored per workbook (never cross-surfaced) and bounded on every axis — record
+    // size, record count, workbook count/age, and total bytes — so it can't stack up unbounded;
+    // malformed or over-quota state is repaired/pruned on load rather than thrown.
+    const MEM_KEY = "goia_chatMemory";
+    const MEM_VERSION = 1;
+    const MEM_MAX_BOOKS = 5, MEM_MAX_RECORDS = 15, MEM_MAX_AGE_MS = 30 * 24 * 3600 * 1000;
+    // Raised alongside MEM_RECORD_CHARS below (the answer text is now the biggest single field —
+    // several sentences, not one) so a single actively-used workbook can still hold a meaningful
+    // run of turns before the byte cap starts evicting its own oldest ones.
+    const MEM_MAX_BYTES = 100000, MEM_RECORD_CHARS = 3500, MEM_ANSWER_CHARS = 1200, MEM_FINDINGS_CHARS = 1000;
+    const memClip = (v, n) => { const s = String(v == null ? "" : v).replace(/\s+/g, " ").trim(); return s.length > n ? s.slice(0, n - 1) + "…" : s; };
+    const memBookKey = (url, name) => { const raw = `${url || ""}|${name || ""}`; let h = 5381; for (let i = 0; i < raw.length; i++) h = ((h << 5) + h + raw.charCodeAt(i)) | 0; return (h >>> 0).toString(36); };
+    const docUrl = () => { try { return (typeof Office !== "undefined" && Office.context && Office.context.document && Office.context.document.url) || ""; } catch (e) { return ""; } };
+    const memEmptyStore = () => ({ v: MEM_VERSION, books: {} });
+
+    function memMakeRecord(r) {
+        const arr = (a, n, len) => (Array.isArray(a) ? a : []).slice(0, n).map(x => memClip(x, len)).filter(Boolean);
+        const rec = {
+            turn: Number(r.turn) || 0, t: Number(r.now || r.t) || 0,
+            intent: memClip(r.intent, 160), route: memClip(r.route, 12), asked: memClip(r.asked, 200), tools: memClip(r.tools, 80),
+            tables: Math.max(0, Number(r.tables) || 0), read: arr(r.read, 3, 50), wrote: arr(r.wrote, 4, 60),
+            unavailable: memClip(r.unavailable, 120), findings: memClip(r.findings, MEM_FINDINGS_CHARS), answer: memClip(r.answer, MEM_ANSWER_CHARS),
+        };
+        // Over the hard cap: shed the least useful fields first. Intent, "unavailable" and the
+        // answer are kept — the answer is the whole point of the record, so it is shrunk (below),
+        // never dropped, and only as the very last resort once every other field is already gone.
+        // findings (the research service's own raw, exact-figures output — see memRenderRecord) is
+        // shrunk before the answer is touched at all: it is the more verbose of the two, and the
+        // answer already restates its substance in prose, so it is the safer one to cut into first.
+        for (const k of ["tools", "read", "asked"]) {
+            if (JSON.stringify(rec).length <= MEM_RECORD_CHARS) break;
+            rec[k] = Array.isArray(rec[k]) ? [] : "";
+        }
+        while (JSON.stringify(rec).length > MEM_RECORD_CHARS && rec.findings.length > 0) {
+            rec.findings = rec.findings.slice(0, Math.max(0, rec.findings.length - 100));
+        }
+        while (JSON.stringify(rec).length > MEM_RECORD_CHARS && rec.answer.length > 0) {
+            rec.answer = rec.answer.slice(0, Math.max(0, rec.answer.length - 100));
+        }
+        return rec;
+    }
+    // Repairs whatever came out of localStorage; never trusts its shape or its sizes.
+    function memSanitize(raw) {
+        const store = memEmptyStore();
+        if (!raw || typeof raw !== "object" || raw.v !== MEM_VERSION || !raw.books || typeof raw.books !== "object" || Array.isArray(raw.books)) return store;
+        for (const key of Object.keys(raw.books)) {
+            const b = raw.books[key];
+            if (!b || typeof b !== "object" || !Array.isArray(b.records)) continue;
+            store.books[String(key).slice(0, 16)] = {
+                name: memClip(b.name, 60), used: Number(b.used) || 0,
+                records: b.records.filter(x => x && typeof x === "object").map(memMakeRecord),
+            };
+        }
+        return store;
+    }
+    function memPrune(store, now, maxBytes = MEM_MAX_BYTES) {
+        const keys = () => Object.keys(store.books);
+        for (const k of keys()) if (now - store.books[k].used > MEM_MAX_AGE_MS) delete store.books[k];
+        const byRecency = () => keys().sort((a, b) => store.books[b].used - store.books[a].used);
+        byRecency().slice(MEM_MAX_BOOKS).forEach(k => { delete store.books[k]; });
+        for (const k of keys()) store.books[k].records = store.books[k].records.slice(-MEM_MAX_RECORDS);
+        // Over the byte cap: oldest record of the least recently used workbook goes first; a workbook
+        // down to its last record goes whole. The newest record of the newest workbook goes last.
+        while (JSON.stringify(store).length > maxBytes && keys().length) {
+            const lru = byRecency().reverse()[0];
+            if (store.books[lru].records.length > 1) store.books[lru].records.shift();
+            else delete store.books[lru];
+        }
+        return store;
+    }
+    function memAdd(store, { key, name, record, now }) {
+        const b = store.books[key] || (store.books[key] = { name: "", used: now, records: [] });
+        b.used = now; b.name = memClip(name, 60);
+        const last = b.records[b.records.length - 1];
+        // A retried question replaces its own note instead of stacking a duplicate.
+        if (last && last.intent === record.intent && last.asked === record.asked && last.route === record.route) b.records[b.records.length - 1] = record;
+        else b.records.push(record);
+        return memPrune(store, now);
+    }
+    function memLoad(now = Date.now()) {
+        try {
+            const raw = localStorage.getItem(MEM_KEY);
+            return raw ? memPrune(memSanitize(JSON.parse(raw)), now) : memEmptyStore();
+        } catch (e) { return memEmptyStore(); }
+    }
+    // A quota error is answered with a smaller cap, not an exception; the last resort is to drop the store.
+    function memSave(store) {
+        for (const cap of [MEM_MAX_BYTES, MEM_MAX_BYTES / 2, MEM_MAX_BYTES / 4]) {
+            try { memPrune(store, Date.now(), cap); localStorage.setItem(MEM_KEY, JSON.stringify(store)); return true; }
+            catch (e) { /* prune harder and retry */ }
+        }
+        try { localStorage.removeItem(MEM_KEY); } catch (e) { /* nothing more to do */ }
+        return false;
+    }
+    const memRenderRecord = (r) =>
+        `T${r.turn}: ${r.intent || "(no intent recorded)"}` +
+        (r.route ? ` | ${r.route}` : "") +
+        (r.asked ? ` | asked the research service: "${r.asked}"${r.tools || r.tables ? ` (${[r.tools, r.tables ? `${r.tables} table(s)` : ""].filter(Boolean).join(", ")})` : ""}` : "") +
+        (r.findings ? ` | returned: ${r.findings}` : "") +
+        ((r.read || []).length ? ` | read: ${r.read.join(", ")}` : "") +
+        ((r.wrote || []).length ? ` | wrote: ${r.wrote.join("; ")}` : "") +
+        (r.unavailable ? ` | NOT AVAILABLE: ${r.unavailable}` : "") +
+        (r.answer ? ` | answer: ${r.answer}` : "");
+    // Notes for turns OLDER than the raw window (beforeTurn), newest last, within a note and char budget.
+    function memNotes(store, key, beforeTurn, { maxNotes = 10, maxChars = 3000 } = {}) {
+        const b = store.books[key];
+        if (!b) return "";
+        const lines = b.records.filter(r => r.turn < beforeTurn).slice(-maxNotes).map(memRenderRecord);
+        while (lines.length && lines.join("\n").length > maxChars) lines.shift();
+        return lines.join("\n");
+    }
+    // What the Excel loop actually did this turn, from its own tool calls — no model involved.
+    function memSummarizeActions(actions) {
+        const read = [], wrote = [];
+        let charts = 0, other = 0;
+        for (const a of actions || []) {
+            const g = a.args || {};
+            if (a.name === "read_range" && g.range) read.push(String(g.range));
+            else if (a.name === "search_workbook" && g.query) read.push(`search "${g.query}"`);
+            else if (a.name === "create_sheet" && g.name) wrote.push(`sheet "${g.name}"`);
+            else if (a.name === "write_cells" && g.start_cell) {
+                const v = Array.isArray(g.values) ? g.values : [];
+                wrote.push(`${g.start_cell}${v.length ? ` (${v.length}×${Math.max(...v.map(r => (Array.isArray(r) ? r.length : 1)))})` : ""}`);
+            }
+            else if (a.name === "fill_formula" && (g.range || g.target_range)) wrote.push(`fill ${g.range || g.target_range}`);
+            else if (a.name === "create_chart") charts++;
+            else if (["modify_structure", "tables", "named_ranges", "conditional_format", "comments", "undo_last_change"].includes(a.name)) other++;
+        }
+        if (charts) wrote.push(`${charts} chart(s)`);
+        if (other) wrote.push(`${other} other edit(s)`);
+        return { read: [...new Set(read)], wrote };
+    }
+    const memCompactTools = (tools) => {
+        const out = [];
+        for (const t of tools || []) { const last = out[out.length - 1]; if (last && last.n === t) last.c++; else out.push({ n: t, c: 1 }); }
+        return out.map(x => (x.c > 1 ? `${x.n}×${x.c}` : x.n)).join(">");
+    };
+    // The research service's own "this data does not exist" sentence, so it is not asked for again.
+    const MEM_UNAVAILABLE_RE = /\b(?:not available|unavailable|no data|not found in|could ?n[o']t find|not present|does not exist|isn'?t available)\b/i;
+    // Sentence split that does not cut "Reliance Industries Ltd. reported…" after "Ltd.", nor a decimal.
+    // Units such as "Cr." and "Mn." are deliberately NOT here: "revenue was 8,984 Cr." usually ENDS a sentence.
+    const MEM_ABBREV = new Set(["ltd", "inc", "co", "corp", "pvt", "no", "st", "dr", "mr", "ms", "vs", "approx", "rs", "etc"]);
+    function memSentences(text) {
+        const out = [];
+        for (const line of String(text || "").split(/\n+/)) {
+            const t = line.replace(/[*_`#>|]/g, " ").replace(/\s+/g, " ").trim();
+            if (!t) continue;
+            let start = 0, m;
+            const re = /[.!?]+(?:\s+|$)/g;
+            while ((m = re.exec(t))) {
+                if (MEM_ABBREV.has(t.slice(start, m.index).split(" ").pop().toLowerCase())) continue;
+                out.push(t.slice(start, m.index + m[0].trimEnd().length));
+                start = m.index + m[0].length;
+            }
+            if (start < t.length) out.push(t.slice(start));
+        }
+        return out.filter(x => x.length > 3);
+    }
+    const memFindUnavailable = (text) => { const hit = memSentences(text).find(x => MEM_UNAVAILABLE_RE.test(x)); return hit ? memClip(hit, 120) : ""; };
+    // As many WHOLE sentences as fit within maxChars (not just the first one) — the answer kept
+    // for a turn's note, not a one-line teaser. Falls back to a hard clip only when even the first
+    // sentence alone is longer than the budget.
+    function memAnswerText(text, maxChars) {
+        const sentences = memSentences(text);
+        if (!sentences.length) return "";
+        let acc = "";
+        for (const s of sentences) {
+            const next = acc ? `${acc} ${s}` : s;
+            if (next.length > maxChars) break;
+            acc = next;
+        }
+        return acc || memClip(sentences[0], maxChars);
+    }
+    let memStore = memLoad();
+
     let busy = false;
     // The in-flight turn's AbortController, so the send button can cancel it.
     let currentAbort = null;
@@ -7124,10 +7673,19 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
         try { currentAbort.abort(); } catch (e) { /* already settled */ }
     };
 
-    // The chat keeps its own company selection so the user can switch companies (or add a
-    // second one to compare) without leaving the panel. "primaryCo" mirrors the main
-    // Company-tab dropdown until the user picks a company inside the chat itself.
-    let primaryCo = null;      // {fincode, name, sector}
+    // "compareCo" lets the user explicitly add a second company to compare against, via the
+    // chat's own "Compare with" search box, without leaving the panel. There used to be a
+    // matching "primaryCo" — a single pinned "subject" company, auto-pinned from whatever the
+    // planner/classifier extracted, restored across reloads from each workbook's own session
+    // notes, and mirrored from a manual "Acting on" picker and the main Company-tab dropdown —
+    // removed entirely: the model already resolves who's being discussed from the conversation
+    // itself (proven — raw history alone correctly resolves "it"/"same for" follow-ups), so the
+    // pin was never adding that inference. What it DID add was a persisted fincode, which turned
+    // out to be a net risk rather than a safety net: a stale pin from several turns back could get
+    // silently reused for the wrong company, and the research service already resolves company
+    // names itself — ambiguous ones included — so a pre-attached fincode bought less than it
+    // risked. Simpler and safer to let every request name companies by wording only, always
+    // resolved fresh, never carried forward as state that can go stale.
     let compareCo = null;      // {fincode, name, sector} | null
     let allCompanies = [];     // lazy-loaded once, reused by both pickers
 
@@ -7140,7 +7698,31 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
         return allCompanies;
     }
 
-    // Shared wiring for the "Acting on" / "Compare with" search boxes.
+    // ── Company name matching (shared by auto-pin AND the workbook table indexer below) ──
+    // Matches free-text against allCompanies, the same list the manual picker uses; refuses
+    // ambiguous matches rather than guessing a fincode. Returns the single matched
+    // {fincode, name, sector} or null for both "no match" and "multiple matches".
+    const COMPANY_NAME_MIN_LEN = 3;
+    const matchCompanyNorm = (s) => String(s || "").toLowerCase().replace(/[.,]/g, "").replace(/\s+/g, " ").trim();
+    // Flags variant names (e.g. "- (Partly paid-up)", "Rights Entitlements") the base patterns miss.
+    const matchCompanyIsVariant = (name) => /\((?:rights?[\s-]?(?:issue|entitlement)?|partly\s*paid|dvr)\)|(?:^|\s)-\s*rights?\b|\bdvr\b|\bpartly[\s-]*paid\b|\brights?\s+entitlements?\b/i.test(name);
+    function matchCompanyCandidates(text, allCompaniesList) {
+        const t = typeof text === "string" ? text.trim() : "";
+        if (t.length < COMPANY_NAME_MIN_LEN) return [];
+        const wanted = matchCompanyNorm(t);
+        return (allCompaniesList || []).filter(c => {
+            const nc = matchCompanyNorm(c.CompName);
+            return nc && (nc.startsWith(wanted) || wanted.startsWith(nc)) && !matchCompanyIsVariant(c.CompName);
+        });
+    }
+    function matchCompanyName(text, allCompaniesList) {
+        const candidates = matchCompanyCandidates(text, allCompaniesList);
+        if (candidates.length !== 1) return null;
+        const c = candidates[0];
+        return { fincode: c.fincode, name: c.CompName, sector: c.sector_type };
+    }
+
+    // Shared wiring for a company search box — today only the "Compare with" one uses it.
     function wireCompanyPicker(inputEl, listEl, onPick) {
         const render = (items) => {
             listEl.innerHTML = "";
@@ -7168,19 +7750,9 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
         });
         inputEl.addEventListener("blur", () => setTimeout(() => listEl.classList.remove("open"), 150));
     }
-    wireCompanyPicker(companyInput, companyList, (c) => { primaryCo = c; });
     wireCompanyPicker(compareInput, compareList, (c) => { compareCo = c; compareClear.style.display = "inline"; });
     compareClear.addEventListener("click", () => { compareCo = null; compareInput.value = ""; compareClear.style.display = "none"; });
 
-    // Mirrors the main Company-tab dropdown until the user picks a company in-chat.
-    const setCompany = () => {
-        if (primaryCo) { companyInput.value = primaryCo.name; return; }
-        const t = byId("dropdownToggle");
-        if (t && t.value && t.dataset.value) {
-            primaryCo = { fincode: t.dataset.value, name: t.value, sector: t.dataset.sector };
-            companyInput.value = t.value;
-        }
-    };
     // Lightweight markdown renderer for DataGPT's own replies (headers, **bold**, *italics*,
     // `code`, bullet/numbered lists, --- rules, paragraph breaks) — the model's answers were
     // arriving as raw markdown text via textContent, showing literal "**" and "###" to the user.
@@ -7301,10 +7873,10 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
     // visible; each one folds into a one-line summary as it completes, and the summary expands if
     // the user wants the detail. Same shape as this chat's own tool progress.
     let currentStepGroup = null;
-    // The live "working" indicator. Deliberately NOT a chat bubble — an empty bubble with dots in
-    // it reads as a message the assistant already sent. It is a plain pulsing dot that gets
-    // replaced by the real answer bubble when one exists.
-    let thinkingEl = null;
+    // The live "working" indicator. Deliberately NOT a chat bubble — an empty bubble with text in
+    // it reads as a message the assistant already sent. Just a plain pulsing "Thinking…" label,
+    // replaced by the real answer bubble once one exists.
+    let thinkingEl = null, reasoningTextEl = null;
     const showThinking = () => {
         hideThinking();
         thinkingEl = document.createElement("div");
@@ -7314,20 +7886,31 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
         stream.scrollTop = stream.scrollHeight;
         return thinkingEl;
     };
-    const hideThinking = () => { if (thinkingEl) { thinkingEl.remove(); thinkingEl = null; } };
+    const hideThinking = () => { reasoningTextEl = null; if (thinkingEl) { thinkingEl.remove(); thinkingEl = null; } };
+    // Joins the dot with a "Thinking…" label ONLY while the model's own chain-of-thought is
+    // actually streaming (see streamChatTurn's onReasoningDelta) — the dot alone already means
+    // "something is happening"; the label additionally says WHAT while it's true. Appended INTO
+    // thinkingEl (not a sibling), so keepThinkingLast's existing single-element repositioning
+    // still just works without change.
+    const showReasoningText = () => {
+        if (reasoningTextEl || !thinkingEl) return;
+        reasoningTextEl = document.createElement("span");
+        reasoningTextEl.className = "chat-thinking-text";
+        reasoningTextEl.textContent = "Thinking…";
+        thinkingEl.appendChild(reasoningTextEl);
+    };
+    // Called the moment the model moves on from reasoning to actually acting — the first content
+    // or tool-call delta of the turn (see streamChatTurn's onAnswering). Only the "Thinking" label
+    // goes away; the dot carries on exactly as before ("preparing the answer" / a tool is running).
+    const hideReasoningText = () => { if (reasoningTextEl) { reasoningTextEl.remove(); reasoningTextEl = null; } };
     // Anything appended to the stream mid-turn (a step group, a confirm card) would otherwise land
     // BELOW the indicator, so keep it pinned last.
     const keepThinkingLast = () => { if (thinkingEl) stream.appendChild(thinkingEl); };
     // Renders one model turn's text AS IT ARRIVES, replacing the pulsing dot with a real bubble on
-    // the first token instead of leaving it up until the whole reply is in hand. Call .onDelta(chunk)
-    // from streamChatTurn's onTextDelta; the bubble is created lazily so a tool-calling turn that
-    // never emits text never gets an empty bubble of its own.
-    //
-    // Re-renders the WHOLE accumulated text through renderMarkdown on every flush rather than
-    // patching the DOM incrementally — the same thing every other bot message in this file already
-    // does, and far simpler than writing a second, incremental markdown parser that would also have
-    // to handle a mid-token unclosed **/```/table without corrupting the DOM. Flushes are coalesced
-    // to one per animation frame so a fast stream doesn't force a DOM write per SSE frame.
+    // the first token. Call .onDelta(chunk) from streamChatTurn's onTextDelta; the bubble is
+    // created lazily so a tool-calling turn with no text never gets an empty one. Re-renders the
+    // whole accumulated text through renderMarkdown each flush (simpler than an incremental parser
+    // handling mid-token unclosed **/```/table), coalesced to one flush per animation frame.
     const makeLiveRenderer = () => {
         let bubble = null, acc = "", raf = null;
         const flush = () => {
@@ -7336,14 +7919,41 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
             stream.scrollTop = stream.scrollHeight;
         };
         return {
+            onReasoningDelta() { showReasoningText(); },
+            // The model has moved from thinking to actually answering (content or a tool call) —
+            // the "Thinking" label's job is done, whether or not it ever showed. The dot itself is
+            // untouched here: it keeps going until a real answer bubble replaces it, or the phase's
+            // tool cards take over showing progress.
+            onAnswering() { hideReasoningText(); },
             onDelta(chunk) {
+                hideReasoningText();
                 acc += chunk;
-                if (!bubble) { hideThinking(); bubble = addMsg("bot", ""); }
+                // Some reasoning models (seen with DeepSeek) stream a stray whitespace-only
+                // content delta around a tool call, with no real text ever following in that same
+                // turn. Creating a bubble on that alone left a visibly empty one behind — wait
+                // until there's actually something to show; a genuine answer with leading
+                // whitespace still renders fine once real text arrives (acc carries it forward).
+                if (!bubble) {
+                    if (!acc.trim()) return;
+                    hideThinking(); bubble = addMsg("bot", "");
+                    // This bubble just landed at the END of the stream — any step-card group
+                    // created before now would sit ABOVE it from here on, since addCard() only
+                    // ever appends into whichever group is still "current" rather than moving it.
+                    // Force the NEXT tool call (if any, later in this same turn) to open a fresh
+                    // group instead, so it lands chronologically after this bubble, not stuck
+                    // above it. Reported bug: a commentary bubble mid-turn ("okay now I'll do xyz
+                    // since the data is not in the workbook") left the step cards from BEFORE it
+                    // sitting above it forever, with every later tool call added to that same
+                    // stranded group.
+                    newStepGroup();
+                }
                 if (raf == null) raf = requestAnimationFrame(flush);
             },
             // Called once the stream ends so the final chunk is painted immediately rather than
-            // waiting on whatever's left of the current animation frame's schedule.
-            finish() { if (raf != null) { cancelAnimationFrame(raf); raf = null; } flush(); },
+            // waiting on whatever's left of the current animation frame's schedule. Also drops the
+            // "Thinking" label if it was still showing — covers a tool-calling turn, where
+            // onAnswering already handles the common case but this is a cheap belt-and-suspenders.
+            finish() { if (raf != null) { cancelAnimationFrame(raf); raf = null; } flush(); hideReasoningText(); },
             active() { return bubble != null; },
         };
     };
@@ -7556,65 +8166,250 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
         });
     }
 
-    const greet = () => addMsg("bot",
-        "Hi — I'm connected to your GoIndia data and this workbook. Ask me about the selected company, or to write something into a sheet. (Experimental)");
-
-    // Re-render whatever chat history survived from the last session.
-    history.forEach(m => addMsg(m.role === "assistant" ? "bot" : "user", m.content));
-
-    const openPanel = () => { panel.style.display = "flex"; fab.style.display = "none"; setCompany(); if (!stream.childElementCount) greet(); input.focus(); };
-    const closePanel = () => { panel.style.display = "none"; fab.style.display = ""; if (modeMenu) modeMenu.classList.remove("open"); };
-    fab.addEventListener("click", openPanel);
-
-    // Ribbon handshake: the "Ask DataGPT" button's ShowTaskpane action points at
-    // taskpane.html?view=datagpt (see manifest.xml and applyRibbonView near the top of this file,
-    // which already hid every #addinUI section except #chatFeature for this exact view) —
-    // auto-open the chat here too so the pane opens with DataGPT already in front and nothing
-    // else, rather than an empty pane with just the fab to click.
-    // Read ?view= directly rather than document.body.dataset.view: this whole IIFE runs
-    // synchronously at script-parse time, before the Office.onReady callback that sets that
-    // dataset attribute (applyRibbonView, above) has had a chance to fire — relying on it here
-    // was a real race that left DataGPT's panel closed behind a fab the user had to click anyway.
-    let initialView = "main";
-    try { initialView = new URLSearchParams(location.search).get("view") || "main"; } catch (e) { /* malformed query string */ }
-    if (initialView === "datagpt") openPanel();
-    // (No close button any more — see the chat header in taskpane.html.)
-    const chatClear = byId("chatClear");
-    if (chatClear) {
-        chatClear.addEventListener("click", async () => {
-            const ok = await addConfirmCard("Clear all chat history?", { approveLabel: "Clear", rejectLabel: "Cancel" });
-            if (!ok) return;
-            history = [];
-            persistHistory();
-            stream.innerHTML = "";
-            greet();
+    // The only console output this pipeline produces, by explicit request: the Excel cache built
+    // each turn, the earlier-notes context fed into a prompt, every LLM call's input, and the
+    // final cost. logLLMInput is the one shared formatter for the third of those.
+    const logLLMInput = (label, model, messages) => {
+        console.log(`[LLM input] ${label} (${model}):\n` +
+            messages.map((m, i) => `  [${i}] ${m.role}: ${typeof m.content === "string" ? m.content : JSON.stringify(m.content)}`).join("\n"));
+    };
+    async function streamChatTurn(body, { signal, onTextDelta, onReasoningDelta, onAnswering } = {}) {
+        logLLMInput("excel-loop turn", body.model, body.messages);
+        const res = await fetch(OPENROUTER_URL, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "Authorization": `Bearer ${OPENROUTER_KEY}` },
+            signal,
+            body: JSON.stringify({ ...body, stream: true }),
         });
+        if (!res.ok || !res.body) {
+            const text = await res.text().catch(() => "");
+            throw new Error(`OpenRouter ${res.status}: ${text.slice(0, 160)}`);
+        }
+        let contentText = "";
+        const toolCalls = new Map(); // streaming index -> { id, name, argsRaw }
+        let finishReason = null;
+        let usage = null;
+        // Fires once, on the first non-reasoning delta (content or tool-call), so the UI can drop
+        // the "Thinking…" label even on tool-calling turns that never reach onTextDelta.
+        let answeringNotified = false;
+        const notifyAnswering = () => { if (!answeringNotified) { answeringNotified = true; if (onAnswering) onAnswering(); } };
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder("utf-8");
+        let buf = "";
+        // [DONE] must end both the frame loop and the outer read loop immediately: previously only
+        // the innermost loop exited, so the code kept awaiting reader.read() until the HTTP
+        // connection physically closed (up to ~2 min) even though the answer was already complete.
+        // streamDone unwinds everything the instant [DONE] arrives; reader.cancel() then closes
+        // the connection rather than waiting on the network's own teardown timing.
+        let streamDone = false;
+        while (!streamDone) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buf += decoder.decode(value, { stream: true });
+            let nlIdx;
+            while (!streamDone && (nlIdx = buf.indexOf("\n\n")) !== -1) {
+                const frame = buf.slice(0, nlIdx);
+                buf = buf.slice(nlIdx + 2);
+                for (const line of frame.split(/\r?\n/)) {
+                    if (!line.startsWith("data:")) continue;
+                    const raw = line.slice(5).trim();
+                    if (!raw) continue;
+                    if (raw === "[DONE]") { streamDone = true; break; }
+                    let evt;
+                    try { evt = JSON.parse(raw); } catch { continue; }
+                    const choice = evt.choices?.[0];
+                    if (choice) {
+                        const delta = choice.delta ?? {};
+                        if (typeof delta.content === "string" && delta.content.length > 0) {
+                            contentText += delta.content;
+                            notifyAnswering();
+                            if (onTextDelta) onTextDelta(delta.content);
+                        }
+                        // Reasoning models stream chain-of-thought on a separate delta field (OpenRouter's
+                        // `reasoning`, or raw DeepSeek's `reasoning_content`); only used to toggle the
+                        // "Thinking…" label (see makeLiveRenderer) — the text itself is never rendered.
+                        const reasoningChunk = typeof delta.reasoning === "string" ? delta.reasoning
+                            : typeof delta.reasoning_content === "string" ? delta.reasoning_content : "";
+                        if (reasoningChunk && onReasoningDelta) onReasoningDelta(reasoningChunk);
+                        if (Array.isArray(delta.tool_calls)) {
+                            notifyAnswering();
+                            for (const tc of delta.tool_calls) {
+                                const idx = tc.index ?? 0;
+                                let slot = toolCalls.get(idx);
+                                if (!slot) { slot = { id: tc.id ?? null, name: "", argsRaw: "" }; toolCalls.set(idx, slot); }
+                                if (tc.id && !slot.id) slot.id = tc.id;
+                                if (tc.function?.name) slot.name = tc.function.name;
+                                if (typeof tc.function?.arguments === "string") slot.argsRaw += tc.function.arguments;
+                            }
+                        }
+                        if (choice.finish_reason) finishReason = choice.finish_reason;
+                    }
+                    if (evt.usage) usage = evt.usage;
+                }
+            }
+        }
+        if (streamDone) { try { await reader.cancel(); } catch (e) { /* connection may already be closing on its own */ } }
+        const tool_calls = [...toolCalls.entries()]
+            .sort((a, b) => a[0] - b[0])
+            .map(([, slot], i) => ({
+                id: slot.id || `call_${i}`,
+                type: "function",
+                function: { name: slot.name, arguments: slot.argsRaw || "{}" },
+            }));
+        const message = { role: "assistant", content: contentText || null };
+        if (tool_calls.length) message.tool_calls = tool_calls;
+        return { message, finishReason, usage };
     }
-    input.addEventListener("input", () => { input.style.height = "auto"; input.style.height = Math.min(96, input.scrollHeight) + "px"; });
-    input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
-    sendBtn.addEventListener("click", () => { if (busy) stopCurrentTurn(); else send(); });
-    renderSendBtn(); // markup ships the send glyph; make the JS the single source of truth from here
-    const ddToggle = byId("dropdownToggle");
-    if (ddToggle) ddToggle.addEventListener("blur", setCompany);
-
-    // ── GoIndia MCP access ──
-    // goindia-mcp.fly.dev sends no Access-Control-Allow-Origin header, so the browser blocks this
-    // add-in from calling it directly (curl/server-to-server calls were never subject to that
-    // check — only cross-origin fetch() from a webpage is). The wallet backend proxies it
-    // server-to-server instead (see the Streamable HTTP proxy in routers/wallet.py), which
-    // sidesteps the problem without needing a fix on a server we do not control.
-    //
-    // NOTE the route: /wallet/mcp, NOT the old /wallet/mcp/sse. The MCP transport moved from
-    // HTTP+SSE (a GET stream plus a separate POST endpoint) to Streamable HTTP (one endpoint,
-    // every reply returned by its own POST), so both the proxy and McpClient below now speak
-    // that instead. The proxy MUST also send Access-Control-Expose-Headers naming
-    // Mcp-Session-Id: it is not a CORS-safelisted response header, so without that the browser
-    // withholds it from this page, no session is ever captured, and every call after initialize
-    // is rejected upstream with HTTP 400 "Missing session ID" while curl sees a healthy server.
+    // ── Delegated data fetch (website DataGPT) ──
+    // Calls the website's DataGPT as a stateless data service (no session_id/s3_url, so nothing
+    // hits its S3 history and its server-side Excel generation never triggers) rather than
+    // re-implementing its research loop here. Returns a result object instead of throwing.
+    //   tables    — raw run_query text (clean numbers, unlike the model's Indian-style prose)
+    //   finalText — the LAST text block only; earlier blocks are inter-tool-call narration
+    //   costInr   — server's own cumulative turn_cost; display/history only, never sent to our deduct endpoints
+    // On the local dev server the path is relative, so webpack's dev proxy forwards it (see
+    // devServer.proxy in webpack.config.js) and the browser never makes a cross-origin call.
+    const DATAGPT_CHAT_URL = (typeof location !== "undefined" && location.hostname === "localhost")
+        ? "/api/chatai/gia-chat2_new"
+        : "https://www.goindiastocks.com/api/chatai/gia-chat2_new";
+    const DATAGPT_MODEL = "deepseek-v4-pro";
+    const DATAGPT_TIMEOUT_MS = 300000;
+    // Separate from the absolute ceiling above: the backend has been seen going completely silent
+    // mid-stream (e.g. after dumping a huge get_catalog result, never emitting another event, not
+    // even an error) — the "Retrieving data…" card then just sits there for the FULL 5 minutes
+    // before anything happens. A stream that produces no bytes at all for this long is almost
+    // certainly dead, so it gets treated the same as a dropped connection: aborted and retried once,
+    // instead of making the user wait out the full absolute timeout for something already stuck.
+    // Originally 60s — raised after confirming DataGPT can legitimately go well past a minute with
+    // nothing streamed (a heavy run_query/catalog step, no incremental output in between), which
+    // made 60s fire on perfectly healthy calls: killing a connection that was still genuinely
+    // working, then paying for the SAME slow step again from scratch on the retry, net ADDING
+    // delay rather than saving any. This should still catch the truly-dead case (confirmed never to
+    // recover even after a long wait) well before the 5-minute ceiling, without misfiring on normal
+    // slowness.
+    const DATAGPT_STALL_TIMEOUT_MS = 300000;
+    async function fetchFromDataGPT({ question, mcpApiKey, signal }) {
+        // One attempt = one POST + its SSE stream, its own request_id/timeout/abort-wiring. Split
+        // out so the outer function can silently retry once (see below) without duplicating any of
+        // this — a retry is just a second, independent attempt.
+        const attempt = async () => {
+            const out = { tables: [], finalText: "", costInr: 0, tools: [], error: null, aborted: false, networkError: false };
+            const { userId, enterpriseId } = getWalletIdentity();
+            const numericUserId = Number(userId);
+            const requestId = `xl${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+            const ac = new AbortController();
+            const relayAbort = () => ac.abort();
+            if (signal) { if (signal.aborted) ac.abort(); else signal.addEventListener("abort", relayAbort, { once: true }); }
+            const timer = setTimeout(() => ac.abort(), DATAGPT_TIMEOUT_MS);
+            // Reset on every chunk the stream actually delivers (see the read loop below) — fires
+            // only when bytes stop arriving altogether, never while a slow-but-live stream keeps
+            // trickling data in.
+            let stalled = false;
+            let stallTimer = setTimeout(() => { stalled = true; ac.abort(); }, DATAGPT_STALL_TIMEOUT_MS);
+            const bumpStallTimer = () => { clearTimeout(stallTimer); stallTimer = setTimeout(() => { stalled = true; ac.abort(); }, DATAGPT_STALL_TIMEOUT_MS); };
+            try {
+                const res = await fetch(DATAGPT_CHAT_URL, {
+                    method: "POST",
+                    headers: gapiHeaders({ "Content-Type": "application/json" }),
+                    signal: ac.signal,
+                    body: JSON.stringify({
+                        message: question,
+                        mcp_api_key: mcpApiKey,
+                        model: DATAGPT_MODEL,
+                        // The certification bypass account's id isn't numeric; 0 makes the server skip
+                        // wallet deduction rather than fail on it.
+                        user_id: Number.isFinite(numericUserId) ? numericUserId : 0,
+                        enterprise_id: enterpriseId || 0,
+                        is_free_member: false,
+                        request_id: requestId,
+                    }),
+                });
+                if (!res.ok || !res.body) {
+                    const text = await res.text().catch(() => "");
+                    out.error = `DataGPT ${res.status}: ${text.slice(0, 160)}`;
+                    return out;
+                }
+                const toolNameById = new Map();
+                const blocks = [];
+                const reader = res.body.getReader();
+                const decoder = new TextDecoder("utf-8");
+                let buf = "";
+                let finished = false;
+                while (!finished) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+                    bumpStallTimer();
+                    buf += decoder.decode(value, { stream: true });
+                    let idx;
+                    while (!finished && (idx = buf.indexOf("\n\n")) !== -1) {
+                        const frame = buf.slice(0, idx);
+                        buf = buf.slice(idx + 2);
+                        for (const line of frame.split(/\r?\n/)) {
+                            if (!line.startsWith("data:")) continue;
+                            let evt;
+                            try { evt = JSON.parse(line.slice(5).trim()); } catch { continue; }
+                            if (evt.type === "text_block_start") blocks.push("");
+                            else if (evt.type === "text_delta") {
+                                if (!blocks.length) blocks.push("");
+                                blocks[blocks.length - 1] += evt.text || "";
+                            }
+                            else if (evt.type === "tool_start") { toolNameById.set(evt.id, evt.name); out.tools.push(evt.name); }
+                            else if (evt.type === "tool_result") {
+                                if (toolNameById.get(evt.tool_use_id) === "run_query" && !evt.isError) out.tables.push(String(evt.text || ""));
+                            }
+                            else if (evt.type === "turn_cost") out.costInr = Number(evt.cost) || out.costInr;
+                            else if (evt.type === "error") out.error = String(evt.error || "unknown error");
+                            else if (evt.type === "done") { finished = true; break; }
+                        }
+                    }
+                }
+                if (finished) { try { await reader.cancel(); } catch (e) { /* server closes after done anyway */ } }
+                for (let i = blocks.length - 1; i >= 0; i--) { if (blocks[i].trim()) { out.finalText = blocks[i].trim(); break; } }
+                if (!out.error && !out.tables.length && !out.finalText) out.error = "DataGPT returned an empty response";
+            } catch (e) {
+                out.aborted = !!(signal && signal.aborted);
+                // Four distinct ways to land here, each needing its own message AND its own
+                // retry verdict: a user Stop (never retried — they asked for it); our absolute
+                // 5-minute ceiling (not retried — a second attempt would just as likely take
+                // another 5 minutes); a stall (no bytes at all for DATAGPT_STALL_TIMEOUT_MS —
+                // the backend going silent mid-turn, see DATAGPT_STALL_TIMEOUT_MS above); or some
+                // other connection-level drop (seen locally as the dev proxy's ECONNRESET;
+                // e.message here is whatever the runtime calls that, e.g. "Failed to fetch"). The
+                // latter two are worth one silent retry (see below) rather than spending one of
+                // the model's 3 calls on something that was never going to answer.
+                out.networkError = !out.aborted && (stalled || !ac.signal.aborted);
+                out.error = out.aborted ? "stopped" : stalled ? `DataGPT stream stalled (no data for ${DATAGPT_STALL_TIMEOUT_MS / 1000}s)` : ac.signal.aborted ? "DataGPT timed out" : String(e && e.message || e);
+                // The server keeps running after a client disconnect by design, so it has to be told.
+                fetch(DATAGPT_CHAT_URL, { method: "DELETE", headers: gapiHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ request_id: requestId }) }).catch(() => {});
+            } finally {
+                clearTimeout(timer);
+                clearTimeout(stallTimer);
+                if (signal) signal.removeEventListener("abort", relayAbort);
+            }
+            return out;
+        };
+        logLLMInput("website DataGPT", DATAGPT_MODEL, [{ role: "user", content: question }]);
+        let out = await attempt();
+        if (out.networkError && !(signal && signal.aborted)) {
+            console.log(`[Chat] ↻ DataGPT connection dropped mid-stream (${out.error}) — retrying once before reporting it`);
+            out = await attempt();
+        }
+        delete out.networkError;
+        return out;
+    }
+    // Cheap screening model, used twice before the main loop: once to pick the tool set
+    // (see the classifier in send()) and once to decide whether to ask a clarifying question.
+    // Both are one-line JSON verdicts, so the smallest capable model is the right call.
     const MCP_SERVER_URL = "https://api.goindiastocks.com/wallet/mcp";
     const MCP_KEY_URL = "https://api.goindiastocks.com/dbcatalog/get-mcp-key";
     const TEST_MCP_KEY = process.env.TEST_MCP_KEY || ""; // injected at build time from .env — see webpack.config.js
     let mcpAccess = null; // { mcp_api_key, flag } | null — fetched once per panel session
+    // The analyzed sheets (grid/analysis/dataTables) buildWorkbookSummary() already computed once
+    // at this turn's loop start, for the workbook index embedded in the system prompt — reused
+    // here so search_workbook's needed_periods verdict can call searchWorkbookSheets() directly
+    // instead of re-scanning the workbook, and so the same table/company tag + coverage verdict
+    // logic runs in exactly one place. Reset at the start of every send() turn.
+    let currentTurnSheets = [];
     async function ensureMcpAccess() {
         if (mcpAccess) return mcpAccess;
         try {
@@ -7635,207 +8430,53 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
         return mcpAccess;
     }
 
-    // ── MCP client (ported from gia-chat2.js's McpClient) ──
-    // MCP's Streamable HTTP transport (2025-03-26+), which REPLACED the old HTTP+SSE transport.
-    // The old one was two-legged: open a GET /sse stream, wait for an "endpoint" event naming a
-    // second URL to POST to, then match every reply as it came back DOWN that stream. Streamable
-    // HTTP collapses that to ONE endpoint — each JSON-RPC message is a POST to /mcp and its reply
-    // comes back in that same POST's response, either inline application/json or a short
-    // text/event-stream carrying just that reply.
-    //
-    // Three things fall away with it, all of which existed only to prop up the old transport:
-    //   - the SSE reader, the endpoint promise and the pending-request map (a reply is now simply
-    //     the response to its own request, so nothing needs correlating by id after the fact);
-    //   - the 20s JSON-RPC "ping" heartbeat, which existed because an IDLE stream was killed after
-    //     30-46s while the model was thinking between tool calls. There is no stream held open
-    //     between calls now, so there is nothing to keep alive;
-    //   - the 90s response timeout guarding against a silently-dropped stream.
-    //
-    // What carries over: `Mcp-Session-Id`, assigned by the server on the initialize response and
-    // echoed on every later request so the whole turn is one session; and `_streamDead`, kept
-    // because callMcpWithRetry reads it to decide whether to reconnect. It is now set when the
-    // server reports the session is gone (HTTP 404), which is this transport's equivalent of the
-    // stream having died. One client per chat turn — opened at the start of send(), closed in its
-    // finally block.
-    class McpClient {
-        constructor(url, signal) {
-            this.url = url;              // single Streamable HTTP endpoint (…/mcp?token=…)
-            this.signal = signal;
-            this.sessionId = null;       // captured from the initialize response header
-            this.protocolVersion = null; // negotiated; echoed back on every later request
-            this.serverInstructions = "";
-            this.id = 0;
-            this.tools = [];
-            this._closed = false;
-            this._streamDead = null;     // set on session loss so callMcpWithRetry reconnects
-        }
-        _nextId() { return ++this.id; }
-        // Kept so the call sites (open() then initialize()) do not have to change — the session
-        // is established by initialize() itself on this transport.
-        async open() { /* no-op */ }
-        _headers() {
-            const h = {
-                "Content-Type": "application/json",
-                // Streamable HTTP requires the client to accept BOTH reply shapes.
-                "Accept": "application/json, text/event-stream",
-            };
-            if (this.sessionId) h["Mcp-Session-Id"] = this.sessionId;
-            // Required on every request after version negotiation; without it a strict server is
-            // entitled to assume the oldest protocol version, or reject outright.
-            if (this.protocolVersion) h["MCP-Protocol-Version"] = this.protocolVersion;
-            return h;
-        }
-        // Pull the JSON-RPC object matching this request id out of a text/event-stream body.
-        // The body carries only this reply, but it may be preceded by comments or other events,
-        // so parse properly rather than assuming a single "data:" line.
-        _parseEventStream(text, id) {
-            let data = "";
-            const flush = () => {
-                if (!data) return null;
-                let obj = null;
-                try { obj = JSON.parse(data); } catch { obj = null; }
-                data = "";
-                return (obj && obj.id === id) ? obj : null;
-            };
-            for (const raw of text.split(/\r?\n/)) {
-                const line = raw.replace(/\r$/, "");
-                if (line === "") { const m = flush(); if (m) return m; continue; }
-                if (line.startsWith(":")) continue;
-                if (line.startsWith("data:")) {
-                    const chunk = line.slice(5).replace(/^ /, "");
-                    data = data ? `${data}\n${chunk}` : chunk;
-                }
-            }
-            return flush();
-        }
-        async _rpc(method, params) {
-            if (this._streamDead) throw new Error(`MCP session closed: ${this._streamDead}`);
-            const id = this._nextId();
-            const res = await fetch(this.url, {
-                method: "POST",
-                headers: this._headers(),
-                body: JSON.stringify({ jsonrpc: "2.0", id, method, params: params ?? {} }),
-                signal: this.signal,
-            });
-            // The server assigns the session on the initialize reply; capture it before anything
-            // can throw, so even a failed call leaves the session usable.
-            const sid = res.headers.get("mcp-session-id");
-            if (sid) this.sessionId = sid;
-            // 404 means the server has forgotten this session (expired or evicted). That is not a
-            // tool error — it is the session being gone — so mark it dead and let callMcpWithRetry
-            // build a fresh client rather than retrying into a session that no longer exists.
-            if (res.status === 404 && this.sessionId) {
-                this._streamDead = "session expired (HTTP 404)";
-                throw new Error(`MCP ${method}: session expired`);
-            }
-            if (!res.ok && res.status !== 202) {
-                const text = await res.text().catch(() => "");
-                throw new Error(`MCP ${method} POST HTTP ${res.status}: ${text.slice(0, 300)}`);
-            }
-            const ctype = (res.headers.get("content-type") || "").toLowerCase();
-            let payload = null;
-            if (ctype.includes("application/json")) {
-                payload = await res.json().catch(() => null);
-            } else if (ctype.includes("text/event-stream")) {
-                payload = this._parseEventStream(await res.text(), id);
-            } else {
-                const text = await res.text().catch(() => "");
-                if (text) { try { payload = JSON.parse(text); } catch { payload = null; } }
-            }
-            if (!payload) throw new Error(`MCP ${method}: no JSON-RPC response in reply`);
-            if (payload.error) throw new Error(`MCP ${method} error: ${payload.error.message ?? JSON.stringify(payload.error)}`);
-            return payload.result;
-        }
-        async _notify(method, params) {
-            try {
-                await fetch(this.url, {
-                    method: "POST",
-                    headers: this._headers(),
-                    body: JSON.stringify({ jsonrpc: "2.0", method, params: params ?? {} }),
-                    signal: this.signal,
-                });
-            } catch { /* best-effort */ }
-        }
-        async initialize() {
-            const REQUESTED = "2025-06-18";
-            const result = await this._rpc("initialize", { protocolVersion: REQUESTED, capabilities: {}, clientInfo: { name: "goindia-excel-addin", version: "1.0.0" } });
-            // Use what the SERVER negotiated, not what we asked for — it is entitled to answer with
-            // an older version, and every later request has to name the agreed one.
-            this.protocolVersion = String(result?.protocolVersion || REQUESTED);
-            // The server ships a ~5,000-character operating manual in its initialize response, and
-            // this used to be thrown away with the rest of the result. It is not boilerplate: it
-            // carries the intended tool workflow (get_catalog -> get_schema -> run_query), a hard
-            // "2-3 attempts total" retry cap, the Indian-financial-year quarter mapping, the
-            // fincode lookup rules, and — the expensive one — that EVERY run_query runs in a FRESH
-            // Python environment, so nothing from a previous call still exists. A model that has
-            // not been told these things reinvents the workflow every turn, references variables that
-            // are already gone, and burns round trips recovering. Passing it through is the single
-            // biggest lever on how many tool calls a question costs.
-            this.serverInstructions = String(result?.instructions || "");
-            await this._notify("notifications/initialized");
-            return result;
-        }
-        async listTools() {
-            const result = await this._rpc("tools/list", {});
-            this.tools = (result?.tools ?? []).map((t) => ({ name: t.name, description: t.description ?? "", input_schema: t.inputSchema ?? t.input_schema ?? { type: "object", properties: {} } }));
-            return this.tools;
-        }
-        async callTool(name, args) {
-            const result = await this._rpc("tools/call", { name, arguments: args ?? {} });
-            const raw = result?.content ?? "";
-            const text = typeof raw === "string" ? raw : Array.isArray(raw) ? raw.map((c) => (typeof c === "string" ? c : (c?.text ?? ""))).join("") : JSON.stringify(raw);
-            const isError = !!result?.isError || text.includes("Query execution failed") || text.includes("DatabaseError") || text.includes("Error:") || text.startsWith("❌");
-            return { text, isError };
-        }
-        // Best-effort session teardown: DELETE with the session header frees it server-side
-        // instead of leaking one session per chat turn.
-        async close() {
-            this._closed = true;
-            if (!this.sessionId) return;
-            try { await fetch(this.url, { method: "DELETE", headers: this._headers(), signal: this.signal }); }
-            catch { /* already gone, or the turn was aborted */ }
-        }
-    }
-    const toOpenAITools = (mcpTools) => mcpTools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.input_schema } }));
+    // ── MCP client — REMOVED (single-loop, two-stage refactor) ──
+    // The model no longer calls GoIndia's raw MCP tools (search_company, get_catalog, get_schema,
+    // run_query, …) directly at all; every data fetch now goes through ask_website_datagpt ->
+    // fetchFromDataGPT(), which calls the website's own DataGPT as a stateless service instead of
+    // re-implementing its research loop here. ensureMcpAccess() stays — fetchFromDataGPT still
+    // needs its mcp_api_key for auth against the website — but the McpClient class, toOpenAITools,
+    // callMcpWithRetry and the eager mcpConnectPromise that drove the old direct-tool-calling path
+    // are gone with it.
 
     // ── Excel-side tools ──
-    // Ported from sbroenne/pi-for-excel (src/tools/*.ts, src/excel/helpers.ts) — a real Office.js
-    // add-in that implements this same tool set. Adapted to plain JS (this file has no TypeScript/
-    // TypeBox) and this file's existing style: OpenAI function-calling schemas in EXCEL_TOOLS,
-    // dispatched by callTool(name, args), with mutating tools managing their own confirm/running
-    // card lifecycle exactly like the old write_excel_sheet did (see the dispatch split in send()
-    // below) rather than the generic per-tool card the read-only tools get there.
+    // Ported from sbroenne/pi-for-excel (src/tools/*.ts, src/excel/helpers.ts), adapted to plain
+    // JS and this file's style: OpenAI function-calling schemas in EXCEL_TOOLS, dispatched by callTool(name, args).
     const TEXT_CAP = 3500;
-    // Per-tool caps for MCP results. A blanket 3,500 was catastrophic for get_catalog: it returns
-    // ~52,000 chars listing 20 data domains, so 3,500 cut it off inside the SECOND domain and hid
-    // annual_financials (char 3,813) — the exact table most questions need — along with earnings
-    // calls, broker reports, shareholding and 16 others. The model was told to "pick the relevant
-    // table" while seeing 6.7% of the menu, so it burned round trips groping through the one
-    // registry it could still see. Paying ~13k tokens once beats five wasted turns that each
-    // re-send the whole conversation.
-    const MCP_RESULT_CAPS = { get_catalog: 60000, get_schema: 40000 };
-    const mcpCapFor = (name) => MCP_RESULT_CAPS[name] || 8000;
 
     // ── Tool-call debug log ──
-    // Diagnosing why a question cost 15 turns has meant reading cost lines and guessing, because
-    // the one thing that actually explains it — what each tool was CALLED WITH and what it
-    // answered — was never recorded anywhere. The chat cards show a tick or a cross and nothing
-    // else, and a failing tool's error text is exactly what gets lost.
-    //
-    // A task pane cannot write to disk directly, so this accumulates in memory (mirrored to
-    // localStorage so a reload or a crash does not lose it) and saveChatLog() hands it over as a
-    // real file. Errors and args are kept in FULL — a truncated error is precisely the useless
-    // artefact this exists to replace — while successful payloads are previewed, since a 52,000
-    // character catalog dump helps nobody and would blow the storage quota on its own.
+    // Records what each tool was called with and what it returned, since the chat cards show only
+    // a tick/cross. Accumulates in memory (mirrored to localStorage) and saveChatLog() exports it;
+    // errors/args are kept in full, successful payloads previewed to avoid blowing storage quota.
     const DEBUG_LOG_KEY = "goia_chatDebugLog";
     const DEBUG_LOG_MAX = 500;
     const DEBUG_OK_PREVIEW = 1200;
     let debugLog = [];
     try { debugLog = JSON.parse(localStorage.getItem(DEBUG_LOG_KEY) || "[]"); } catch (e) { debugLog = []; }
+    // Testing-only, opt-in via "/log auto on" — OFF by default so a real user's session never
+    // triggers a surprise download. Every entry gets stamped with the turn it belongs to (see
+    // debugAppend below); when a turn finishes, send() saves JUST that turn's entries as their own
+    // file instead of the one big growing log /log itself exports.
+    const DEBUG_AUTOSAVE_KEY = "goia_chatDebugAutoSave";
+    let debugAutoSave = false;
+    try { debugAutoSave = localStorage.getItem(DEBUG_AUTOSAVE_KEY) === "1"; } catch (e) { debugAutoSave = false; }
+    let currentDebugTurn = 0;
+    // Bounded three ways: at most DEBUG_LOG_MAX entries, each entry's big fields clipped (a write_cells
+    // call carries whole tables in its args, and a failure keeps its full error text), and the whole
+    // serialised log at most DEBUG_LOG_MAX_BYTES — over that the older half goes. It is rewritten on
+    // every append, so an unbounded log would also make every tool call slower.
+    const DEBUG_LOG_MAX_BYTES = 300000;
+    const debugClip = (v, n) => { const t = typeof v === "string" ? v : (v == null ? "" : String(v)); return t.length > n ? t.slice(0, n) + `… [+${t.length - n} chars]` : t; };
     const debugAppend = (rec) => {
-        debugLog.push({ t: new Date().toISOString(), ...rec });
+        // turn first so an explicit one in rec (none currently pass one) could still win.
+        const entry = { t: new Date().toISOString(), turn: currentDebugTurn, ...rec };
+        if (entry.args != null) entry.args = debugClip(entry.args, 2000);
+        if (entry.result != null) entry.result = debugClip(entry.result, 6000);
+        debugLog.push(entry);
         if (debugLog.length > DEBUG_LOG_MAX) debugLog = debugLog.slice(-DEBUG_LOG_MAX);
-        try { localStorage.setItem(DEBUG_LOG_KEY, JSON.stringify(debugLog)); }
+        let json = JSON.stringify(debugLog);
+        while (json.length > DEBUG_LOG_MAX_BYTES && debugLog.length > 1) { debugLog = debugLog.slice(Math.ceil(debugLog.length / 2)); json = JSON.stringify(debugLog); }
+        try { localStorage.setItem(DEBUG_LOG_KEY, json); }
         catch (e) {
             // Quota blown by a few large payloads — halve the history and retry once rather than
             // silently stopping. Losing the oldest half beats losing all future logging.
@@ -7843,9 +8484,11 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
             try { localStorage.setItem(DEBUG_LOG_KEY, JSON.stringify(debugLog)); } catch (e2) { /* give up on persistence, keep in memory */ }
         }
     };
-    const debugFormat = () => {
-        const out = [`DataGPT debug log — ${debugLog.length} entries — saved ${new Date().toISOString()}`, "=".repeat(78), ""];
-        for (const r of debugLog) {
+    // Shared by the full-session export (debugFormat) and the per-turn one (saveTurnLog) below —
+    // one entry-rendering rule, not two copies that could drift.
+    const debugFormatEntries = (entries) => {
+        const out = [];
+        for (const r of entries) {
             if (r.kind === "question") { out.push("", "#".repeat(78), `# QUESTION @ ${r.t}`, `# ${r.question}`, "#".repeat(78)); continue; }
             if (r.kind === "phase") { out.push("", `--- phase "${r.phase}" | ${r.toolCount} tools ---`); continue; }
             if (r.kind === "turn") { out.push(`  [turn ${r.iter}] cost=$${r.cost} tokens=${r.tokens} calls=${r.calls} finish=${r.finish ?? "?"} content=${r.contentChars ?? "?"}ch`); continue; }
@@ -7859,26 +8502,40 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
         }
         return out.join("\n");
     };
-    const saveChatLog = () => {
-        const text = debugFormat();
+    const debugFormat = () => [`DataGPT debug log — ${debugLog.length} entries — saved ${new Date().toISOString()}`, "=".repeat(78), "", debugFormatEntries(debugLog)].join("\n");
+    // Triggers a browser download of `text`; falls back to printing it if the host blocks
+    // page-initiated downloads (some Office hosts do) — still recoverable by copying from DevTools.
+    const saveDebugText = (text, filenamePrefix) => {
         try {
             const url = URL.createObjectURL(new Blob([text], { type: "text/plain;charset=utf-8" }));
             const a = document.createElement("a");
             a.href = url;
-            a.download = `datagpt-log-${new Date().toISOString().replace(/[:.]/g, "-")}.txt`;
+            a.download = `${filenamePrefix}-${new Date().toISOString().replace(/[:.]/g, "-")}.txt`;
             document.body.appendChild(a); a.click(); a.remove();
             setTimeout(() => URL.revokeObjectURL(url), 5000);
-            console.log(`[Chat] 💾 saved ${debugLog.length} entries`);
+            console.log(`[Chat] 💾 saved ${filenamePrefix}`);
         } catch (e) {
-            // Some Office hosts block a page-initiated download. Printing it is a poor second but
-            // still recoverable — the text can be copied straight out of the console.
             console.warn("[Chat] download blocked, printing instead:", e);
             console.log(text);
         }
+    };
+    const saveChatLog = () => {
+        const text = debugFormat();
+        saveDebugText(text, "datagpt-log");
         return text;
     };
     window.saveChatLog = saveChatLog;
     window.clearChatLog = () => { debugLog = []; try { localStorage.removeItem(DEBUG_LOG_KEY); } catch (e) { /* nothing to clear */ } console.log("[Chat] debug log cleared"); };
+    // Testing aid (see debugAutoSave above): one file per turn instead of the one big growing log,
+    // so a batch of test questions comes out as a directory of individually-reviewable traces
+    // rather than one file that has to be re-split by hand. No-ops on a turn with nothing logged
+    // (e.g. the clarifier ended it before the main loop ever ran).
+    const saveTurnLog = (turnNum) => {
+        const entries = debugLog.filter(e => e.turn === turnNum);
+        if (!entries.length) return;
+        const text = [`DataGPT turn ${turnNum} debug log — saved ${new Date().toISOString()}`, "=".repeat(78), "", debugFormatEntries(entries)].join("\n");
+        saveDebugText(text, `datagpt-turn-${turnNum}`);
+    };
     const capText = (s, n = TEXT_CAP) => {
         s = (s || "").trim();
         return s.length > n ? s.slice(0, n) + "\n…[truncated]" : s;
@@ -7988,15 +8645,17 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
         { type: "function", function: { name: "audit_workbook", description: "Proactively check whether the workbook/model is actually healthy — not just after a specific edit. Recalculates, then scans for formula errors AND for any \"check\"/reconciliation row (e.g. a balance check) whose value isn't close to zero the way it should be. Use this for a request like \"is my model healthy?\" or \"does this balance?\", not just reactively after write_cells.", parameters: { type: "object", properties: { sheet_name: { type: "string", description: "Optional — scope the audit to just this sheet. Omit to audit every visible sheet." }, tolerance: { type: "number", description: "How far from zero a check-row value can be before it's flagged. Default 0.01 (covers ordinary floating-point rounding)." } } } } },
         { type: "function", function: { name: "undo_last_change", description: "Revert the most recent write_cells or fill_formula change made this session, restoring exactly what was there before. Regular Ctrl+Z does not reliably undo programmatic add-in writes, so this is the only dependable way to back out a bad edit.", parameters: { type: "object", properties: {} } } },
         { type: "function", function: { name: "trace_dependencies", description: "Trace formula lineage for a single cell — precedents (what feeds it, upstream) or dependents (what it feeds, downstream). Use this to explain WHY a value is what it is by tracing the real chain of cells behind it, instead of reading one formula at a time and guessing.", parameters: { type: "object", properties: { cell: { type: "string", description: "Cell to trace, e.g. \"D10\" or \"Sheet2!F5\". Must be a single cell, not a range." }, mode: { type: "string", enum: ["precedents", "dependents"], description: "Trace direction. Default precedents." }, depth: { type: "number", description: "How many levels to trace. Default 2, max 5." } }, required: ["cell"] } } },
-        { type: "function", function: { name: "search_workbook", description: "Search for text/values (or formula text) across every visible sheet in the workbook. Use this to find where something is calculated or referenced — e.g. \"where is EBITDA calculated?\" — without reading every sheet one by one.", parameters: { type: "object", properties: { query: { type: "string", description: "Search term." }, search_formulas: { type: "boolean", description: "Search formula text instead of displayed values. Useful for finding cross-sheet references." }, use_regex: { type: "boolean", description: "Treat query as a case-insensitive regular expression." }, sheet_name: { type: "string", description: "Restrict the search to this sheet. Omit to search every visible sheet." }, max_results: { type: "number", description: "Maximum matches to return. Default 20." } }, required: ["query"] } } },
-        { type: "function", function: { name: "format_cells", description: "Apply VISUAL formatting to a range — font (bold/italic/underline/color/size/name), fill color, number format, alignment, borders, column width/row height, or merge. Does NOT change cell values or formulas — use write_cells for that.", parameters: { type: "object", properties: { range: { type: "string", description: "Range to format, e.g. \"A1:D1\" or \"Sheet2!B3:B20\". For several non-contiguous blocks that all need the SAME formatting, pass them comma-separated in ONE call — e.g. \"A9:D9,A13:D13,A17:D17\" — rather than one format_cells call per block; all comma-separated areas get the identical formatting given below." }, bold: { type: "boolean" }, italic: { type: "boolean" }, underline: { type: "boolean" }, font_color: { type: "string", description: "Hex color, e.g. \"#0000FF\"." }, font_size: { type: "number" }, font_name: { type: "string" }, fill_color: { type: "string", description: "Hex background color, e.g. \"#FFFF00\"." }, number_format: { type: "string", description: "A preset (\"currency\", \"percent\", \"number\", \"integer\", \"text\") or a raw Excel number-format string, e.g. \"#,##0.00\". For Indian rupee figures prefer lakh/crore grouping — plain \"#,##0\" shows 778716 as 778,716 where an Indian reader expects 7,78,716; use [>=10000000]##\\,##\\,##\\,##0;[>=100000]##\\,##\\,##0;##,##0 instead." }, horizontal_alignment: { type: "string", enum: ["Left", "Center", "Right", "General"] }, vertical_alignment: { type: "string", enum: ["Top", "Center", "Bottom"] }, wrap_text: { type: "boolean" }, borders: { type: "string", enum: ["thin", "medium", "thick", "none"], description: "Border weight applied to all four edges plus inside gridlines." }, border_color: { type: "string", description: "Hex color for borders set via `borders`. Default black." }, column_width: { type: "number", description: "Column width in points." }, row_height: { type: "number", description: "Row height in points." }, merge: { type: "boolean", description: "Merge (true) or unmerge (false) the range." } }, required: ["range"] } } },
+        { type: "function", function: { name: "search_workbook", description: "Search LIVE cell values/formulas across every visible sheet — a fresh Excel read, not the cached index. Use search_index first; reach for this only for a formula-text search, or something you suspect isn't in the index at all.", parameters: { type: "object", properties: { query: { type: "string", description: "Search term." }, search_formulas: { type: "boolean", description: "Search formula text instead of displayed values. Useful for finding cross-sheet references." }, use_regex: { type: "boolean", description: "Treat query as a case-insensitive regular expression." }, sheet_name: { type: "string", description: "Restrict the search to this sheet. Omit to search every visible sheet." }, max_results: { type: "number", description: "Maximum matches to return. Default 20." } }, required: ["query"] } } },
+        { type: "function", function: { name: "search_index", description: "Search the workbook's index instantly — no need to read the sheet first. Use this before read_range to find where something is. If you list the periods you need (e.g. \"FY2025\", \"Q3 FY26\"), each result also says whether it already has all of them, or names what's missing.\n\nThis searches the snapshot taken at the start of this question — not anything you've written yourself this turn. To check your own edit, use read_range or search_workbook instead.", parameters: { type: "object", properties: { terms: { type: "array", items: { type: "string" }, description: "Search several things in one call, e.g. [\"gross revenue\", \"EBITDA margin\"]." }, needed_periods: { type: "array", items: { type: "string" }, description: "Periods you need (e.g. \"FY2025\", \"Q3 FY26\"). If given, each hit also says whether it already covers them, or names what's missing." } }, required: ["terms"] } } },
+        { type: "function", function: { name: "format_cells", description: "Apply VISUAL formatting to a range — font (bold/italic/underline/color/size/name), fill color, number format, alignment, borders, column width/row height, or merge. Does NOT change cell values or formulas — use write_cells for that.", parameters: { type: "object", properties: { range: { type: "string", description: "Range to format, e.g. \"A1:D1\" or \"Sheet2!B3:B20\". For several non-contiguous blocks that all need the SAME formatting, pass them comma-separated in ONE call — e.g. \"A9:D9,A13:D13,A17:D17\" — rather than one format_cells call per block; all comma-separated areas get the identical formatting given below." }, bold: { type: "boolean" }, italic: { type: "boolean" }, underline: { type: "boolean" }, font_color: { type: "string", description: "Hex color, e.g. \"#0000FF\"." }, font_size: { type: "number" }, font_name: { type: "string" }, fill_color: { type: "string", description: "Hex background color, e.g. \"#FFFF00\"." }, number_format: { type: "string", description: "A preset (\"currency\", \"percent\", \"number\", \"integer\", \"text\") or a raw Excel number-format string, e.g. \"#,##0.00\". For Indian rupee figures prefer lakh/crore grouping — plain \"#,##0\" shows 778716 as 778,716 where an Indian reader expects 7,78,716; use [>=10000000]##\\,##\\,##\\,##0;[>=100000]##\\,##\\,##0;##,##0 instead." }, horizontal_alignment: { type: "string", enum: ["Left", "Center", "Right", "General"] }, vertical_alignment: { type: "string", enum: ["Top", "Center", "Bottom"] }, wrap_text: { type: "boolean" }, borders: { type: "string", enum: ["thin", "medium", "thick", "none"], description: "Border weight applied to all four edges plus inside gridlines." }, border_color: { type: "string", description: "Hex color for borders set via `borders`. Default black." }, column_width: { type: "number", description: "Column width in POINTS — a different, much bigger scale than the 'characters' unit Excel's own Format > Column Width dialog shows, and bigger than it sounds for a width. Excel's own default column is about 48pt. As a guide: a plain numeric/financial figure column usually needs 60-90pt; a short label column 100-150pt; a long row-label column (e.g. a P&L line item name) 180-280pt; a free-text/notes column 250-400pt with wrap_text:true. Anything under ~40pt will almost always truncate ordinary content. If you're not setting several columns to a deliberately IDENTICAL width, prefer the autofit tool over guessing a number here — it sizes each column to its own actual content." }, row_height: { type: "number", description: "Row height in points. Excel's own default row is about 15pt (one line of 11pt text) — a title/header band is often 20-28pt. After turning on wrap_text for multi-line content, prefer the autofit tool (rows:true) over guessing a height, since it fits however many lines the wrap actually produced." }, merge: { type: "boolean", description: "Merge (true) or unmerge (false) the range." } }, required: ["range"] } } },
         { type: "function", function: { name: "create_chart", description: "Create a chart from a data range — the core way to turn a comparison table into a visual. Use this whenever the user asks to \"chart\", \"graph\", \"visualize\", or \"plot\" something.", parameters: { type: "object", properties: { source_range: { type: "string", description: "Data range for the chart, e.g. \"A1:D12\" or \"Sheet1!A1:D12\". ALWAYS include the header row and the label column — that is the ONLY way each series gets a name (Revenue, PAT, ...) instead of \"Series1\". A range starting on a data row produces an unlabelled chart." }, chart_type: { type: "string", enum: ["column", "column_stacked", "bar", "bar_stacked", "line", "line_markers", "area", "area_stacked", "pie", "doughnut", "scatter", "radar"], description: "Chart type. Default column." }, title: { type: "string", description: "Chart title." }, x_axis_title: { type: "string" }, y_axis_title: { type: "string" }, legend_position: { type: "string", enum: ["right", "left", "top", "bottom", "none"] }, position: { type: "string", description: "Optional top-left cell for the chart, e.g. \"J2\". Omit to have charts auto-placed in a column below the data without overlapping." }, secondary_series: { type: "array", items: { type: "string" }, description: "Series names (matching the header cells in source_range) to plot on a SECONDARY axis. Use when one series is orders of magnitude smaller than another — revenue in the tens of thousands alongside PAT in the hundreds, or a margin % beside absolute figures. On a column/bar chart these series are automatically drawn as a LINE, because a secondary-axis bar would otherwise render on top of the primary bars and hide them; you do not need to ask for that." }, secondary_chart_type: { type: "string", enum: ["column", "bar", "line", "line_markers", "area", "scatter"], description: "Override how the secondary series is drawn. Defaults to line_markers on a column/bar chart." }, secondary_axis_title: { type: "string", description: "Axis title for the secondary axis." } }, required: ["source_range"] } } },
         { type: "function", function: { name: "conditional_format", description: "Add or clear conditional formatting rules — highlight cells that meet a condition (e.g. \"highlight negative numbers in red\"), or apply a color scale/gradient across a range (e.g. \"color-scale this range\").", parameters: { type: "object", properties: { action: { type: "string", enum: ["add", "clear"], description: "\"add\" a rule, or \"clear\" every rule in the range." }, range: { type: "string", description: "Target range, e.g. \"A1:D10\" or \"Sheet2!B2:B50\"." }, type: { type: "string", enum: ["cell_value", "formula", "color_scale"], description: "Rule type for action=\"add\"." }, operator: { type: "string", enum: ["Between", "NotBetween", "EqualTo", "NotEqualTo", "GreaterThan", "LessThan", "GreaterThanOrEqual", "LessThanOrEqual"], description: "Required for type=\"cell_value\"." }, value: { description: "Comparison value for type=\"cell_value\", e.g. 0 or \"=$B$2\"." }, value2: { description: "Second value, for Between/NotBetween." }, formula: { type: "string", description: "Custom formula for type=\"formula\", e.g. \"=A1<0\"." }, fill_color: { type: "string", description: "Hex fill color applied when the rule matches (cell_value/formula rules)." }, font_color: { type: "string" }, bold: { type: "boolean" }, italic: { type: "boolean" }, underline: { type: "boolean" }, min_color: { type: "string", description: "Color-scale low-end hex color. Default red." }, mid_color: { type: "string", description: "Color-scale midpoint hex color. Default yellow." }, max_color: { type: "string", description: "Color-scale high-end hex color. Default green." } }, required: ["action", "range"] } } },
         { type: "function", function: { name: "modify_structure", description: "Insert/delete rows or columns, rename/delete/hide/unhide a sheet, freeze panes, or delete charts. Deleting anything asks for confirmation first (unless auto-apply is on) since it can destroy data — inserting, renaming, hiding, and unhiding do not, since nothing is lost.", parameters: { type: "object", properties: { action: { type: "string", enum: ["insert_row", "delete_row", "insert_column", "delete_column", "rename_sheet", "delete_sheet", "hide_sheet", "unhide_sheet", "freeze_rows", "freeze_columns", "unfreeze", "delete_chart", "delete_all_charts"] }, sheet: { type: "string", description: "Target sheet name. Required for sheet actions; for row/column actions, omit to use the active sheet." }, position: { type: "number", description: "1-indexed row number (insert_row/delete_row) or 1-indexed column number (insert_column/delete_column)." }, count: { type: "number", description: "Number of rows/columns to insert or delete, or to freeze. Default 1." }, chart_name: { type: "string", description: "Chart name, for delete_chart. get_workbook_overview lists the charts on a sheet." }, new_name: { type: "string", description: "New name, for rename_sheet." } }, required: ["action"] } } },
         { type: "function", function: { name: "named_ranges", description: "Manage named ranges — lets you (and the AI) refer to \"WACC\" instead of a guessed cell address. Deleting a name asks for confirmation first since any formula referencing it by name would break.", parameters: { type: "object", properties: { action: { type: "string", enum: ["add", "update", "delete", "list"] }, name: { type: "string", description: "The named range's name. Required for add/update/delete." }, reference: { type: "string", description: "Cell/range reference for add/update, e.g. \"Sheet1!$B$8\" or \"='Assumptions'!$B$8\"." }, scope: { type: "string", description: "Optional sheet name to scope the name to that sheet instead of the whole workbook." } }, required: ["action"] } } },
-        { type: "function", function: { name: "autofit", description: "Auto-fit column widths and/or row heights to their content — use after writing a new sheet/table where columns are too narrow to read.", parameters: { type: "object", properties: { range: { type: "string", description: "Range/sheet to auto-fit, e.g. \"A1:F1\" or \"Sheet2!A:F\". Omit to auto-fit the active sheet's whole used range." }, columns: { type: "boolean", description: "Auto-fit column widths. Default true." }, rows: { type: "boolean", description: "Auto-fit row heights. Default true." } } } } },
+        { type: "function", function: { name: "autofit", description: "Auto-fit column widths and/or row heights to their ACTUAL content — the reliable way to size columns, since Excel computes the width itself instead of you guessing a column_width number in format_cells (a common, easy mistake: that property's unit is POINTS, not the 'characters' unit Excel's own column-width dialog shows, so a guessed number is often far too small and truncates the numbers). Call this after writing a new sheet or table, and prefer it over format_cells' column_width/row_height unless you deliberately need several columns at one IDENTICAL width.", parameters: { type: "object", properties: { range: { type: "string", description: "Range/sheet to auto-fit, e.g. \"A1:F1\" or \"Sheet2!A:F\". Omit to auto-fit the active sheet's whole used range." }, columns: { type: "boolean", description: "Auto-fit column widths. Default true." }, rows: { type: "boolean", description: "Auto-fit row heights. Default true." } } } } },
         { type: "function", function: { name: "tables", description: "Convert a range into a proper Excel Table (sortable/filterable, with structured references) — use when the user asks to make a range \"a proper table,\" or wants to sort a range that already is one. \"delete\" only removes the Table wrapper (filters/styling) — the underlying data is left exactly as-is, same as Excel's own \"Convert to Range.\"", parameters: { type: "object", properties: { action: { type: "string", enum: ["create", "sort", "rename", "delete"] }, range: { type: "string", description: "Source range for action=\"create\", e.g. \"A1:E20\" or \"Sheet1!A1:E20\"." }, has_headers: { type: "boolean", description: "Whether the first row is a header row. Default true." }, name: { type: "string", description: "Table name — assigned name for create, or the target table's current name for sort/rename/delete." }, new_name: { type: "string", description: "New name, for action=\"rename\"." }, sort_column: { type: "number", description: "0-indexed column within the table to sort by, for action=\"sort\". Default 0." }, sort_ascending: { type: "boolean", description: "Sort ascending. Default true." } }, required: ["action"] } } },
         { type: "function", function: { name: "comments", description: "Add, reply to, resolve/reopen, delete, or list cell comments — good for leaving a note explaining WHY a change was made, pairing with undo_last_change's audit trail.", parameters: { type: "object", properties: { action: { type: "string", enum: ["add", "reply", "resolve", "reopen", "delete", "list"] }, cell: { type: "string", description: "Single cell the comment is attached to, e.g. \"B2\" or \"Sheet1!B2\". Required for add/reply/resolve/reopen/delete." }, content: { type: "string", description: "Comment/reply text. Required for add/reply." }, sheet: { type: "string", description: "Sheet to list comments from, for action=\"list\". Omit to use the active sheet." } }, required: ["action"] } } },
+        { type: "function", function: { name: "review_formatting", description: "Check the ACTUAL formatting Excel applied to a range you just wrote — row-by-row fill color and bold consistency, plus each column's width against its own longest content. Use this right after creating a new sheet or a multi-table layout, before considering the task done: it catches things like a title band that didn't apply to every table, or a column left too narrow to read. If something looks wrong, fix it (autofit for a width/height problem, format_cells for a banding/color problem) and check again. Keep the range to what you just wrote (under 2000 cells), not a whole sheet.", parameters: { type: "object", properties: { range: { type: "string", description: "Range to review, e.g. \"A1:H20\" or \"Sheet2!A1:H20\"." } }, required: ["range"] } } },
     ];
     // Not an Excel tool, but it lives in this registry so it inherits the same dispatch, card
     // handling and per-phase allowlist. It is offered in the RESEARCH phase (see the phase wiring),
@@ -8022,6 +8681,758 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
     // the same way the old write_excel_sheet did via maybeConfirmAndWrite — everything else in
     // EXCEL_TOOL_NAMES gets the generic "Running X…" wrapper send() applies itself.
     const EXCEL_SELF_MANAGED_UI_TOOLS = new Set(["create_sheet", "write_cells", "fill_formula", "undo_last_change", "modify_structure", "named_ranges", "confirm_companies"]);
+
+    // ── The two DataGPT-loop-specific tools (single-loop, two-stage architecture) ──
+    // Neither is dispatched through callTool()/EXCEL_TOOL_NAMES — both are handled directly inside
+    // send()'s own runOne(), since both need turn-local state (abortController, the stage flag)
+    // that callTool's outer-scope functions don't have closure access to.
+    const ASK_WEBSITE_DATAGPT_TOOL = { type: "function", function: { name: "ask_website_datagpt", description: "Ask GoIndiaStocks' research service for data not already in the workbook. Say what you need in plain words: the company by name, the metric, and the exact period (e.g. \"FY2024 and FY2025\", not \"last 2 years\").", parameters: { type: "object", properties: { data_request: { type: "string", description: "A self-contained request the research service can act on with no other context — company name(s), metric(s), exact period(s)." } }, required: ["data_request"] } } };
+    const FINDINGS_READY_TOOL = { type: "function", function: { name: "findings_ready", description: "Call this once you have everything needed to answer the question. You can then write to the sheet.", parameters: { type: "object", properties: { summary: { type: "string", description: "Optional — one line on what you found, for later reference." } } } } };
+    // Structurally absent until findings_ready fires — the write tools are never OFFERED during
+    // gather, not merely withheld by prompt instruction, so the model cannot even attempt one.
+    const GATHER_TOOLS = EXCEL_TOOLS.filter(t => ["get_workbook_overview", "read_range", "search_index", "search_workbook", "confirm_companies"].includes(t.function.name)).concat([ASK_WEBSITE_DATAGPT_TOOL, FINDINGS_READY_TOOL]);
+
+    // ── Whole-workbook skeleton (input to the planner and to the Excel loop) ──
+    // Describes everything in the open workbook as TEXT only — numbers are left out on purpose:
+    // they're ~88% of non-empty cells and previously ate the whole budget, starving sheets that
+    // held the actual answer. Text cells, period headers (incl. numeric-looking ones like date
+    // serials or bare years), and per-row coverage tags like "[FY20–FY26]" survive without them;
+    // "-", "NA" and blanks count as empty. Rebuilt fresh every question (never carried across
+    // turns, since the workbook can change) and bounded per sheet by cell count and char budget.
+    const SKEL_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    const SKEL_PERIOD_TEXT = [
+        /^(?:FY|CY)\s?\d{2}(?:\d{2})?\s?[EPA]?$/i,                                        // FY24, FY2024, FY26E
+        /^Q[1-4]\s?(?:FY|CY)?\s?['-]?\d{2}(?:\d{2})?\s?[EPA]?$/i,                        // Q1 FY26, Q1FY26, Q3-24
+        /^H[12]\s?(?:FY|CY)\s?\d{2}(?:\d{2})?\s?[EPA]?$/i,                                // H1 FY26
+        /^(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*[\s\-'/]*\d{2}(?:\d{2})?$/i, // Sep-20, Mar 2025
+        /^(?:19|20)\d{2}(?:\s?[-/]\s?\d{2,4})?\s?[EPA]?$/i,                               // 2024, 2023-24, 2024E
+        /^(?:LTM|TTM)$/i,
+    ];
+    const skelIsPeriodText = (v) => typeof v === "string" && v.trim().length <= 14 && SKEL_PERIOD_TEXT.some(re => re.test(v.trim()));
+    const skelIsPlaceholder = (v) => typeof v === "string" && /^\s*(?:-+|—|–|na|n\/a|nan|null|nil)?\s*$/i.test(v);
+    const skelColLetter = (n) => { let s = ""; n += 1; while (n > 0) { const r = (n - 1) % 26; s = String.fromCharCode(65 + r) + s; n = Math.floor((n - 1) / 26); } return s; };
+    const skelSerialToLabel = (v) => { const d = new Date(Date.UTC(1899, 11, 30) + v * 86400000); return `${SKEL_MONTHS[d.getUTCMonth()]}-${String(d.getUTCFullYear()).slice(-2)}`; };
+    const skelMonthOf = (v) => new Date(Date.UTC(1899, 11, 30) + v * 86400000).getUTCMonth() + 1;
+    const skelIsQuarterMonth = (v) => { const m = skelMonthOf(v); return m === 3 || m === 6 || m === 9 || m === 12; };
+    // A quarter's date read as the label a request would use: Dec-2025 -> "Q3 FY26" (Indian FY,
+    // Apr-Mar). Only the MONTH matters — our downloads store these headers as the 1st of the
+    // quarter's last month (44075 is 1-Sep-2020), other files use the month end, and both mean the
+    // same quarter. A small model cannot be trusted to convert "Dec-25" itself: asked for "Q3 FY26"
+    // it would conclude the period is missing. annual=true (every header is March) -> "FY26".
+    const skelFiscalLabel = (v, annual) => {
+        const d = new Date(Date.UTC(1899, 11, 30) + v * 86400000);
+        const m = d.getUTCMonth() + 1, y = d.getUTCFullYear();
+        const yy = String(m >= 4 ? y + 1 : y).slice(-2);
+        if (annual) return `FY${yy}`;
+        return `Q${m <= 3 ? 4 : m <= 6 ? 1 : m <= 9 ? 2 : 3} FY${yy}`;
+    };
+    // "year" = 1990..2100, "date" = Excel serials for 1982..2064. Anything else is just a number.
+    const skelNumClass = (v) => (typeof v === "number" && Number.isInteger(v)) ? (v >= 1990 && v <= 2100 ? "year" : (v >= 30000 && v <= 60000 ? "date" : null)) : null;
+
+    // "Q3 FY26", "q3fy2026", "Q3-26" -> "Q3FY26"; "FY2026" / "FY26" / a bare "2026" -> "FY26". null when
+    // it is not a period this can compare (then no coverage verdict is given, rather than a wrong one).
+    const skelNormPeriod = (label) => {
+        const t = String(label == null ? "" : label).toUpperCase().replace(/[\s'\-]+/g, "");
+        const m = t.match(/^(Q[1-4])?(?:FY|CY)?(\d{2}|\d{4})[EPA]?$/);
+        return m ? `${m[1] || ""}FY${m[2].slice(-2)}` : null;
+    };
+
+    // Filled columns -> "FY20–FY26, FY28". Uses the header row's labels when both ends of a run have
+    // one, otherwise column letters ("D:J"). At most four runs are listed.
+    function skelCoverage(cols, headerMap, colIndex) {
+        if (!cols.length) return "";
+        const runs = [];
+        for (const c of cols) { const last = runs[runs.length - 1]; if (last && c === last[1] + 1) last[1] = c; else runs.push([c, c]); }
+        const parts = runs.map(([a, b]) => {
+            const la = headerMap.get(a), lb = headerMap.get(b);
+            if (la && lb) return a === b ? la : `${la}–${lb}`;
+            return a === b ? skelColLetter(colIndex + a) : `${skelColLetter(colIndex + a)}:${skelColLetter(colIndex + b)}`;
+        });
+        return parts.length > 4 ? `${parts.slice(0, 4).join(", ")}, +${parts.length - 4} more` : parts.join(", ");
+    }
+
+    // How many of a row's most recent periods get their actual VALUE kept alongside its (still
+    // numberless) label — small on purpose: this is a quick "what's the latest figure" answer, not
+    // a re-introduction of the whole numeric history the labels-only design deliberately strips.
+    const SKEL_RECENT_PERIODS = 2;
+    // Plain, unformatted numbers (no thousands separator) — for a model to read back reliably, not
+    // for a human to admire; a comma is one more thing an LLM could misparse. Trims float noise
+    // (a stored 2299.999999999996) and drops a trailing ".0" a whole number picks up from rounding.
+    const skelFormatNum = (v) => String(Math.round(v * 100) / 100);
+    // "Q4 FY26=2300, Q1 FY27=2378" — the last SKEL_RECENT_PERIODS columns (by COLUMN order, which
+    // is chronological left-to-right the same way every period axis in this file already is) that
+    // this row actually has a number under. "" when the row has no numeric values at all (a
+    // heading, or a row whose only values are period-column TEXT, e.g. "n/a").
+    function skelRecentText(nums, headerMap) {
+        if (!nums.length || !headerMap.size) return "";
+        const valueByCol = new Map(nums.map(n => [n.c, n.v]));
+        const periodCols = [...headerMap.keys()].sort((a, b) => a - b);
+        const recentCols = periodCols.filter(c => valueByCol.has(c)).slice(-SKEL_RECENT_PERIODS);
+        return recentCols.map(c => `${headerMap.get(c)}=${skelFormatNum(valueByCol.get(c))}`).join(", ");
+    }
+
+    // Confirms a FLAT (non-periodic) header candidate — a row of 2+ plain text cells that isn't a
+    // period header, e.g. "Company | Sector | Market Cap". A candidate alone proves nothing (a
+    // title, a stray two-cell note): this looks at the next few rows and requires at least 2 of
+    // them to actually have a value under at least half of the candidate's own (non-label)
+    // columns, so only a row with real aligned data under it counts as a table. Stops early at a
+    // blank-row gap or at another header-shaped row, since that ends this candidate's own table
+    // either way (found enough aligned rows by then, or genuinely not a header).
+    function skelFlatHeaderAligned(grid, r, valueCols, maxLookahead = 10) {
+        if (!valueCols.length) return false;
+        const need = Math.max(1, Math.ceil(valueCols.length / 2));
+        let aligned = 0, blankRun = 0;
+        for (let k = r + 1; k < grid.length && k <= r + maxLookahead; k++) {
+            const row = grid[k] || [];
+            const isEmpty = (v) => v === null || v === undefined || v === "" || skelIsPlaceholder(v);
+            if (row.every(isEmpty)) { blankRun++; if (blankRun >= 2) break; continue; }
+            blankRun = 0;
+            const texts = row.filter(v => typeof v === "string" && !isEmpty(v));
+            const nums = row.filter(v => typeof v === "number" && Number.isFinite(v));
+            if (nums.length === 0 && texts.length >= 2) break; // another header-shaped row — this candidate's table ends here
+            // A row with FAR more numbers than this candidate has columns is a wide data row from
+            // some OTHER (periodic) table, not a plain entity-listing row for this one — without
+            // this, a real period-header row bleeding through a shared column position looks
+            // "aligned" by sheer coincidence. Caught on a real workbook: a "(All values in Rs. Cr)"
+            // unit-note row ("Quarterly P&L (IndAS)" | "(All values in Rs. Cr)") sits directly
+            // above a genuine 26-quarter table, and its "Parameter", 44075, 44166, ... header row
+            // happens to have a number under the note row's own column — with no numeric-width
+            // check, that alone confirmed a bogus 2-column "table" out of a plain unit label.
+            if (nums.length > valueCols.length + 2) break;
+            const filled = valueCols.filter(c => !isEmpty(row[c]));
+            if (filled.length >= need) aligned++;
+            if (aligned >= 2) return true;
+        }
+        return false;
+    }
+    // A row's own values under a FLAT header's columns — "Sector=IT, Market Cap=812000" — the flat
+    // equivalent of skelRecentText's "last N periods", except there is no time axis to take the
+    // "last" of, so this just shows the row's own populated columns, in column order, capped small
+    // for the same reason: a quick answer straight from the summary, never a substitute for
+    // read_range.
+    function skelRowPeek(nums, valueTexts, headerMap, maxCols = 4) {
+        if (!headerMap.size) return "";
+        const parts = [...nums.map(n => ({ c: n.c, s: skelFormatNum(n.v) })), ...valueTexts.map(t => ({ c: t.c, s: t.s.slice(0, 30) }))]
+            .sort((a, b) => a.c - b.c)
+            .slice(0, maxCols)
+            .map(p => `${headerMap.get(p.c)}=${p.s}`);
+        return parts.join(", ");
+    }
+    // Flat equivalent of skelCoverage — which of a flat table's own columns this row has a value
+    // under, plainly listed (never a dash-collapsed range: "Sector–Market Cap" would wrongly imply
+    // an ordered continuum between two unrelated column names the way "FY20–FY26" legitimately does
+    // for periods).
+    function skelFlatCoverage(cols, headerMap) {
+        if (!cols.length) return "";
+        return cols.map(c => headerMap.get(c)).filter(Boolean).join(", ");
+    }
+    // The same "Label=Value" zip as skelRecentText/skelRowPeek, uncapped — every populated column
+    // a row has, not just the last couple or the first few. Only ever used for a table already
+    // confirmed relevant to the current turn (see the planner's touched-table set): showing real
+    // numbers in full is cheap there specifically, because it is bounded to a handful of tables,
+    // never the whole workbook the way the summary's own row listing is.
+    function skelZipValues(nums, valueTexts, headerMap) {
+        if (!headerMap.size) return "";
+        return [...nums.map(n => ({ c: n.c, s: skelFormatNum(n.v) })), ...valueTexts.map(t => ({ c: t.c, s: t.s.slice(0, 60) }))]
+            .sort((a, b) => a.c - b.c)
+            .map(p => `${headerMap.get(p.c)}=${p.s}`)
+            .join(", ");
+    }
+    // One pass over a sheet's values: which cells are labels, which rows are table headers (period
+    // OR flat), which columns each row has values in. Pure — no Excel calls — so it is testable on
+    // plain arrays.
+    function analyzeSheetGrid(grid, rowIndex, colIndex) {
+        const rows = [];
+        let numericCells = 0, textCells = 0;
+        let headerMap = new Map(); // column -> this table's own column label, from the most recent header row above
+        let headerKind = null; // "period" | "flat" | null — which KIND of header produced headerMap, so a row's small value-peek is worded to match
+        for (let r = 0; r < grid.length; r++) {
+            const row = grid[r] || [];
+            const texts = [], nums = [];
+            for (let c = 0; c < row.length; c++) {
+                const v = row[c];
+                if (v === null || v === undefined || v === "") continue;
+                if (typeof v === "number" && Number.isFinite(v)) nums.push({ c, v });
+                else if (typeof v === "string" && !skelIsPlaceholder(v)) texts.push({ c, s: v.replace(/\s+/g, " ").trim() });
+            }
+            let periods = null;
+            const textPeriods = texts.filter(t => skelIsPeriodText(t.s));
+            // Three period labels make a header anywhere; TWO make one when the row has no numbers
+            // (real tables have "Metric | Unit | FY25 | FY26"). A row of numbers needs three (below).
+            if (textPeriods.length >= 3 || (textPeriods.length >= 2 && nums.length === 0)) periods = textPeriods.map(t => ({ c: t.c, label: t.s }));
+            else if (nums.length >= 3) {
+                // A row whose numbers are ALL years (or all date serials), rising left to right, is a
+                // header. Requiring all of them keeps a data row that merely contains a 2024 out.
+                const cls = skelNumClass(nums[0].v);
+                if (cls && nums.every((n, i) => skelNumClass(n.v) === cls && (i === 0 || n.v >= nums[i - 1].v))) {
+                    let labelOf = (v) => String(v);
+                    if (cls === "date") {
+                        // Dates that all fall in quarter months are fiscal periods; monthly or daily
+                        // dates stay plain dates.
+                        const allQuarters = nums.every(n => skelIsQuarterMonth(n.v));
+                        const annual = allQuarters && nums.every(n => skelMonthOf(n.v) === 3);
+                        labelOf = allQuarters ? (v) => skelFiscalLabel(v, annual) : skelSerialToLabel;
+                    }
+                    periods = nums.map(n => ({ c: n.c, label: labelOf(n.v) }));
+                }
+            }
+            // Not a period header — but any sheet a user made themselves may still hold a table with
+            // NO time axis at all ("Company | Sector | Market Cap", one row per entity). A row of
+            // 2+ plain text cells is a candidate; skelFlatHeaderAligned is what actually confirms it
+            // (real data aligned underneath), so a stray two-cell title or note never gets treated
+            // as one.
+            let flatHeader = null;
+            if (!periods && nums.length === 0 && texts.length >= 2) {
+                const labelCol = texts[0].c;
+                const valueTexts = texts.slice(1); // texts[0] is this table's own row-label column, same role as a period table's "Metric" column
+                // Guard against a TRANSPOSED table's own top row ("Year | Revenue | EBITDA | PAT",
+                // with the real period axis running DOWN the label column below it — see the axes
+                // pass below): if the label column's own next couple of rows are an ascending
+                // year/date run, this is that axis, not a row-label column of entity names.
+                let vAxisRun = 0, prevCls = null, prevV = null;
+                for (let k = r + 1; k < grid.length && k <= r + 4; k++) {
+                    const v = (grid[k] || [])[labelCol];
+                    const cls = skelNumClass(v);
+                    if (!cls || (prevCls && (cls !== prevCls || v < prevV))) break;
+                    vAxisRun++; prevCls = cls; prevV = v;
+                }
+                if (vAxisRun < 2 && skelFlatHeaderAligned(grid, r, valueTexts.map(t => t.c))) flatHeader = valueTexts.map(t => ({ c: t.c, label: t.s }));
+            }
+            const entry = { r, texts, filled: [], periods: null, flatHeader: null, cov: "", hasNums: nums.length > 0, hm: headerMap, hmKind: headerKind };
+            if (periods) {
+                const pcols = new Set(periods.map(p => p.c));
+                entry.periods = periods;
+                entry.texts = texts.filter(t => !pcols.has(t.c)); // the period labels themselves are not row labels
+                headerMap = new Map(periods.map(p => [p.c, p.label]));
+                headerKind = "period";
+                entry.hm = headerMap; entry.hmKind = headerKind;
+            } else if (flatHeader) {
+                const fcols = new Set(flatHeader.map(f => f.c));
+                entry.flatHeader = flatHeader;
+                entry.texts = texts.filter(t => !fcols.has(t.c)); // keep only this table's own label-column text (texts[0])
+                headerMap = new Map(flatHeader.map(f => [f.c, f.label]));
+                headerKind = "flat";
+                entry.hm = headerMap; entry.hmKind = headerKind;
+            } else {
+                numericCells += nums.length;
+                // Text sitting in a header's own column is a value for that column, not a label.
+                const valueTexts = headerMap.size ? texts.filter(t => headerMap.has(t.c)) : [];
+                const vt = new Set(valueTexts.map(t => t.c));
+                entry.texts = texts.filter(t => !vt.has(t.c));
+                entry.filled = [...nums.map(n => n.c), ...valueTexts.map(t => t.c)].sort((a, b) => a - b);
+                entry.values = nums;
+                entry.valueTexts = valueTexts; // kept alongside .values so a table's full detail (see skelTables) can be rebuilt later, not just the capped peek below
+                if (headerKind === "flat") {
+                    entry.cov = skelFlatCoverage(entry.filled, headerMap);
+                    entry.covered = entry.filled.map(c => headerMap.get(c)).filter(Boolean);
+                    entry.recent = skelRowPeek(nums, valueTexts, headerMap);
+                } else {
+                    entry.cov = skelCoverage(entry.filled, headerMap, colIndex);
+                    entry.covered = entry.filled.map(c => headerMap.get(c)).filter(Boolean); // every period label this row has a value under
+                    // Recent-period VALUES — the last couple of periods this row actually has a number
+                    // for, kept alongside the (numberless) label/coverage data above. This is what lets
+                    // the model answer "what's the latest X" straight from the summary instead of a
+                    // read_range round trip for it, while staying small: only SKEL_RECENT_PERIODS
+                    // numbers per row, never the row's whole history (that's still numbers-omitted, same
+                    // as before). Rendering it is opt-in (skelItems' showRecent) so nothing here changes
+                    // by itself; only the value is computed and kept on the row entry.
+                    entry.recent = skelRecentText(nums, headerMap);
+                }
+            }
+            textCells += entry.texts.length;
+            rows.push(entry);
+        }
+        // Period axes running DOWN a column (a transposed layout: years in column A, metrics across).
+        const axes = [];
+        const width = grid.reduce((m, row) => Math.max(m, (row || []).length), 0);
+        for (let c = 0; c < width; c++) {
+            let start = -1, prev = null, cls = null;
+            const flush = (end) => {
+                if (start >= 0 && end - start >= 3) axes.push({ c, r0: start, r1: end - 1, cls, first: grid[start][c], last: grid[end - 1][c] });
+                start = -1; prev = null; cls = null;
+            };
+            for (let r = 0; r < grid.length; r++) {
+                const v = (grid[r] || [])[c];
+                const k = skelNumClass(v);
+                if (k && (start < 0 || (k === cls && v >= prev))) { if (start < 0) { start = r; cls = k; } prev = v; }
+                else { flush(r); if (k) { start = r; cls = k; prev = v; } }
+            }
+            flush(grid.length);
+        }
+        return { rows, axes, numericCells, textCells };
+    }
+
+    // Groups a sheet's analyzed rows into TABLES — a header row (period OR flat, see
+    // analyzeSheetGrid) plus every row belonging to it, closing at the next header or two blank
+    // rows (even without a new header, to separate unrelated blocks reusing the same columns).
+    // Each table gets a best-effort TITLE and COMPANY (matched via matchCompanyName near its own
+    // header, never guessed), scoped per table rather than per sheet so two companies pasted into
+    // one sheet still get told apart. This is the actual INDEX — every field here is metadata
+    // (title, company, range, columns, row list), never a value: the labels-only design still
+    // holds, this just replaces "flat, unstructured rows" with "which table each row belongs to,
+    // addressable by real cell range".
+    function skelTables(analysis, sheetName, rowIndex, colIndex, allCompaniesList) {
+        const rows = analysis.rows;
+        const isBlank = (e) => !e || (!(e.texts || []).length && !e.hasNums && !e.periods && !e.flatHeader);
+        // A clean title/company CANDIDATE: exactly one text token, no numbers, not itself a header
+        // (of either kind) — a row with two labels ("Parameter | Unit") or actual data is not a
+        // heading, and neither is another table's own header row.
+        const isHeadingLike = (e) => !!e && !e.hasNums && !e.periods && !e.flatHeader && (e.texts || []).length === 1;
+
+        // Walks upward from just above a header row, skipping blanks, up to a few hops — stops
+        // (returns null) the moment it hits anything that ISN'T blank or heading-like, since that
+        // means there is no clean title/company candidate here, not that it should reach further
+        // back into a DIFFERENT table's or section's own content.
+        const scanUp = (fromIdx, maxHops, test) => {
+            for (let k = fromIdx - 1, hops = 0; k >= 0 && hops < maxHops; k--) {
+                const e = rows[k];
+                if (isBlank(e)) { hops++; continue; }
+                if (!isHeadingLike(e)) return null;
+                const hit = test(e.texts[0].s);
+                if (hit) return hit;
+                hops++; // not a match itself — keep walking through more heading-like text above it
+            }
+            return null;
+        };
+        const titleAbove = (headerIdx) => scanUp(headerIdx, 4, (s) => s);
+        const companyAbove = (headerIdx) => scanUp(headerIdx, 6, (s) => matchCompanyName(s, allCompaniesList));
+        // Fallback for a table whose own vicinity names no company, but the sheet as a whole
+        // clearly belongs to one (the add-in's own downloads put "CompanyName Ltd." in a sheet's
+        // first row or two).
+        const sheetCompany = (() => {
+            for (let k = 0; k < Math.min(4, rows.length); k++) {
+                if (!isHeadingLike(rows[k])) continue;
+                const m = matchCompanyName(rows[k].texts[0].s, allCompaniesList);
+                if (m) return m;
+            }
+            return null;
+        })();
+
+        const groups = [];
+        let cur = null, blankRun = 0;
+        for (const e of rows) {
+            if (isBlank(e)) {
+                blankRun++;
+                if (blankRun >= 2 && cur) { groups.push(cur); cur = null; }
+                continue;
+            }
+            blankRun = 0;
+            if (e.periods || e.flatHeader) { if (cur) groups.push(cur); cur = { header: e, dataRows: [] }; continue; }
+            if (cur) cur.dataRows.push(e);
+        }
+        if (cur) groups.push(cur);
+
+        return groups.map((g) => {
+            const allR = [g.header.r, ...g.dataRows.map((e) => e.r)];
+            const r0 = rowIndex + Math.min(...allR) + 1, r1 = rowIndex + Math.max(...allR) + 1;
+            const isFlat = !!g.header.flatHeader;
+            const headerCols = isFlat ? g.header.flatHeader : g.header.periods;
+            const valueCols = headerCols.map((p) => p.c);
+            const firstCol = Math.min(...valueCols), lastCol = Math.max(...valueCols);
+            // Where row LABELS actually sit — usually column A, but not assumed: taken from
+            // whichever column the header row's own labels start in (e.g. "Parameter" | "Unit"
+            // before the periods begin, or a flat table's own "Company" column), falling back to
+            // the first value column when a header has no label text of its own at all (a bare
+            // period row with nothing to its left).
+            const labelCols = (g.header.texts || []).map((t) => t.c);
+            const labelCol = labelCols.length ? Math.min(...labelCols) : firstCol;
+            const c0 = colIndex + labelCol, c1 = colIndex + lastCol;
+            const addr = (r) => `${skelColLetter(c0)}${r}:${skelColLetter(c1)}${r}`;
+            return {
+                sheet: sheetName,
+                title: titleAbove(g.header.r) || sheetName,
+                company: companyAbove(g.header.r) || sheetCompany,
+                r0, r1,
+                // Sheet-qualified A1 range, ready to hand straight to read_range — the whole table
+                // (header through last row, label column through last value column).
+                range: `'${sheetName}'!${skelColLetter(c0)}${r0}:${skelColLetter(c1)}${r1}`,
+                columns: headerCols.map((p) => ({ letter: skelColLetter(colIndex + p.c), label: p.label })),
+                // Empty for a flat table — there is no time axis to name; see `kind`.
+                periodAxis: isFlat ? [] : headerCols.map((p) => p.label),
+                kind: isFlat ? "flat" : "periodic",
+                rows: g.dataRows.map((e) => ({
+                    label: (e.texts || []).map((t) => t.s).join(" | "),
+                    // Absolute 1-indexed row number (matches skelTableFor's own convention) — lets
+                    // a search hit resolve to THIS specific row object, not just its table, so
+                    // localization can detail only the row(s) actually confirmed relevant instead
+                    // of an entire table (which for a 60+ row P&L/Balance Sheet block would blow
+                    // well past what localization is supposed to save).
+                    r: rowIndex + e.r + 1,
+                    range: `'${sheetName}'!${addr(rowIndex + e.r + 1)}`,
+                    coverage: e.cov || "",
+                    recent: e.recent || "",
+                    // Every populated column's REAL value, uncapped — unlike `recent` (a small
+                    // peek), this is the row's whole picture. Cheap to compute here regardless
+                    // (same cost class as coverage/recent); only ever RENDERED for a table the
+                    // planner's search actually confirmed relevant — see runPlanner's localized
+                    // snapshot.
+                    detail: skelZipValues(e.values || [], e.valueTexts || [], new Map(headerCols.map((p) => [p.c, p.label]))),
+                })),
+                rowCount: g.dataRows.length,
+            };
+        });
+    }
+    // The table (if any) whose row range a given ABSOLUTE row number (1-indexed, matching the
+    // "rNN" labels the rest of this file already uses) falls inside.
+    const skelTableFor = (tables, absoluteRow) => (tables || []).find((t) => absoluteRow >= t.r0 && absoluteRow <= t.r1) || null;
+
+    // Rows -> output items. Consecutive rows that share a "stem" — the text before " — " — collapse
+    // into one item ("Order Book by State — {Eastern India, Western India, …} (14 rows)"), so a family
+    // of 14 near-identical labels costs one line. priority 0 = headers and heading-like text rows,
+    // which are always kept; 1 = data rows, dropped last-first when a sheet is over budget.
+    function skelItems(analysis, colIndex, rowIndex, labelMax) {
+        const items = [];
+        for (const e of analysis.rows) {
+            const R = rowIndex + e.r + 1;
+            if (e.periods) {
+                const labels = e.texts.map(t => t.s.slice(0, labelMax));
+                const ps = e.periods.map(p => p.label);
+                const shown = ps.length <= 6 ? ps.join(", ") : `${ps[0]} … ${ps[ps.length - 1]} (${ps.length} columns, ${skelColLetter(colIndex + e.periods[0].c)}:${skelColLetter(colIndex + e.periods[e.periods.length - 1].c)})`;
+                items.push({ text: `r${R}| ${labels.length ? labels.join(" | ") + " | " : ""}periods: ${shown}`, priority: 0 });
+            } else if (e.flatHeader) {
+                const labels = e.texts.map(t => t.s.slice(0, labelMax));
+                const cols = e.flatHeader.map(p => p.label.slice(0, labelMax));
+                items.push({ text: `r${R}| ${labels.length ? labels.join(" | ") + " | " : ""}columns: ${cols.join(", ")}`, priority: 0 });
+            } else if (e.texts.length) {
+                const first = e.texts[0].s;
+                const parts = first.split(/\s[—–]\s|\s-\s/);
+                items.push({
+                    text: `r${R}| ${e.texts.map(t => t.s.slice(0, labelMax)).join(" | ")}${e.cov ? ` [${e.cov}]` : ""}`,
+                    priority: e.hasNums ? 1 : 0, R, stem: parts.length > 1 ? parts[0].trim() : null,
+                    suffix: parts.length > 1 ? first.slice(parts[0].length).replace(/^\s[—–-]\s/, "").trim() : null,
+                    filled: e.filled, hm: e.hm, key: first.toLowerCase(),
+                });
+            }
+        }
+        const out = [];
+        for (let i = 0; i < items.length;) {
+            const it = items[i];
+            let j = i + 1;
+            if (it.stem) while (j < items.length && items[j].stem === it.stem) j++;
+            if (it.stem && j - i >= 3) {
+                const group = items.slice(i, j);
+                const suffixes = [...new Set(group.map(g => g.suffix.slice(0, 22)))];
+                const union = [...new Set(group.flatMap(g => g.filled))].sort((a, b) => a - b);
+                const cov = skelCoverage(union, it.hm || new Map(), colIndex);
+                out.push({
+                    text: `r${group[0].R}–r${group[group.length - 1].R}| ${it.stem.slice(0, labelMax + 10)} — {${suffixes.slice(0, 5).join(", ")}${suffixes.length > 5 ? `, +${suffixes.length - 5} more` : ""}} (${group.length} rows)${cov ? ` [${cov}]` : ""}`,
+                    priority: group.some(g => g.priority === 1) ? 1 : 0,
+                });
+            } else out.push(...items.slice(i, j)); // a run of 1-2 is too short to fold: keep every row
+            i = j;
+        }
+        return out;
+    }
+    const skelLen = (items) => items.reduce((n, it) => n + it.text.length + 1, 0);
+
+    // A sheet over budget is squeezed in stages (shorter labels, fold repeated labels, then thin
+    // each SECTION evenly to its first K rows) rather than cutting from the end, since deep
+    // sections matter too; every section stays visible with a "+n more" note.
+    function skelDedupe(items) {
+        const seen = new Set(), out = [];
+        let dropped = 0;
+        for (const it of items) {
+            if (it.priority === 0 || !it.key) { out.push(it); continue; }
+            if (seen.has(it.key)) { dropped++; continue; }
+            seen.add(it.key); out.push(it);
+        }
+        return { items: out, dropped };
+    }
+    function skelThin(items, K) {
+        const out = [];
+        let inSection = 0, dropped = 0;
+        const flush = () => { if (dropped) { out.push({ text: `   … +${dropped} more row label(s) in this section`, priority: 0 }); dropped = 0; } };
+        for (const it of items) {
+            if (it.priority === 0) { flush(); out.push(it); inSection = 0; }
+            else if (inSection < K) { out.push(it); inSection++; }
+            else dropped++;
+        }
+        flush();
+        return out;
+    }
+    function skelFit(analysis, colIndex, rowIndex, budget) {
+        const dataRows = (list) => list.filter(i => i.priority !== 0).length;
+        let last = null;
+        // Full-length labels are worth more than a few extra rows: "Fixed Broadband Conn" matches
+        // nothing a user would type. So each label length gets the whole ladder (fold repeats, then
+        // thin sections down to 3 rows) before labels are shortened.
+        for (const labelMax of [40, 28, 20]) {
+            let items = skelItems(analysis, colIndex, rowIndex, labelMax);
+            if (skelLen(items) <= budget) return { lines: items.map(i => i.text), omitted: 0, deduped: 0 };
+            const dd = skelDedupe(items);
+            items = dd.items;
+            if (skelLen(items) <= budget) return { lines: items.map(i => i.text), omitted: 0, deduped: dd.dropped };
+            for (const K of [60, 40, 25, 15, 10, 6, 4, 3]) {
+                const thin = skelThin(items, K);
+                if (skelLen(thin) <= budget) return { lines: thin.map(i => i.text), omitted: dataRows(items) - dataRows(thin), deduped: dd.dropped };
+            }
+            last = { items, deduped: dd.dropped };
+        }
+        for (const K of [2, 1, 0]) {
+            const thin = skelThin(last.items, K);
+            if (skelLen(thin) <= budget) return { lines: thin.map(i => i.text), omitted: dataRows(last.items) - dataRows(thin), deduped: last.deduped };
+        }
+        // Even the headings alone overflow: hard stop, in row order.
+        let acc = 0;
+        const lines = skelThin(last.items, 0).map(i => i.text).filter(l => (acc += l.length + 1) <= budget);
+        return { lines, omitted: dataRows(last.items), deduped: last.deduped };
+    }
+
+    // Share a total budget by NEED: sheets that need less than an equal share keep only what they
+    // need, and the slack goes to the ones that need more. (An equal split starved the sheet that
+    // mattered while a third of the budget went unused.)
+    function skelAllocate(needs, total, floor = 600) {
+        const budgets = new Array(needs.length).fill(0);
+        let remaining = total, open = needs.map((_, i) => i);
+        while (open.length) {
+            const share = Math.floor(remaining / open.length);
+            const satisfied = open.filter(i => needs[i] <= share);
+            if (!satisfied.length) { open.forEach(i => { budgets[i] = Math.max(share, floor); }); break; }
+            satisfied.forEach(i => { budgets[i] = needs[i]; remaining -= needs[i]; });
+            open = open.filter(i => !satisfied.includes(i));
+        }
+        return budgets;
+    }
+
+    async function buildWorkbookSummary({ maxChars = 50000, maxCellsPerSheet = 150000 } = {}) {
+        let wbName = "", sheetInfos = [], nameLines = [];
+        // Runs alongside the Excel.run below (independent of it) — cached after the first call in
+        // a session, so this costs nothing on every later turn. An empty list here just means no
+        // table ever gets a company tag; nothing fails, nothing is guessed.
+        const companiesPromise = ensureCompanyList().catch(() => []);
+        await Excel.run(async (ctx) => {
+            const wb = ctx.workbook;
+            wb.load("name");
+            const sheets = wb.worksheets;
+            sheets.load("items/name,items/position,items/visibility");
+            const names = wb.names;
+            names.load("items/name,items/value,items/visible");
+            await ctx.sync();
+            const per = sheets.items.map(s => {
+                const used = s.getUsedRangeOrNullObject(true);
+                used.load("address,rowCount,columnCount,rowIndex,columnIndex");
+                const tables = s.tables; tables.load("items/name");
+                const charts = s.charts; charts.load("count");
+                return { s, used, tables, charts };
+            });
+            await ctx.sync();
+            for (const p of per) {
+                p.hasData = !p.used.isNullObject && p.used.rowCount > 0 && p.used.columnCount > 0;
+                if (!p.hasData) continue;
+                // The whole used range is read (that is what makes this layout-independent), capped
+                // by cell count so a huge sheet cannot stall the turn.
+                p.rowsRead = Math.min(p.used.rowCount, Math.max(1, Math.floor(maxCellsPerSheet / p.used.columnCount)));
+                p.win = p.used.getCell(0, 0).getResizedRange(p.rowsRead - 1, p.used.columnCount - 1);
+                p.win.load("values");
+            }
+            await ctx.sync();
+            wbName = wb.name;
+            nameLines = names.items.filter(n => n.visible).slice(0, 25).map(n => `${n.name} = ${String(n.value).slice(0, 60)}`);
+            sheetInfos = per.map(p => ({
+                name: p.s.name, position: p.s.position, hidden: p.s.visibility !== "Visible", visibility: p.s.visibility, hasData: p.hasData,
+                address: p.hasData ? p.used.address : "", rowCount: p.hasData ? p.used.rowCount : 0, colCount: p.hasData ? p.used.columnCount : 0,
+                rowIndex: p.hasData ? p.used.rowIndex : 0, colIndex: p.hasData ? p.used.columnIndex : 0, rowsRead: p.rowsRead || 0,
+                charts: p.charts.count || 0, tables: p.tables.items.map(t => t.name),
+                grid: p.hasData ? p.win.values : [],
+            }));
+        });
+
+        const companiesList = await companiesPromise;
+        for (const s of sheetInfos) {
+            if (!s.hasData) continue;
+            s.analysis = analyzeSheetGrid(s.grid, s.rowIndex, s.colIndex);
+            // Table objects are for LOOKUP (the search net tags a hit with the table/company it
+            // falls inside) — they do not change the row-by-row text below; see skelTables.
+            s.dataTables = skelTables(s.analysis, s.name, s.rowIndex, s.colIndex, companiesList);
+            // Rendered once here (not in the blocks loop below) so the SAME lines are what the
+            // budget computation reserves space for — both this and the axis lines below are
+            // UNCONDITIONAL overhead that never shrinks to fit a per-sheet budget, and a sheet can
+            // now carry several detected tables (periodic and/or flat), not at most one.
+            s.axisLines = s.analysis.axes.slice(0, 4).map(a => {
+                const lab = (v) => a.cls === "year" ? String(v) : (skelIsQuarterMonth(v) ? skelFiscalLabel(v, false) : skelSerialToLabel(v));
+                return `Periods run DOWN column ${skelColLetter(s.colIndex + a.c)} (rows ${s.rowIndex + a.r0 + 1}–${s.rowIndex + a.r1 + 1}): ${lab(a.first)} … ${lab(a.last)}`;
+            });
+            s.tableLines = s.dataTables.map(t => {
+                // A periodic table can run to dozens of columns, so only its first/last are named;
+                // a flat table (no time axis) typically has a handful of named columns worth
+                // listing in full — "first … last" would just hide the middle ones. A flat table
+                // with MANY columns falls back to the same collapsing, since this line's length is
+                // reserved for up front and must stay bounded.
+                const cols = (t.periodAxis.length || t.columns.length > 6)
+                    ? `${t.columns[0].letter} (${t.columns[0].label}) … ${t.columns[t.columns.length - 1].letter} (${t.columns[t.columns.length - 1].label})`
+                    : t.columns.map(c => `${c.letter} (${c.label})`).join(", ");
+                return `Table "${t.title}" — range ${t.range}${t.company ? ` — ${t.company.name} (fincode ${t.company.fincode})` : ""}: columns ${cols}`;
+            });
+        }
+
+        const header = [
+            `## Workbook: ${wbName} — ${sheetInfos.length} sheet(s)`,
+            // Deliberately short and format-agnostic: detection below is best-effort and works on
+            // any layout, not one fixed shape, so this explains only what a symbol MEANS, never
+            // what a sheet is assumed to look like.
+            `How to read this:\n` +
+                `- Numbers are left out to save space — use read_range or search_index\n` +
+                `  to see actual values.\n` +
+                `- "{…}" means several similar rows were folded into one line.\n` +
+                `- A "Table" line marks one table: its title, its exact range (ready to\n` +
+                `  use with read_range), its company if known, and its columns. The rows\n` +
+                `  under it belong to that table, until the next "Table" or "###" line.\n` +
+                `- No "Table" line doesn't mean a sheet is empty — use search_index, or\n` +
+                `  read_range to look directly.`,
+        ];
+        if (nameLines.length) header.push(`Named ranges: ${nameLines.join("; ")}`);
+        const headerText = header.join("\n");
+
+        // Budget: every sheet's own header line is always kept; the rest is shared out by need.
+        const ONE_LINER = 200; // the sheet's own "### N. ..." header line (and an empty sheet's whole block)
+        const dataSheets = sheetInfos.filter(s => s.hasData);
+        // Need is measured AFTER folding repeated labels, so a sheet that only looks big because it
+        // repeats itself hands its slack to the ones that are genuinely label-rich.
+        const needs = dataSheets.map(s => skelLen(skelDedupe(skelItems(s.analysis, s.colIndex, s.rowIndex, 40)).items));
+        // s.axisLines/s.tableLines (see above) are UNCONDITIONAL — unlike the row-by-row text,
+        // they never shrink to fit a budget — so they are reserved for here rather than guessed at
+        // by ONE_LINER alone, now that a sheet can carry several detected tables at once.
+        const overheadLen = (lines) => lines.reduce((n, l) => n + l.length + 1, 0);
+        const fixedOverhead = dataSheets.reduce((n, s) => n + overheadLen(s.axisLines) + overheadLen(s.tableLines), 0);
+        const usable = Math.max(3000, maxChars - headerText.length - sheetInfos.length * ONE_LINER - fixedOverhead);
+        const budgets = skelAllocate(needs, usable);
+
+        const blocks = [];
+        // The same per-sheet lines minus the row-by-row detail (fit.lines) — every sheet's own
+        // header, its axis lines and its table index, nothing else. This is what a caller with a
+        // LOCALIZATION signal (see runPlanner's touched-table set) uses for orientation on
+        // everything it did NOT confirm relevant, instead of the full row-level text below.
+        const compactBlocks = [];
+        let di = 0;
+        for (const s of sheetInfos) {
+            const vis = s.hidden ? ` (${s.visibility})` : "";
+            const extras = (s.charts ? `; ${s.charts} chart(s)` : "") + (s.tables.length ? `; tables: ${s.tables.join(", ")}` : "");
+            if (!s.hasData) { const line = `### ${s.position + 1}. "${s.name}"${vis} — empty${extras}`; blocks.push(line); compactBlocks.push(line); continue; }
+            const budget = budgets[di++];
+            const fit = skelFit(s.analysis, s.colIndex, s.rowIndex, budget);
+            const lines = [`### ${s.position + 1}. "${s.name}"${vis} — used range ${s.address} (${s.rowCount} rows × ${s.colCount} cols)${extras}; ${s.analysis.numericCells} numeric value(s) omitted`];
+            if (s.rowsRead < s.rowCount) lines.push(`(only the first ${s.rowsRead} of ${s.rowCount} rows were read)`);
+            lines.push(...s.axisLines);
+            lines.push(...s.tableLines);
+            compactBlocks.push(lines.join("\n"));
+            lines.push(...fit.lines);
+            if (fit.deduped) lines.push(`(${fit.deduped} repeated label(s) folded into their first occurrence)`);
+            if (fit.omitted) lines.push(`(+${fit.omitted} data row label(s) not shown to fit the size limit — every cell is still searched)`);
+            blocks.push(lines.join("\n"));
+        }
+        let text = headerText + "\n\n" + blocks.join("\n\n");
+        if (text.length > maxChars + 2000) text = text.slice(0, maxChars + 2000) + "\n…(summary truncated)";
+        const compactText = headerText + "\n\n" + compactBlocks.join("\n\n");
+        return {
+            text, compactText, name: wbName,
+            sheets: sheetInfos.filter(s => s.hasData).map(s => ({ name: s.name, hidden: s.hidden, rowIndex: s.rowIndex, colIndex: s.colIndex, grid: s.grid, analysis: s.analysis, dataTables: s.dataTables })),
+        };
+    }
+    // Never lets the summary hold up a turn: on timeout or any error the planner just runs without it.
+    async function getWorkbookSummarySafe(timeoutMs = 5000) {
+        try {
+            return await Promise.race([
+                buildWorkbookSummary(),
+                new Promise((_, reject) => setTimeout(() => reject(new Error("timed out")), timeoutMs)),
+            ]);
+        } catch (e) {
+            return { text: "", compactText: "", sheets: [], name: "" };
+        }
+    }
+
+    // Safety net for what the summary might not show (a big sheet cut to fit, a label in an
+    // unexpected place): scan EVERY text cell of EVERY sheet, hidden ones included, for the terms the
+    // planner named. Each hit says where it is and which periods that row has values for.
+    // needed = the periods the request is about ("Q3 FY26", ...). With it, every hit that has values
+    // also says whether it covers ALL of them or names what is missing — a small model reading
+    // "Q4 FY20–Q1 FY27" against a list of periods gets that comparison wrong, so code does it.
+    function searchWorkbookSheets(sheets, terms, { perTerm = 8, maxLen = 60, needed = [] } = {}) {
+        const out = [];
+        const neededNorm = (Array.isArray(needed) ? needed : []).map(p => ({ raw: String(p), norm: skelNormPeriod(p) }));
+        const canJudge = neededNorm.length > 0 && neededNorm.every(p => p.norm);
+        const verdictFor = (e) => {
+            if (!canJudge || !e || !(e.covered || []).length) return "";
+            const have = new Set(e.covered.map(skelNormPeriod).filter(Boolean));
+            const miss = neededNorm.filter(p => !have.has(p.norm)).map(p => p.raw);
+            return miss.length ? ` — MISSING ${miss.join(", ")}` : " — covers ALL needed periods";
+        };
+        for (const term of terms) {
+            const t = String(term || "").trim().toLowerCase();
+            if (t.length < 3) continue;
+            const hits = [];
+            for (const sh of sheets) {
+                for (let r = 0; r < sh.grid.length && hits.length < perTerm; r++) {
+                    const row = sh.grid[r] || [];
+                    for (let c = 0; c < row.length && hits.length < perTerm; c++) {
+                        const v = row[c];
+                        if (typeof v !== "string" || !v.toLowerCase().includes(t)) continue;
+                        const e = sh.analysis.rows[r];
+                        const absoluteRow = sh.rowIndex + r + 1;
+                        // WHICH company/table a hit belongs to — a hit alone never says this on its
+                        // own (a bare "covers ALL needed periods" could be either company's row in a
+                        // workbook holding more than one); see skelTableFor. null/undefined tables
+                        // (older callers, or a sheet with no detected table) just show nothing extra,
+                        // same as before this existed.
+                        const tbl = skelTableFor(sh.dataTables, absoluteRow);
+                        // The SPECIFIC row within that table this hit landed on (by absolute row
+                        // number) — so localization can detail just this row, not the table's
+                        // whole (possibly 60+ row) body. null when the hit is on the table's own
+                        // header row, or the table has no row at exactly this address.
+                        const tblRow = tbl ? tbl.rows.find(tr => tr.r === absoluteRow) || null : null;
+                        // The table's own range travels WITH the hit — a caller (search_index) can
+                        // go straight to read_range without cross-referencing the cache's separate
+                        // "Table" line for it.
+                        const tag = tbl ? ` [table "${tbl.title}" @ ${tbl.range}${tbl.company ? `, ${tbl.company.name} (fincode ${tbl.company.fincode})` : ", company unknown"}]` : "";
+                        const recentTag = e && e.recent ? ` (${e.hmKind === "flat" ? "values" : "recent"}: ${e.recent})` : "";
+                        let what = e && e.cov ? `values for ${e.cov}${verdictFor(e)}${recentTag}` : (e && e.hasNums ? "has values" : "no values on this row");
+                        if (e && !e.hasNums && !e.periods) {
+                            // A heading ("Company Scale & Workforce"): its own row says nothing, the rows under it do.
+                            const under = [];
+                            for (let k = r + 1; k < sh.analysis.rows.length && under.length < 6; k++) {
+                                const rows = sh.analysis.rows;
+                                const ek = rows[k];
+                                if (!ek || ek.periods || ek.flatHeader || !(ek.texts || []).length) continue;
+                                if (!ek.hasNums && !ek.cov) {
+                                    // A text-only row is either an EMPTY data row ("Contractors" with no
+                                    // values, which the planner needs to know about) or the next heading.
+                                    // A blank row above it, or a header row right after it, means heading.
+                                    const isBlank = (x) => !x || (!(x.texts || []).length && !x.hasNums && !x.periods && !x.flatHeader);
+                                    let nx = k + 1;
+                                    while (nx < rows.length && isBlank(rows[nx])) nx++;
+                                    if (isBlank(rows[k - 1]) || (nx < rows.length && (rows[nx].periods || rows[nx].flatHeader))) break;
+                                    under.push(`"${ek.texts[0].s.slice(0, 40)}" (no values)`);
+                                    continue;
+                                }
+                                under.push(`"${ek.texts[0].s.slice(0, 40)}" ${ek.cov ? `[${ek.cov}]${verdictFor(ek)}` : "has values"}`);
+                            }
+                            if (under.length) what = `heading; rows under it: ${under.join("; ")}`;
+                        }
+                        // table is carried alongside the display text (not just baked into the
+                        // tag string) so a caller can collect exactly which tables a search
+                        // actually confirmed relevant — see runPlanner's localized snapshot.
+                        hits.push({ text: `"${sh.name}"${sh.hidden ? " (hidden)" : ""}!${skelColLetter(sh.colIndex + c)}${absoluteRow}${tag}: "${v.replace(/\s+/g, " ").trim().slice(0, maxLen)}" — ${what}`, table: tbl, tableRow: tblRow });
+                    }
+                }
+            }
+            out.push({ term: t, hits });
+        }
+        return out;
+    }
+    const formatSearchResults = (results) => results.map(r => r.hits.length ? `"${r.term}": ${r.hits.length} hit(s)\n${r.hits.map(h => `  - ${h.text}`).join("\n")}` : `"${r.term}": no hits`).join("\n");
+
+    // Instant, in-memory search of this turn's already-built index — zero extra Excel round-trip,
+    // unlike search_workbook (a live Excel.run). Runs against currentTurnSheets, the SAME analyzed
+    // sheets buildWorkbookSummary() used for the prompt's own workbook index, so a hit's table/
+    // company tag and period-coverage verdict are exactly what the index already says. Not a new
+    // implementation — searchWorkbookSheets/formatSearchResults already existed (the old planner's
+    // own search step) and simply had no caller left once the planner was removed.
+    function toolSearchIndex({ terms, needed_periods }) {
+        const list = (Array.isArray(terms) ? terms : []).map(t => String(t || "").trim()).filter(Boolean);
+        if (!list.length) return { error: "terms must be a non-empty array of search terms" };
+        if (!currentTurnSheets.length) return { text: "The workbook index is empty or unavailable this turn — nothing to search." };
+        const results = searchWorkbookSheets(currentTurnSheets, list, { needed: Array.isArray(needed_periods) ? needed_periods : [] });
+        return { text: formatSearchResults(results) };
+    }
 
     async function toolWorkbookOverview({ sheet: sheetName } = {}) {
         let text;
@@ -8133,6 +9544,82 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
                 numberFormats: range.numberFormat,
                 ...(errors.length ? { errors } : {}),
             };
+        });
+        return result;
+    }
+
+    // Lets the model check what it JUST wrote actually looks right, not just that the values are
+    // correct — added after a real failure: it striped the first table's title row with a fill
+    // color, then for the next two tables wrote the title text on the row BELOW the one it filled,
+    // and left every column too narrow to read without manual widening. Format properties are read
+    // CELL BY CELL rather than per-row/column, because reading a formatting property across a
+    // range whose cells don't all share the same value can throw at sync() — this never risks that.
+    // Capped at 2000 cells: a review pass over "the table I just wrote", not a whole sheet audit.
+    async function toolReviewFormatting({ range: rangeRef }) {
+        if (!rangeRef) return { error: "range is required" };
+        let result;
+        await Excel.run(async (ctx) => {
+            const { sheet, range } = chatGetRangeAndSheet(ctx, rangeRef);
+            range.load("values,address,rowCount,columnCount");
+            sheet.load("name");
+            await ctx.sync();
+            if (range.rowCount * range.columnCount > 2000) {
+                result = { error: "Range too large to review in detail — pick a smaller range (under 2000 cells), e.g. just the table(s) you just wrote." };
+                return;
+            }
+            const cellPart = range.address.includes("!") ? range.address.slice(range.address.indexOf("!") + 1) : range.address;
+            const start = chatParseCell(cellPart.split(":")[0]);
+            const startRow0 = start.row - 1;
+
+            const cellFormats = [];
+            for (let r = 0; r < range.rowCount; r++) {
+                const rowCells = [];
+                for (let c = 0; c < range.columnCount; c++) {
+                    const cell = sheet.getRangeByIndexes(startRow0 + r, start.col + c, 1, 1);
+                    cell.format.fill.load("color");
+                    cell.format.font.load("bold");
+                    rowCells.push(cell);
+                }
+                cellFormats.push(rowCells);
+            }
+            const colWidths = [];
+            for (let c = 0; c < range.columnCount; c++) {
+                const col = sheet.getRangeByIndexes(0, start.col + c, 1, 1).getEntireColumn();
+                col.format.load("columnWidth");
+                colWidths.push(col);
+            }
+            await ctx.sync();
+
+            const rows = [];
+            for (let r = 0; r < range.rowCount; r++) {
+                const fills = new Set(), bolds = new Set();
+                for (let c = 0; c < range.columnCount; c++) {
+                    const cell = cellFormats[r][c];
+                    let fill = ""; try { fill = cell.format.fill.color || ""; } catch (e) { fill = "?"; }
+                    fills.add(fill);
+                    let bold = null; try { bold = !!cell.format.font.bold; } catch (e) { bold = null; }
+                    bolds.add(bold);
+                }
+                const rowVals = range.values[r] || [];
+                const label = (rowVals.find(v => typeof v === "string" && v.trim()) || "").toString().slice(0, 60);
+                rows.push({
+                    row: start.row + r,
+                    label,
+                    fill: fills.size === 1 ? ([...fills][0] || "none") : `mixed (${[...fills].map(f => f || "none").join(", ")})`,
+                    bold: bolds.size === 1 ? [...bolds][0] : "mixed",
+                });
+            }
+            const cols = [];
+            for (let c = 0; c < range.columnCount; c++) {
+                let width = null; try { width = colWidths[c].format.columnWidth; } catch (e) { width = null; }
+                let maxLen = 0;
+                for (let r = 0; r < range.rowCount; r++) { const v = range.values[r][c]; if (v != null && v !== "") maxLen = Math.max(maxLen, String(v).length); }
+                // Rough points-per-character heuristic (Calibri 11) — only meant to flag "probably
+                // too narrow for its own content", not to be an exact fit calculation.
+                const approxCharsFit = width != null ? Math.max(1, Math.round(width / 6)) : null;
+                cols.push({ col: skelColLetter(start.col + c), width, maxContentChars: maxLen, probablyTooNarrow: approxCharsFit != null && maxLen > approxCharsFit });
+            }
+            result = { sheet: sheet.name, range: chatQualifiedAddress(sheet.name, range.address), rows, columns: cols };
         });
         return result;
     }
@@ -8314,16 +9801,10 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
         return result;
     }
 
-    // Purpose-built for this product specifically, not a generic Excel feature — a direct
-    // application of the same "does this model actually tie out" checks the AI Financial Model
-    // builder already runs on itself (balance_check ≈ 0, etc.), but on demand for ANY workbook,
-    // not just one this add-in built. Recalculates first (unlike recalculate_and_check, which
-    // assumes the caller already knows what changed — this is the "give me the full picture,
-    // unprompted" tool, so it can't rely on a fresh recalc having already happened), then reports
-    // two things: formula errors everywhere, and any "check" row whose value isn't close to zero
-    // the way a reconciliation/sanity-check row is supposed to be. A "check" row is found by
-    // label, not by key — this works on someone else's workbook too, not just ones this add-in
-    // built with a known balance_check key.
+    // Runs the same "does this model tie out" checks the AI Financial Model builder runs on
+    // itself, but on demand for ANY workbook. Recalculates first (unprompted, unlike
+    // recalculate_and_check), then reports formula errors plus any "check" row (found by label,
+    // not a known key) whose value isn't close to zero.
     async function toolAuditWorkbook({ sheet: sheetName, tolerance } = {}) {
         const tol = typeof tolerance === "number" && isFinite(tolerance) ? Math.abs(tolerance) : 0.01;
         let result;
@@ -8468,12 +9949,9 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
         }
     }
 
-    // Uses Excel's own getDirectPrecedents()/getDirectDependents() when the host supports them
-    // (falls back gracefully otherwise). For precedents, an unavailable API falls back to scanning
-    // the cell's own formula text for references. There's deliberately NO workbook-wide scanning
-    // fallback for dependents — finding every cell that references this one with no native API
-    // means scanning every sheet's formulas by hand, which is expensive and out of scope here; if
-    // the API isn't available, dependents tracing just reports that plainly instead.
+    // Uses Excel's getDirectPrecedents()/getDirectDependents() when supported; precedents fall
+    // back to scanning the formula text, but dependents have no fallback (a workbook-wide scan
+    // would be too expensive) and just report the API is unavailable.
     async function toolTraceDependencies({ cell, mode, depth }) {
         if (!cell) return { error: "cell is required" };
         const traceMode = mode === "dependents" ? "dependents" : "precedents";
@@ -8598,17 +10076,10 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
         return result;
     }
 
-    // ── Second tool batch: chart/formatting-focused, ported from the same reference
-    // (pi-for-excel-main's src/tools/format-cells.ts, charts.ts, conditional-format.ts,
-    // modify-structure.ts, comments.ts) where it has an equivalent; named_ranges/autofit/tables
-    // have no dedicated file there, so those are written directly from the plain Excel JS API.
-    // Risk classification for the confirm-gate (see EXCEL_SELF_MANAGED_UI_TOOLS below): anything
-    // that only changes PRESENTATION (formatting, conditional formatting, charts, autofit, table
-    // wrapping, comments) can't destroy data and is trivially reversible, so none of those prompt
-    // for approval — same reasoning as why read-only tools don't. modify_structure's delete_*
-    // actions and named_ranges' delete action CAN cause real damage (deleting a row/column/sheet
-    // destroys data; deleting a name breaks every formula that referenced it by name), so those two
-    // tools manage their own confirm logic internally, gating only their destructive actions.
+    // ── Second tool batch: chart/formatting-focused, ported from pi-for-excel-main where an
+    // equivalent exists. Risk classification for the confirm-gate: presentation-only tools never
+    // prompt (can't destroy data); modify_structure's delete_* and named_ranges' delete CAN cause
+    // real damage, so those two gate their own destructive actions internally.
 
     const CHAT_NUMBER_FORMAT_PRESETS = { currency: "#,##0.00", integer: "#,##0", number: "#,##0.00", percent: "0.0%", text: "@" };
     const CHAT_BORDER_EDGES = ["EdgeTop", "EdgeBottom", "EdgeLeft", "EdgeRight", "InsideHorizontal", "InsideVertical"];
@@ -8669,31 +10140,13 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
         }
     }
 
-    // Applies MULTIPLE format_cells calls within ONE shared Excel.run instead of one per call —
-    // observed live: a single write-phase turn issuing 9 separate format_cells calls, ~460ms each
-    // sequentially (~4.1s), for formatting that has no cross-call dependency at all (each targets
-    // its own range). One shared context.sync() pays that fixed per-call IPC cost once instead of
-    // nine times.
-    //
-    // Also handles a single LOGICAL entry whose own p.range is comma-separated (several
-    // non-contiguous blocks that should all get that entry's SAME formatting) — Office.js's
-    // getRange() only accepts one contiguous range, so this used to fail outright with "The
-    // argument is invalid or missing or has an incorrect format", and the model recovered by
-    // retrying as several separate format_cells calls, costing a whole extra LLM turn just to
-    // rediscover what it could have done in one shot. Expanded here into multiple sub-range
-    // entries that share their ORIGINAL logical index i, so pList.length still equals
-    // results.length (one result per call the model actually made) even though more physical
-    // ranges than that may get resolved and formatted underneath.
-    //
-    // The one real risk this trades for that speed: Office.js does not validate a range reference
-    // when it's constructed (getRange/getItem never throw for a bad address) — the error only
-    // surfaces when ctx.sync() actually runs, and by then every operation queued since the last
-    // sync fails TOGETHER, with no way to tell which one range was the problem. Batching genuinely
-    // means one bad address can take out every other good one alongside it, unlike today's fully
-    // isolated per-call version. So this is not "batch and hope": if the shared attempt throws at
-    // all, it falls back to running every sub-range through the ORIGINAL, isolated toolFormatCells
-    // one at a time — slower, but no worse than before — so one malformed range still lets every
-    // OTHER range (even other areas within the SAME comma-separated call) get formatted.
+    // Applies MULTIPLE format_cells calls within ONE shared Excel.run instead of one per call, so
+    // one context.sync() pays the fixed per-call IPC cost once instead of N times. Also expands a
+    // single comma-separated (non-contiguous) p.range into multiple sub-range entries sharing
+    // their original logical index i, since Office.js's getRange() only accepts one contiguous
+    // range. Risk: Office.js doesn't validate a range until ctx.sync() runs, so a batched bad
+    // address can fail every queued operation together — if the shared attempt throws, this falls
+    // back to running every sub-range through the original isolated toolFormatCells one at a time.
     async function toolFormatCellsBatch(pList) {
         const results = pList.map(() => ({ applied: [] }));
         try {
@@ -8768,7 +10221,6 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
             // fully-isolated per-call path (one sub-range at a time, never back through this batch
             // function) so one bad range costs only itself, not the whole batch or even the rest
             // of its own comma-separated siblings.
-            console.warn(`[Chat] batched format_cells failed (${String(e.message || e)}) — falling back to individual calls`);
             for (let i = 0; i < pList.length; i++) {
                 if (results[i].ok) continue;
                 const p = pList[i];
@@ -8865,7 +10317,6 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
                         } catch (e) {
                             // Older host without ExcelApi 1.8 — the chart still renders, just on
                             // one axis. Never worth failing the whole chart over.
-                            console.warn("[Chat] secondary axis unsupported:", e && e.message);
                         }
                     }
                 }
@@ -9285,12 +10736,14 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
             case "audit_workbook": return args.sheet_name ? `Auditing sheet "${args.sheet_name}"` : "Auditing workbook health";
             case "trace_dependencies": return `Tracing ${args.mode === "dependents" ? "dependents" : "precedents"} of ${args.cell}`;
             case "search_workbook": return `Searching for "${args.query}"`;
+            case "search_index": return `Searching index for ${(Array.isArray(args.terms) ? args.terms : []).map(t => `"${t}"`).join(", ")}`;
             case "format_cells": return `Formatting ${args.range}`;
             case "create_chart": return `Creating chart from ${args.source_range}`;
             case "conditional_format": return args.action === "clear" ? `Clearing conditional formatting on ${args.range}` : `Adding conditional formatting to ${args.range}`;
             case "autofit": return args.range ? `Auto-fitting ${args.range}` : "Auto-fitting the active sheet";
             case "tables": return `${(args.action || "").replace(/^./, c => c.toUpperCase())} table${args.name ? ` "${args.name}"` : ""}`;
             case "comments": return `${(args.action || "").replace(/^./, c => c.toUpperCase())} comment${args.cell ? ` at ${args.cell}` : ""}`;
+            case "review_formatting": return `Reviewing formatting of ${args.range}`;
             default: return name;
         }
     }
@@ -9316,6 +10769,7 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
             case "undo_last_change": return toolUndoLastChange();
             case "trace_dependencies": return toolTraceDependencies(args);
             case "search_workbook": return toolSearchWorkbook({ ...args, sheet: args.sheet_name });
+            case "search_index": return toolSearchIndex(args);
             case "format_cells": return toolFormatCells(args);
             case "create_chart": return toolCreateChart(args);
             case "conditional_format": return toolConditionalFormat(args);
@@ -9324,6 +10778,7 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
             case "autofit": return toolAutofit(args);
             case "tables": return toolTables(args);
             case "comments": return toolComments(args);
+            case "review_formatting": return toolReviewFormatting(args);
             default: return { error: `Unknown tool "${name}"` };
         }
     }
@@ -9347,6 +10802,12 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
             if (arg === "clear") {
                 window.clearChatLog();
                 addMsg("bot", "Debug log cleared.");
+            } else if (arg === "auto on" || arg === "auto off") {
+                debugAutoSave = arg === "auto on";
+                try { localStorage.setItem(DEBUG_AUTOSAVE_KEY, debugAutoSave ? "1" : "0"); } catch (e) { /* storage unavailable */ }
+                addMsg("bot", debugAutoSave
+                    ? "Auto-save is **on** — every turn from now on saves its own `datagpt-turn-N-….txt` as soon as it finishes, no need to run `/log` by hand. Testing-only; `/log auto off` to stop."
+                    : "Auto-save is **off**.");
             } else {
                 const entries = debugLog.length;
                 saveChatLog();
@@ -9358,15 +10819,11 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
             return; // never reaches the model: this is a local command, not a question
         }
 
-        // Fall back to the main Company-tab dropdown if the user never touched the chat's own picker.
-        if (!primaryCo) {
-            const t = byId("dropdownToggle");
-            if (t && t.dataset.value) primaryCo = { fincode: t.dataset.value, name: t.value, sector: t.dataset.sector };
-        }
-
         addMsg("user", q);
         input.value = ""; input.style.height = "auto";
-        history.push({ role: "user", content: q });
+        const turn = nextTurn++; // stamped on this question's messages and, at the end, on its memory note
+        currentDebugTurn = turn; // every debugAppend from here on belongs to this turn (see saveTurnLog)
+        history.push({ role: "user", content: q, turn });
         persistHistory();
         debugAppend({ kind: "question", question: q });
         newStepGroup();
@@ -9376,23 +10833,43 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
         currentAbort = abortController; // must follow the declaration — const is not hoisted
 
         // ── Clarifying question ──
-        // A vague question is the most expensive kind: the model picks a period or an entity,
-        // spends a full research cycle on it, and gets told it guessed wrong — so the whole cycle
-        // runs twice. One cheap call up front to ask "which period?" costs a fraction of a paisa
-        // and replaces an entire wasted investigation.
-        //
-        // Deliberately ends the turn rather than blocking mid-flight waiting for an answer. The
-        // reply simply arrives as the user's next message, and since history is already fed to the
-        // model, the follow-up carries full context with no extra plumbing — and the user keeps a
-        // normal composer instead of a modal they cannot escape.
-        // Both calls only depend on the SAME upstream state (history, q) — not on each other's
-        // verdict — so kick them off together instead of paying one whole round trip's latency
-        // running them back to back (see runClarifier/runClassifier below for the rationale each
-        // already had on its own). skipClarifierOnce means we just asked a clarifying question
-        // last turn and this message is the answer — never ask again immediately, but the
-        // classifier still needs to run as normal for this turn.
-        const runClarifier = async () => {
+        // One cheap call up front to ask "which period/entity?" when genuinely ambiguous, rather
+        // than letting the model guess wrong and burn a full wasted gather/act cycle. Ends the turn
+        // rather than blocking; the reply just arrives as the user's next message. Awaits the
+        // workbook index build below before firing its own request — a real, deliberate dependency
+        // now (not run fully in parallel), because the index is what lets it tell "a name that's
+        // genuinely ambiguous" apart from "a name that's already sitting in THIS workbook" (e.g. it
+        // was asking which NMDC the user meant even though NMDC was right there in the sheets).
+        // skipClarifierOnce suppresses asking again immediately after this message answers the
+        // last clarification.
+        const CLARIFIER_WB_CHARS = 6000; // compactText has no size cap of its own; bound what a cheap/minimal-effort model has to read
+        const runClarifier = async (wbPromise) => {
             try {
+                const wb = await wbPromise;
+                const wbBlock = wb.compactText
+                    ? `\n\n=== OPEN WORKBOOK (structure only — no values) ===\n${wb.compactText.slice(0, CLARIFIER_WB_CHARS)}\n=== END ===`
+                    : "";
+                const clarMessages = [
+                    {
+                        role: "system",
+                        content: `You check if a question is clear enough to act on, before any work begins.\n\n` +
+                            `The ONLY thing worth asking about is which COMPANY is meant — when a\n` +
+                            `name genuinely matches several different real companies, and guessing\n` +
+                            `wrong would fetch the wrong one's data. Check the open workbook below\n` +
+                            `first — if that company is already in it, treat it as resolved; don't\n` +
+                            `ask just because the bare name could also match some other, unrelated\n` +
+                            `company elsewhere.\n\n` +
+                            `Never ask about anything else — not a missing time period, not which\n` +
+                            `data series/column/unit to use, not a metric's exact definition. Pick\n` +
+                            `the most reasonable interpretation yourself and proceed. Never ask just\n` +
+                            `to be safe.\n\n` +
+                            `Reply with only this JSON: {"ask": true/false, "question": "...", "options": ["...", "..."]}` +
+                            wbBlock,
+                    },
+                    ...history.slice(-4).map(m => ({ role: m.role, content: String(m.content ?? "").slice(0, 500) })),
+                    { role: "user", content: q },
+                ];
+                logLLMInput("clarifier", CLARIFIER_MODEL, clarMessages);
                 const clarRes = await fetch(OPENROUTER_URL, {
                     method: "POST",
                     headers: { "Content-Type": "application/json", "Authorization": `Bearer ${OPENROUTER_KEY}` },
@@ -9404,592 +10881,349 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
                         reasoning: { effort: "minimal" },
                         usage: { include: true },
                         response_format: { type: "json_object" },
-                        messages: [
-                            {
-                                role: "system",
-                                content: `You screen questions for an Excel financial-research assistant before it spends expensive data lookups. Reply with ONLY a JSON object: {"ask":bool,"question":string,"options":[string]}.\n` +
-                                    `Set ask=true ONLY when the question is genuinely ambiguous in a way that would change which data gets fetched, and a one-line answer from the user would resolve it. The commonest case by far is an unspecified TIME PERIOD ("compare revenue" — over what years?). Others: an ambiguous company name matching several listed entities, or an unstated basis (standalone vs consolidated) where it would materially change the answer.\n` +
-                                    `Set ask=false for anything answerable as asked, anything about the open workbook, follow-ups whose context is already in the conversation, and general or conversational messages. Do NOT ask out of mere politeness or for detail you could sensibly default. When in doubt, ask=false — an unnecessary question is more annoying than a sensible default.\n` +
-                                    `"question" is one short sentence. "options" is 2-4 concrete tappable answers, most likely first, each a phrase the user could send as-is (e.g. "Last 3 years", "Last 5 years", "FY2026 only"). Omit options only if none sensibly apply.\n` +
-                                    `Examples: "compare revenue and profit of X and Y" -> {"ask":true,"question":"Over which period should I compare them?","options":["Last 3 years","Last 5 years","Latest financial year only"]}. "what was Reliance's FY2025 revenue" -> {"ask":false,"question":"","options":[]}. "make B2:B10 bold" -> {"ask":false,"question":"","options":[]}.`,
-                            },
-                            ...history.slice(-4).map(m => ({ role: m.role, content: String(m.content ?? "").slice(0, 500) })),
-                            { role: "user", content: q },
-                        ],
+                        messages: clarMessages,
                     }),
                 });
                 if (!clarRes.ok) return null;
                 const clarData = await clarRes.json();
                 const clarCost = Number(clarData.usage?.cost || 0);
                 const parsed = JSON.parse(clarData.choices?.[0]?.message?.content || "{}");
-                console.log(`[Chat] ❓ clarify=${parsed.ask === true} (clarifier $${clarCost.toFixed(6)})`);
                 return { ask: parsed.ask === true, question: parsed.question, options: parsed.options, cost: clarCost };
             } catch (e) {
-                console.warn("[Chat] clarifier failed — continuing without asking:", e);
                 return null;
             }
         };
 
-        // ── Tool-set classifier (+ company auto-pin, piggybacked) ──
-        // The two tool families cost ~5,900 tokens of schema between them (MCP ~2,100, Excel
-        // ~3,800) and are re-sent on EVERY iteration of the loop below — so on a long
-        // investigation the definitions alone can run to six figures of tokens. Most questions
-        // only ever need ONE family: "what was Reliance's revenue" never touches Excel, and
-        // "make B2:B10 bold" never touches the research platform. One cheap call decides which
-        // families to send, and an Excel-only question additionally skips opening the MCP
-        // connection entirely (worth ~1s of latency on its own).
-        //
-        // This deliberately does NOT try to plan or order the tools. The model already
-        // sequences correctly on its own (it won't chart numbers it hasn't fetched), and real
-        // requests interleave the families anyway — "update my model with the latest revenue"
-        // is read-sheet, then fetch, then write. Constraining the ORDER would force retries
-        // that cost more than the schemas saved; only OMISSION is safe.
-        //
-        // Fails OPEN in every direction: any error, timeout, or unparseable reply falls back to
-        // sending both families, i.e. exactly the old behaviour. A misclassification must never
-        // be able to make a question unanswerable.
-        //
-        // Now run CONCURRENTLY with runClarifier above rather than only after it resolves (see
-        // the call site just below). The one real tradeoff: previously, a clarifying-question
-        // verdict skipped this call entirely — it never even started. Now the request is already
-        // in flight by the time that verdict comes back, so its (tiny, ~$0.00006-0.0003) cost is
-        // paid either way; the call site below still bills it correctly in that case rather than
-        // letting it go untracked.
-        const CLASSIFIER_MODEL = "openai/gpt-5-mini";
-        const runClassifier = async () => {
-            let needsData = true, needsExcel = true, cost = 0;
-            try {
-                const clsRes = await fetch(OPENROUTER_URL, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${OPENROUTER_KEY}` },
-                    signal: abortController.signal,
-                    body: JSON.stringify({
-                        model: CLASSIFIER_MODEL,
-                        temperature: 0,
-                        // gpt-5-mini is a REASONING model: reasoning tokens are spent from this
-                        // same budget before any content is produced. At a "sensible for one line
-                        // of JSON" value like 60 it burns the entire allowance thinking and returns
-                        // content:null with finish_reason "length" — which, because this block
-                        // fails open, would look like a working feature that never once narrowed
-                        // the tool set. Hence a budget far larger than the reply needs...
-                        max_tokens: 400,
-                        // ...and effort "minimal", which takes reasoning to 0 tokens for what is a
-                        // trivial routing decision: measured 1.3s and $0.000063 per call, against
-                        // 4.2s and $0.000373 on the default effort, with identical answers.
-                        reasoning: { effort: "minimal" },
-                        usage: { include: true },
-                        response_format: { type: "json_object" },
-                        messages: [
-                            {
-                                role: "system",
-                                // The literal word "json" MUST appear somewhere in these messages:
-                                // response_format json_object is rejected by the provider without it
-                                // ("input messages must contain the word 'json'"), and because this
-                                // whole block fails open, that 400 would be invisible — every
-                                // classification silently falling back to both tool families while
-                                // appearing to work.
-                                content: `Decide which tool families an Excel research assistant needs for the user's latest message, and which single company (if any) the conversation is currently about. Reply with ONLY a JSON object of the form {"data":bool,"excel":bool,"company":string|null}.\n` +
-                                    `data = needs GoIndia's research platform (company financials, earnings calls, sentiment, broker reports, sector/market figures) — anything the assistant cannot answer from the conversation or the open workbook alone.\n` +
-                                    `excel = needs to read or change the user's open workbook (reading cells, writing values/formulas, formatting, charts, sheets, auditing, undo).\n` +
-                                    `Both are often true: fetching figures AND putting them in the sheet. When genuinely unsure, answer true — a missing tool family is far worse than an unused one.\n` +
-                                    `company = the company this LATEST message is about, exactly as written by the user (their own wording, not a corrected/expanded legal name) — from the latest message if it names one, otherwise from the most recent earlier message that clearly established one ("make a table of X, Y, Z for it" after a message about Reliance -> "Reliance"). null if no company is identifiable at all, or if the message is about a sector/category rather than one company.\n` +
-                                    `Examples: "what was Reliance's revenue last year" -> {"data":true,"excel":false,"company":"Reliance"}. "make B2:B10 bold" -> {"data":false,"excel":true,"company":null}. "chart Reliance's revenue" -> {"data":true,"excel":true,"company":"Reliance"}. "why is C7 wrong" -> {"data":false,"excel":true,"company":null}. "summarise what you just told me" -> {"data":false,"excel":false,"company":null}.`,
-                            },
-                            // Recent turns included so follow-ups resolve ("now chart it" only makes
-                            // sense against what came before).
-                            ...history.slice(-4).map(m => ({ role: m.role, content: String(m.content ?? "").slice(0, 500) })),
-                            { role: "user", content: q },
-                        ],
-                    }),
-                });
-                if (clsRes.ok) {
-                    const clsData = await clsRes.json();
-                    const clsCost = clsData.usage?.cost;
-                    if (clsCost != null) cost = Number(clsCost) || 0;
-                    const parsed = JSON.parse(clsData.choices?.[0]?.message?.content || "{}");
-                    // Only narrow on an explicit false — anything else leaves the family enabled.
-                    if (parsed.data === false) needsData = false;
-                    if (parsed.excel === false) needsExcel = false;
-                    // A "neither" verdict (pure conversational follow-up) still gets Excel tools:
-                    // cheap insurance, and the model may still want to glance at the sheet.
-                    if (!needsData && !needsExcel) needsExcel = true;
-                    console.log(`[Chat] 🧭 tools: data=${needsData} excel=${needsExcel} (classifier $${cost.toFixed(6)})`);
-
-                    // ── Auto-pin the company in play ──
-                    // primaryCo previously updated ONLY via the "Acting on" picker/dropdown — never
-                    // from anything typed in chat — so a follow-up referring back to an
-                    // already-discussed company ("...make a table of X for it") left the system
-                    // prompt asserting no company was selected at all, even though the model could
-                    // plainly see the earlier mention in its own message history. Piggybacking the
-                    // extraction on this ALREADY-RUNNING, already-costed classifier call (rather
-                    // than a separate one) keeps this at zero added latency and zero added cost.
-                    //
-                    // The extracted "company" field is the user's OWN wording ("Reliance"), not a
-                    // resolved entity — trusting a small model to invent a fincode from memory would
-                    // risk silently querying the wrong company, worse than asking again. Instead it
-                    // is matched against allCompanies, the SAME authoritative list the manual picker
-                    // uses, requiring the match to be a name-prefix (so "Reliance" matches "Reliance
-                    // Industries Ltd." but not an unrelated company that merely contains the
-                    // substring somewhere in the middle) with every "(Rights Issue)"/"DVR"/"Partly
-                    // Paid" variant excluded first — the same disambiguation rule already given to
-                    // the model in its own instructions below. If that leaves more than one genuine
-                    // candidate (a bare "Reliance" really is ambiguous across Industries/Power/
-                    // Infrastructure/Communications), auto-pin refuses to guess and leaves primaryCo
-                    // untouched, falling back to the model's own search_company resolution exactly
-                    // as before — a wrong silent guess here would be worse than no guess at all.
-                    const extractedCo = typeof parsed.company === "string" ? parsed.company.trim() : "";
-                    if (extractedCo.length >= 3) {
-                        try {
-                            const norm = (s) => String(s || "").toLowerCase().replace(/[.,]/g, "").replace(/\s+/g, " ").trim();
-                            const isVariant = (name) => /\((?:rights?[\s-]?(?:issue|entitlement)?|partly\s*paid|dvr)\)|(?:^|\s)-\s*rights?\b|\bdvr\b/i.test(name);
-                            const wanted = norm(extractedCo);
-                            const all = await ensureCompanyList();
-                            const candidates = all.filter(c => {
-                                const nc = norm(c.CompName);
-                                return nc && (nc.startsWith(wanted) || wanted.startsWith(nc)) && !isVariant(c.CompName);
-                            });
-                            if (candidates.length === 1) {
-                                const c = candidates[0];
-                                if (!primaryCo || primaryCo.fincode !== c.fincode) {
-                                    primaryCo = { fincode: c.fincode, name: c.CompName, sector: c.sector_type };
-                                    companyInput.value = c.CompName;
-                                    console.log(`[Chat] 📌 auto-pinned company: ${c.CompName} (fincode ${c.fincode}, from "${extractedCo}")`);
-                                }
-                            } else if (candidates.length > 1) {
-                                console.log(`[Chat] 🧭 "${extractedCo}" matched ${candidates.length} companies — ambiguous, leaving primaryCo as-is`);
-                            }
-                        } catch (e) { /* best-effort — the model's own search_company remains the fallback */ }
-                    }
-                }
-            } catch (e) {
-                console.warn("[Chat] classifier failed — sending both tool families:", e);
-            }
-            return { needsData, needsExcel, cost };
+        // Turn notes for the current workbook, for turns OLDER than the raw window: the newest
+        // messages are sent as they are and their notes would only repeat them.
+        const sessionNotes = (wbName, opts) => {
+            const turns = history.slice(-(RAW_WINDOW_MESSAGES + 1), -1).map(m => Number(m.turn)).filter(n => n > 0);
+            return memNotes(memStore, memBookKey(docUrl(), wbName), turns.length ? Math.min(...turns) : Infinity, opts);
         };
 
-        // Kick both off TOGETHER — this is the actual concurrency win. Previously the clarifier
-        // was awaited to completion before the classifier's fetch was even issued, paying its
-        // full round trip (~1-2s) on every turn for a decision the classifier's own answer never
-        // depends on.
-        const classifierPromise = runClassifier();
-        const clarifierPromise = skipClarifierOnce ? null : runClarifier();
-
-        // Connect to GoIndia's MCP server EAGERLY too, concurrently with the two calls above,
-        // rather than waiting for the classifier's needsData verdict first. Most real questions
-        // turn out to need it (an Excel-only turn is the exception, not the rule), so gating the
-        // connection behind the classifier meant paying its round trip and THEN the MCP
-        // connection's round trip(s) one after another for the common case. Unlike the classifier/
-        // clarifier, this costs no wallet money either way: ensureMcpAccess and the MCP session
-        // itself are not OpenRouter calls, so a session opened speculatively for a turn that turns
-        // out to be pure-Excel just gets closed unused below, not billed for nothing.
-        //
-        // Returns a plain descriptor rather than touching the DOM here — no "Connecting…" card is
-        // shown until the classifier confirms this turn actually needs it (see the call site
-        // below), so a pure-Excel question still shows nothing about MCP at all, exactly as
-        // before. Awaiting an already-settled promise later just reads the result; it does not
-        // re-run the work or add a second round trip.
-        const mcpConnectPromise = (async () => {
-            let access;
-            try { access = await ensureMcpAccess(); }
-            catch (e) { return { kind: "failed", access: null, error: String(e.message || e) }; }
-            if (access.flag !== 3) return { kind: "no-access", access, error: null };
-            try {
-                const mcpUrl = `${MCP_SERVER_URL}?token=${encodeURIComponent(access.mcp_api_key)}&skills=false`;
-                const client = new McpClient(mcpUrl, abortController.signal);
-                await client.open();
-                await client.initialize();
-                const tools = toOpenAITools(await client.listTools());
-                return { kind: "connected", access, client, tools, serverInstructions: client.serverInstructions || "" };
-            } catch (e) {
-                return { kind: "failed", access, error: String(e.message || e) };
-            }
-        })();
+        // The index build starts FIRST (fire-and-forget promise) so the clarifier's own internal
+        // await on it costs nothing beyond the build's own time — it doesn't wait for anything else
+        // first. If the clarifier ends up asking a question, the build still isn't wasted: should it
+        // instead say ask:false, this SAME turn's main loop below reuses this very same wbPromise.
+        const wbPromise = getWorkbookSummarySafe();
+        const clarifierPromise = skipClarifierOnce ? null : runClarifier(wbPromise);
 
         if (clarifierPromise) {
             const clarifierResult = await clarifierPromise;
             if (clarifierResult && clarifierResult.ask && clarifierResult.question) {
-                // The classifier's request was already in flight the moment we learned we are
-                // asking instead of proceeding — that is real spend regardless of whether its
-                // verdict ever gets used, so it must still be billed here, not silently dropped.
-                const classifierResult = await classifierPromise.catch(() => ({ cost: 0 }));
-                const earlyCost = (clarifierResult.cost || 0) + (classifierResult.cost || 0);
-                if (earlyCost > 0) deductChatCost({ question: q, costUsd: earlyCost });
+                if (clarifierResult.cost > 0) deductChatCost({ question: q, costUsd: clarifierResult.cost });
                 hideThinking();
                 const bubble = addMsg("bot", String(clarifierResult.question));
                 renderClarifyOptions(bubble, Array.isArray(clarifierResult.options) ? clarifierResult.options : []);
-                history.push({ role: "assistant", content: String(clarifierResult.question) });
+                history.push({ role: "assistant", content: String(clarifierResult.question), turn });
                 persistHistory();
                 // The user's answer is the next message; screening it again would just risk a
                 // second question about the same thing.
                 skipClarifierOnce = true;
                 stream.scrollTop = stream.scrollHeight;
+                if (debugAutoSave) saveTurnLog(turn);
                 setBusy(false); currentAbort = null;
                 return;
             }
         }
         skipClarifierOnce = false;
-        let mcpClient = null;
-        // Summed across every OpenRouter call this question takes — the classifier below included,
+        // Summed across every OpenRouter call this question takes — the clarifier above included,
         // plus every tool-calling round trip, plus the forced-final-answer fallback if it fires —
         // deducted from the wallet and logged once the full answer is in, see deductChatCost near
         // the bottom.
         let totalCostUsd = 0;
+        const turnActions = []; // successful Excel tool calls this turn, for the turn's memory note (see memSummarizeActions)
         try {
-            const { needsData, needsExcel, cost: classifierCost } = await classifierPromise;
-            totalCostUsd += classifierCost || 0;
+            const wb = await wbPromise;
+            const workbookSummary = wb.text;
+            const bookName = wb.name || "";
+            // Reused by search_workbook's needed_periods verdict (see toolSearchWorkbook) so it can
+            // call searchWorkbookSheets() directly against the SAME analyzed sheets this turn's own
+            // index was built from, instead of re-scanning the workbook.
+            currentTurnSheets = wb.sheets || [];
+            console.log(`[Chat] 📋 workbook summary: ${workbookSummary.length} chars from ${currentTurnSheets.length} sheet(s) with data\n${workbookSummary || "(unavailable — the loop runs without it)"}`);
 
-            // primaryCo may just have been auto-pinned above from conversation context, so
-            // contextNote is computed here rather than before the classifier ran. Its negative
-            // branch used to read "No company is currently selected in the add-in." — flat, and
-            // phrased as if that settles the question. It doesn't: even a company auto-pin miss
-            // (ambiguous match, or a reference too indirect for the classifier to catch) doesn't
-            // mean the conversation is silent on the matter — the actual transcript, sent below as
-            // this turn's own message history, may still say otherwise. A structured,
-            // authoritative-sounding system statement contradicting the visible transcript is worse
-            // than saying nothing — it tells the model to disbelieve what it can plainly read.
-            // Observed live: the identical wide multi-year metric table took ~10 minutes when the
-            // company was left implicit versus resolving fast once it was named again — consistent
-            // with the model hedging on the contradiction instead of pinning the entity down first.
-            const contextNote = primaryCo
-                ? `Selected in the add-in — primary: ${primaryCo.name} (fincode ${primaryCo.fincode}, sector ${primaryCo.sector || "unknown"})` +
-                  (compareCo ? `; compare: ${compareCo.name} (fincode ${compareCo.fincode}, sector ${compareCo.sector || "unknown"}).` : ".")
-                : "No company is pinned via the add-in's own selector. This does NOT mean no company is in play — if the conversation history below names or clearly discusses one, that company is what the user means; resolve it with search_company and proceed, the same as if it had been typed in this very message. Only ask the user to name a company if the conversation genuinely gives you nothing to go on.";
+            // This loop reads raw date serials off the sheet directly and has to work out each
+            // one's Indian FY quarter itself with nothing to check against — a prior version
+            // mislabeled quarter-end months as starting the FY they end, so the worked example
+            // below anchors that rule explicitly with the exact case that went wrong, corrected.
+            const fcNow = new Date();
+            const fcPad = (n) => String(n).padStart(2, "0");
+            const fcToday = `${fcNow.getFullYear()}-${fcPad(fcNow.getMonth() + 1)}-${fcPad(fcNow.getDate())}`;
+            const fcFyEnd = fcNow.getMonth() >= 3 ? fcNow.getFullYear() + 1 : fcNow.getFullYear(); // Indian FY: Apr-Mar
+            const fcFy2 = (y) => `FY${String(y).slice(-2)}`;
+            const fiscalContextNote =
+                `Today is ${fcToday}. Current year: ${fcFy2(fcFyEnd)} (April–March). Last completed year: ${fcFy2(fcFyEnd - 1)}. A quarter is named for the year it ENDS in — e.g. June 2025 is Q1 of FY26, March 2025 is Q4 of FY25.`;
 
-            let mcpOpenAITools = [], mcpUnavailableReason = "", mcpServerInstructions = "";
-            if (!needsData) {
-                // Not an error, and deliberately NOT surfaced as an "unavailable" reason — the
-                // system prompt branches on mcpOpenAITools.length, and telling the model research
-                // data is "unavailable" would make it refuse questions it was never asked.
-                mcpUnavailableReason = "";
-                // The eager connection above may still be mid-flight, or may already have opened a
-                // session neither of us needs now — either way, let it settle in the background and
-                // close it rather than blocking this (pure-Excel) turn on its teardown. No card was
-                // ever shown for this turn, matching what the user sees today exactly.
-                mcpConnectPromise.then(r => { if (r.kind === "connected" && r.client) r.client.close().catch(() => {}); }).catch(() => {});
-            } else {
-                // No card yet for the "no active subscription" case — matches today, where that
-                // branch never shows one either. Only a genuine connection attempt gets a card,
-                // created here (not inside mcpConnectPromise above) specifically so a pure-Excel
-                // turn never sees "Connecting to GoIndia MCP…" flash by while the eager connection
-                // resolves in the background for a turn that will discard it.
-                const conn = await mcpConnectPromise;
-                if (conn.kind === "no-access") {
-                    const access = conn.access;
-                    mcpUnavailableReason = access.flag === 2 ? "MCP access has been revoked for this account."
-                        : access.flag === 1 ? "this account doesn't have an active MCP research subscription."
-                        : "couldn't verify MCP research access for this account.";
-                } else {
-                    const mcpCard = addCard("Connecting to GoIndia MCP…", "run");
-                    if (conn.kind === "connected") {
-                        mcpClient = conn.client;
-                        mcpOpenAITools = conn.tools;
-                        mcpServerInstructions = conn.serverInstructions;
-                        await settleCard(mcpCard, "done", "✓");
-                        console.log(`[Chat] 📖 server instructions: ${mcpServerInstructions.length} chars`);
-                    } else {
-                        mcpUnavailableReason = conn.error || "couldn't connect to GoIndia MCP.";
-                        await settleCard(mcpCard, "err", "✕");
-                    }
-                }
-            }
+            // No company is auto-pinned any more (see the removed primaryCo/autoPinCompany — a
+            // stale pin silently reused for the wrong company several turns later was a real risk,
+            // and the research service already resolves names, ambiguous ones included, itself; a
+            // pin bought less than it cost). The model resolves who's being discussed from the
+            // conversation directly, exactly like a person reading the same thread would.
+            const contextNote =
+                "if the conversation history below names or clearly discusses one, that company is what the user means; resolve it by name and proceed, the same as if it had been typed in this very message. Only ask the user to name a company if the conversation genuinely gives you nothing to go on." +
+                (compareCo ? ` A second company has been explicitly added to compare against: ${compareCo.name} (fincode ${compareCo.fincode}, sector ${compareCo.sector || "unknown"}).` : "");
+
+            // Short notes on earlier turns that have left the 8-message window: what was asked and done.
+            const notes = sessionNotes(bookName, { maxNotes: 5, maxChars: 1500 });
+            if (notes) console.log(`[Chat] 🧠 earlier notes given to the loop (${notes.split("\n").length}):\n${notes}`);
+            const notesBlock = notes ? `\n\n=== SESSION NOTES — earlier turns no longer shown (what was asked and done; the workbook is the source of truth for values) ===\n${notes}\n=== END NOTES ===` : "";
+            const workbookSnapshot = workbookSummary
+                ? `\n\n=== OPEN WORKBOOK — snapshot taken when this question was asked; your own edits this turn are not reflected in it ===\n${workbookSummary}\n=== END SNAPSHOT ===`
+                : "";
 
             const system =
-                `You are GoIndia Stocks' in-Excel research assistant. ${contextNote}\n` +
-                (mcpOpenAITools.length
-                    ? `You have direct tool access to GoIndia's research data platform (financials, earnings calls, sentiment, broker reports, sector/market data, and more) via the tools below, plus tools to read/write the user's open workbook. Never invent or guess figures — fetch them.\n`
-                    // Three cases, not two. When the classifier judged this question doesn't need
-                    // research data, the tools are absent by CHOICE, not broken — saying
-                    // "unavailable" there would make the model refuse a question it can answer, and
-                    // the reason string is empty anyway. It still gets the never-invent-figures
-                    // rule, plus a way out if the classifier got it wrong.
-                    : mcpUnavailableReason
-                        ? `GoIndia's research data tools are unavailable this turn (${mcpUnavailableReason}) — you only have the Excel read/write tools below. If the user's request needs data you don't already have from this conversation, say so rather than inventing numbers.\n`
-                        : `This question was routed as not needing GoIndia's research data platform, so only the tools below are loaded. Answer from the conversation and the workbook. Never invent or guess figures — if it turns out you genuinely need company financials or market data you don't have, say so plainly and suggest the user re-ask, rather than making numbers up.\n`) +
-                `Rules:\n` +
-                `- If a data tool needs a company identifier you don't have, look it up via the available tools first — never guess.\n` +
-                `- Call get_workbook_overview at the start of a task (or read_range on the specific area) before writing any formula that references existing cells — never guess row/column positions. Prefer a named range from the overview over a guessed cell address when one exists.\n` +
-                `- write_cells/fill_formula only work on a sheet that already exists — if the user names a sheet that isn't in the workbook (check get_workbook_overview first), call create_sheet before trying to write to it, rather than reporting that you "can't" create it.\n` +
-                `- Use write_cells for values/formulas at specific cells, and fill_formula (never a hand-built 2D formula array) when the same formula repeats down or across a range — relative references adjust automatically. Both only touch the cells you specify; nothing else on the sheet is affected.\n` +
-                `- Every write is shown to the user for approval before it happens unless they've turned on auto-apply. If a write_cells/fill_formula/undo_last_change result comes back with rejected: true or blocked: true, tell the user rather than assuming it happened — only retry with allow_overwrite:true if the user actually confirms they want that data overwritten.\n` +
-                `- After a write that could affect other formulas, call recalculate_and_check and mention any errors it finds rather than assuming success. If a change turns out wrong, use undo_last_change rather than trying to manually reconstruct the previous state.\n` +
-                `- Use trace_dependencies to explain WHY a value is what it is (trace its precedents) instead of re-reading formulas one cell at a time. Use search_workbook to locate where something is calculated or referenced instead of reading every sheet.\n` +
-                `- Visual/structural requests have their own tools — format_cells (bold, currency, colors, borders), conditional_format (highlight/color-scale by value), create_chart (visualize a comparison), autofit (fix narrow columns after writing new data), tables (make a range sortable/filterable), named_ranges (so a cell can be called "WACC" instead of guessed by address), modify_structure (insert/delete rows/columns, rename/hide a sheet), and comments (leave a note explaining a change). Prefer these over write_cells for anything that isn't a value or formula.\n` +
-                `- Compute derived figures yourself (YoY growth, CAGR, margins, ratios, averages) from the numbers you fetch.\n` +
-                // Hoisted out of the platform's own instruction block below. Both rules are stated
-                // down there, but they sit at the very end of ~5,000 characters and were observed
-                // being broken anyway: one replay lost a whole round trip to
-                // "Truncation detected: [:3] slices string output". Repeating the two rules that
-                // actually cost round trips, up here where they are short and unmissable, is worth
-                // the handful of tokens.
-                // Ordering guidance, not a hard pipeline. Stated as a prompt rule rather than
-                // enforced by withholding tools, because real requests interleave: "update my
-                // model with the latest revenue" is read-sheet, then fetch, then write. Costs
-                // nothing and no extra round trip, unlike deciding the order in a separate call.
-                `- When a question names companies, resolve them with search_company EARLY (it is cheap, and every data table is keyed by fincode, not by name) — you may call it in the same batch as get_catalog rather than waiting for the catalog to come back.\n` +
-                `- If THIS message doesn't name a company but an earlier message in this conversation did ("...for it", "same company", "now add X"), that earlier company is who the user means — resolve it via search_company yourself rather than treating the request as ambiguous or asking the user to repeat it.\n` +
-                // Observed: a metric name ("Gross Block") failed to resolve against
-                // metric_registry, and rather than broadening its OWN search terms on the SAME
-                // table, the model re-fetched get_catalog from scratch — a second ~52,000-char
-                // table-selection menu that could never have contained an individual metric name,
-                // since it answers "which table?", a question already settled turns earlier. Costs
-                // real money for zero new information: the actual fix (search metric_registry more
-                // broadly) still had to happen afterward anyway.
-                `- If a specific METRIC name doesn't resolve in metric_registry, broaden your OWN keyword search there (try synonyms, partial matches, different capitalisation) — do NOT re-fetch get_catalog to look for it. get_catalog only ever answers "which TABLE has this kind of data", a question you already settled the first time you called it; it does not list individual metric names, so calling it again for a missing metric returns nothing new and only costs another expensive round trip. If metric_registry genuinely has no match after a broadened search, report the metric as unavailable rather than fabricating it.\n` +
-                // The one genuinely Excel-specific shortcut available here. The add-in's Download
-                // Data feature writes "Key Financials", "Quarterly Data" and "Annual Data" sheets
-                // for a company; when those are already present for the company being asked about,
-                // the answer is sitting in the workbook and a research round trip is pure waste.
-                `- FIRST check the workbook: if get_workbook_overview shows "Key Financials", "Annual Data" or "Quarterly Data" sheets already downloaded for a company in the question, read those figures with read_range instead of fetching them again. Only go to the research tools for companies or periods the workbook does not already cover.\n` +
-                `- In run_query code: NEVER slice or truncate a helper function's output (no result[:3], no data[0:500]) — the tool REJECTS any code containing a string slice and the call is wasted. Print or return the full value.\n` +
-                // Observed failure: `SELECT * FROM stocks_info WHERE ...` was rejected outright and
-                // cost a whole round trip, then the TOP 20 retry dumped one enormous row of ~70
-                // columns nobody wanted. Both halves of that are worth heading off.
-                `- In SQL: every SELECT needs TOP N, and "SELECT *" is REJECTED without it. Name the columns you actually need rather than selecting everything — a wide table like stocks_info has dozens of columns and dumping them wastes the turn.\n` +
-                // Observed: estimate = "no" failed with Invalid column name 'no'. This is SQL
-                // Server, where double quotes delimit an IDENTIFIER, so "no" was read as a column
-                // rather than the string. Easy to write by accident when the SQL is being built
-                // inside a Python f-string, which is exactly how these queries get assembled.
-                `- This is SQL Server (T-SQL): string literals take SINGLE quotes — estimate = 'no'. DOUBLE quotes mean an identifier, so estimate = "no" fails with Invalid column name 'no'. When building SQL inside a Python f-string, keep the outer string double-quoted and the SQL literals single-quoted.\n` +
-                // Observed: filter_id IN (1, 5, 12, 23) was guessed, and pulled back
-                // "Employee Cost Growth" — a real metric_registry row, but a GROWTH metric, which
-                // lives in yearly_growth (Type='C'), not annual_financials (Type='Y'). Selecting it
-                // as a column of annual_financials failed.
-                `- Never guess filter_id values in metric_registry — look metrics up by NAME, and always filter by the Type that matches the table you are about to query (Type='Y' for annual_financials, 'Q' for quarterly_financials, 'C' for the growth tables). A metric existing in the registry does NOT mean it is a column of the table you want: growth/CAGR metrics live in yearly_growth and quarterly_growth, not in annual_financials.\n` +
-                // Observed: queried sector_metric_master for "metric_id" and stocks_info for
-                // "company_name". Neither exists (they are "id" and "CompName"). Both cost a turn,
-                // and in the first case get_schema was called for that very table one turn LATER.
-                `- Call get_schema for a table BEFORE writing SQL against it, and use the exact column names it gives you. Do not infer a column name from the table's description or from what a similar table calls it — "metric_id" and "company_name" both look obvious and both do not exist.\n` +
-                // Observed: groupby(...).mean() failed with "dtype 'str' does not support mean" —
-                // these tables return numeric-looking columns as TEXT, the same trap to_float()
-                // exists for on the add-in's own API responses.
-                `- Numeric columns frequently come back as TEXT. Before any arithmetic, aggregation or sorting, coerce them: df[col] = pd.to_numeric(df[col], errors='coerce').\n` +
-                // Observed: dom['data_date'].str[:7] was rejected as "truncation". That is a
-                // legitimate pandas column operation, not truncating a tool's output — the server's
-                // check is a plain text match for slice syntax and cannot tell the difference.
-                // Cheaper to avoid the syntax than to argue with it.
-                `- Avoid [:n] slice syntax ANYWHERE in run_query code, even legitimate pandas ones like series.str[:7] — the server rejects it on sight as truncation. Use pd.to_datetime(x).dt.strftime('%Y-%m'), .str.slice(), or an equivalent instead.\n` +
-                // Observed: it named a top-5 before the data supporting the ranking had been
-                // fetched (the previous result was cut off before two of the five appeared).
-                // The gold question resolved ten "gold-exposed" companies and ranked a bullion
-                // refiner top by revenue — its turnover is pass-through throughput, so every margin
-                // comparison after it was apples-to-oranges. One confirmation would have caught it.
-                `- When the user names a CATEGORY of companies rather than specific ones ("companies with gold exposure", "large-cap IT", "cement peers"), resolve your candidate list and then call confirm_companies BEFORE analysing them. Analyse exactly the list it returns. Skip this when the user already named the companies.
-` +
-                `- When you do rank a resolved list, sanity-check that the entities are comparable businesses. A refiner or trading house whose revenue is pass-through turnover should not be ranked by revenue against retailers — call it out rather than letting it top the table.
-` +
-                `- Any ranking ("top 5 by revenue", "largest", "best performing") must come from figures you have actually fetched in THIS conversation. Never rank from prior knowledge and then fetch to confirm — if the data you have is incomplete, fetch the rest first or say the ranking is partial.\n` +
-                // Observed failure, and by far the most expensive one: search_company returned
-                // THREE "Tata Motors" entities, the model picked one, found it only had two years,
-                // and then spent SIX round trips hunting a better-populated listing — re-running
-                // search_company, scanning company_name LIKE, querying a different fincode — before
-                // reporting the ORIGINAL entity's figures anyway. Every one of those turns was
-                // discarded work.
-                `- Sparse history is a FACT to report, not a problem to solve. If the entity you resolved has fewer years than asked for, say so and move on with what exists. Do NOT go hunting for a better-populated listing of the same company: do not re-run search_company, do not scan company_name for variants, do not try sibling fincodes. A demerged or restructured company genuinely has a short restated history, and the user is better served by an honest "only FY25-26 available for this entity" than by figures quietly taken from a different legal entity.\n` +
-                `- When search_company returns several entities for one name, pick the plain listed parent (the exact name, no "DVR"/"Partly Paid"/"- Rights" suffix) and say which one you used.\n` +
-                `- Every run_query runs in a FRESH Python process: nothing from a previous call still exists. Fetch and process everything you need inside ONE script rather than building state across calls.\n` +
-                `- Be concise in your final answer.` +
-                // Appended LAST so the research platform's own rules are the most recent thing the
-                // model reads, and so nothing above can be mistaken for overriding them. Only
-                // present when the MCP handshake actually returned them (see initialize), so an
-                // Excel-only or MCP-unavailable turn carries none of this weight. Costs ~1,250
-                // tokens per request, which pays for itself many times over if it removes even one
-                // wasted round trip — each of those re-sends the whole prompt AND the tool schemas.
-                (mcpOpenAITools.length && mcpServerInstructions
-                    ? `\n\nThe following operating rules come from GoIndia's research data platform itself and govern how its tools above must be used. Follow them exactly — they override your own habits about how to sequence or retry these tools. They do NOT apply to the Excel tools.\n\n${mcpServerInstructions}`
-                    : "");
+                `You are GoIndiaStocks' intelligent Financial+Excel AI chat assistant inside Excel. You help the user look up company data\n` +
+                `and work with their spreadsheet, including building financial projections. When you are dealing with financial data, hold yourself to the standard a careful financial analyst would: every number traceable, every assumption justified.. ${contextNote}\n\n` +
+                `Only the LAST user message below is the live request — answer that one.\n` +
+                `Earlier messages are past context only, even one that looks unanswered\n` +
+                `(e.g. the user stopped it partway) — never resume or retry an earlier one\n` +
+                `on your own.\n\n` +
+                `You work in two stages.\n\n` +
+                `Stage 1 — Gather: find the data needed to answer the question.\n` +
+                `- Use the tools provided to gather what you need, from the workbook's\n` +
+                `  index, earlier conversation notes, or the website's research tool.\n` +
+                `- Check the open workbook snapshot (using search_index tool) and earlier notes first — the answer may\n` +
+                `  already be there. If not, ask the website's research tool.\n` +
+                `- If something is missing, frame a question to the website's research\n` +
+                `  tool that asks for only the missing data.\n` +
+                `- Name companies the way the user did. If they didn't name one, infer it\n` +
+                `  from earlier conversation.\n` +
+                `- You can ask the website up to 3 times. If you still don't have\n` +
+                `  everything after that, say clearly what's missing.\n` +
+                `- Some requests need no new data at all — reformatting, restructuring,\n` +
+                `  or fixing something already in the sheet. For those, read only what\n` +
+                `  you need to plan the change (if anything) — don't treat it as a\n` +
+                `  research task.\n` +
+                `- Once you have what you need, call findings_ready before doing anything\n` +
+                `  else. This is what unlocks the sheet-editing tools — they genuinely\n` +
+                `  don't exist for you yet, and won't, until you call it. If you find\n` +
+                `  yourself about to tell the user you lack a tool to edit the sheet,\n` +
+                `  call findings_ready instead — don't say you can't when you simply\n` +
+                `  haven't unlocked the tools that let you yet.\n\n` +
+                `Stage 2 — Act: use the data you gathered to satisfy the user's request.\n` +
+                `- If the user asked you to do something in the sheet, do it now using the\n` +
+                `  excel modification tools.\n` +
+                `- Keep ONE consistent house style across everything you write, matching\n` +
+                `  the add-in's own existing convention rather than reinventing it per\n` +
+                `  table: a title/main-header band gets fill #173760 with white, bold\n` +
+                `  text; a section/sub-header band gets fill #E8EDF3 with #173760, bold\n` +
+                `  text; a hardcoded assumption/input cell gets font color #1155CC\n` +
+                `  (blue) — a formula cell never does; a total/subtotal row is bold, no\n` +
+                `  fill. Never set column_width by hand to size a sheet — write the\n` +
+                `  content, then finish with one autofit pass over everything you\n` +
+                `  touched; format_cells' column_width is only for the rare case of\n` +
+                `  several columns deliberately sharing ONE identical width.\n` +
+                `- If the sheet already has another table on it, check how that one is\n` +
+                `  styled before formatting a new one — read its header cells, or run\n` +
+                `  review_formatting on it — and match it, rather than reinventing the\n` +
+                `  look table by table on what's supposed to read as one coherent model.\n` +
+                `- Link cells you modify to their sources if those sources are already in\n` +
+                `  the sheet, rather than retyping a number.\n` +
+                `- Any row you label as a rate/growth/margin driver (e.g. "Revenue\n` +
+                `  Growth", "EBITDA Margin") must be the REAL formula input for whatever\n` +
+                `  it's named after — the dependent figures should reference it, never\n` +
+                `  the reverse. This holds even with just ONE such row: a "Revenue\n` +
+                `  Growth %" row computed as this-period ÷ prior-period is exactly as\n` +
+                `  backward as keeping a decorative "growth" row alongside a separate\n` +
+                `  real assumption row — never hardcode the projected number and\n` +
+                `  back-calculate the rate afterward, and never keep two versions of the\n` +
+                `  same driver (an "assumption" row and a separately-computed "growth"\n` +
+                `  row) — one clean cell, used everywhere, and the label must match the\n` +
+                `  truth.\n` +
+                `- Before considering a multi-period projection done, read back the\n` +
+                `  formula in the first forecast period's dependent cell (e.g. revenue)\n` +
+                `  and confirm it actually REFERENCES the driver row you labeled — if\n` +
+                `  instead that driver row's own formula pulls FROM the dependent\n` +
+                `  figures, you built it backward; rebuild so the driver is the real\n` +
+                `  input, then check again.\n` +
+                `- If you assumed a value, link it the same way, and add a short note on\n` +
+                `  WHY you assumed it (the business reasoning) — communicate your logic\n` +
+                `  in simple words so that the user can judge it themselves.\n` +
+                `- After creating a new sheet or a multi-table layout, call\n` +
+                `  review_formatting on what you just wrote to check it actually looks\n` +
+                `  right — e.g. a title band that didn't apply the same way to every\n` +
+                `  table, or a column too narrow for its own content. Fix what you find —\n` +
+                `  autofit for a width/height problem, format_cells for anything else —\n` +
+                `  then check again. Don't consider the task done\n` +
+                `  just because the numbers are correct if the layout looks wrong.\n` +
+                `- If they just asked a question, answer it directly.\n` +
+                `- Never invent a number. If you don't have it, say so.\n` +
+                `- If the workbook and the website disagree, trust the website — it's\n` +
+                `  fresher — and say so in your answer.\n\n` +
+                `${fiscalContextNote}` +
+                workbookSnapshot + notesBlock;
 
-            // These two READ-ONLY tools are kept even when Excel was ruled out. get_workbook_overview
-            // is the model's only way to discover it CAN see the sheet — without it, a misrouted
-            // "what's in my sheet?" would have it insist it has no workbook access rather than just
-            // looking. read_range comes with it because the overview alone is useless: the
-            // check-the-workbook-first rule in the system prompt tells the model to read already
-            // downloaded figures instead of re-fetching them, and it cannot do that with no way to
-            // read a range. Two small schemas; the other 16 (all of which WRITE) still drop out.
-            const ALWAYS_EXCEL_TOOLS = new Set(["get_workbook_overview", "read_range", "confirm_companies"]);
-            const excelToolsForTurn = needsExcel
-                ? EXCEL_TOOLS
-                : EXCEL_TOOLS.filter(t => ALWAYS_EXCEL_TOOLS.has(t.function?.name));
-            const combinedTools = excelToolsForTurn.concat(mcpOpenAITools);
-            console.log(`[Chat] 🧰 sending ${combinedTools.length} tools (${excelToolsForTurn.length} excel + ${mcpOpenAITools.length} mcp)`);
+            // ── The single gather -> act loop ──
+            // One continuous convo/tool-calling loop per question, replacing the old planner
+            // pre-pass + two-phase (research -> write) pipeline: the model itself decides when it
+            // has enough to answer by calling findings_ready, rather than a separate upfront model
+            // call routing the question and pre-building a plan. gatherTools has no write tools in
+            // it at all — not withheld by prompt instruction, structurally absent from the schema
+            // — so the model cannot write to the sheet before findings_ready fires.
             let full = "";
-            // totalCostUsd is declared earlier now (see the comment there) — the classifier's own
-            // cost needs to accumulate into it too, before this point.
-            // A real MCP research/model-editing question routinely needs many round trips —
-            // search_company, get_catalog, get_schema, one or more run_query attempts (the first
-            // query often isn't quite right and needs a retry), then possibly audit_workbook/
-            // trace_dependencies/write_cells on top of that. 6 was too tight and left "full" empty
-            // (see the fallback below) even though the model was mid-investigation, not stuck or
-            // erroring; raised again since even 10 was cutting off legitimately multi-step work,
-            // then again from 20 to 30 for the same reason.
-            // These streams get dropped mid-turn no matter what: measured dead at 31s, 46s and 61s,
-            // and the 61s case had two successful heartbeat pings behind it, so keeping traffic
-            // flowing is not sufficient. A long research question reliably outlives one connection.
-            // Rather than let every remaining tool call fail once that happens, rebuild the client
-            // and retry the call once — the session is re-established from scratch (new session_id,
-            // fresh initialize/tools-list), which is fine because the server holds no state we
-            // depend on between calls. Only ONE retry: if the fresh connection also fails, that is
-            // a real outage and the model should hear about it rather than sit in a reconnect loop.
-            const callMcpWithRetry = async (name, args) => {
-                try {
-                    return await mcpClient.callTool(name, args);
-                } catch (e) {
-                    if (!mcpClient || !mcpClient._streamDead) throw e; // a genuine tool error, not a dropped stream
-                    console.warn(`[Chat] 🔌 MCP stream dropped (${mcpClient._streamDead}) — reconnecting once`);
-                    try { await mcpClient.close(); } catch (err) { /* already gone */ }
-                    const fresh = new McpClient(`${MCP_SERVER_URL}?token=${encodeURIComponent(access.mcp_api_key)}&skills=false`, abortController.signal);
-                    await fresh.open();
-                    await fresh.initialize();
-                    await fresh.listTools();
-                    mcpClient = fresh; // so the turn's finally block closes the live one, not the corpse
-                    return await fresh.callTool(name, args);
-                }
-            };
-
-            // Why the LAST model call stopped. Read after the phases to tell "nothing to say"
-            // apart from "cut off at max_tokens", which look identical from outside.
             let lastFinish = "";
-
-            // ── Phase runner ──
-            // The tool loop, extracted so it can be run more than once per question with a
-            // DIFFERENT tool set and a fresh context each time. See the two-phase pipeline
-            // below for why that matters.
-            const runPhase = async ({ system, phaseTools, seed, label, renderLive }) => {
-                const convo = [{ role: "system", content: system }, ...seed];
-                let full = "";
-                // Per-phase: a phase that never fetches a catalog has nothing to trim.
-                const catalogMsgIdx = [];
-                // A phase must not be able to run a tool it was not handed. The model will still
-                // ATTEMPT one it remembers from the prompt, and callTool() dispatches purely by
-                // name — so without this check the research phase happily created sheets and wrote
-                // cells with guessed, wrong argument shapes, doing the write phase's job badly
-                // before the write phase even started.
+            let stage = "gather", lastLoggedStage = null;
+            let dataGptCallCount = 0;
+            const DATAGPT_CALL_CAP = 3;
+            const dataGptCalls = []; // one entry per ask_website_datagpt call this turn — {request, delegated} — for the memory note and cost total
+            let mcpAccessForTurn = null; // resolved once per turn, reused by every ask_website_datagpt call
+            const convo = [{ role: "system", content: system }, ...rawWindow()];
+            const MAX_TOOL_ITERS = 30;
+            for (let iter = 0; iter < MAX_TOOL_ITERS; iter++) {
+                // A Stop during a long tool call should not be followed by one more model call.
+                if (abortController.signal.aborted) break;
+                // Re-armed every iteration, not just once for the whole turn — hideThinking() is
+                // permanent once a bubble kills it (see onDelta), so without this, a turn with
+                // several commentary bubbles across its iterations (common now that every
+                // iteration's text is user-visible) went dark after the FIRST one: no pulsing dot
+                // for any later iteration's wait, even while it was still genuinely working.
+                showThinking();
+                const phaseTools = stage === "gather" ? GATHER_TOOLS : EXCEL_TOOLS;
+                if (stage !== lastLoggedStage) {
+                    // gather and write summarise as separate collapsibles, same as the old
+                    // research/write phases did.
+                    debugAppend({ kind: "phase", phase: stage, toolCount: phaseTools.length });
+                    startStepGroup(stage);
+                    lastLoggedStage = stage;
+                }
                 const offeredTools = new Set(phaseTools.map(t => t.function && t.function.name).filter(Boolean));
-                console.log(`[Chat] ▶ phase "${label}": ${phaseTools.length} tools`);
-                debugAppend({ kind: "phase", phase: label, toolCount: phaseTools.length });
-                startStepGroup(label); // research and write summarise as separate collapsibles
-                const MAX_TOOL_ITERS = 30;
-                for (let iter = 0; iter < MAX_TOOL_ITERS; iter++) {
-                    // A Stop during a long tool call should not be followed by one more model call.
-                    if (abortController.signal.aborted) break;
-                    // A fresh renderer per iteration: each iteration is its own model turn, so a
-                    // turn that happens to emit a short preamble before calling a tool (rare, but
-                    // real) gets its own bubble rather than being stitched onto whatever an
-                    // unrelated later turn produces. renderLive is false for phases whose text is
-                    // internal handoff only (the two-phase pipeline's own "research" step) — those
-                    // still stream over the wire below, just never touch the DOM.
-                    const live = renderLive ? makeLiveRenderer() : null;
-                    let turn;
-                    try {
-                        turn = await streamChatTurn(
-                            // reasoning.max_tokens caps the model's chain-of-thought spend so it can
-                            // never silently consume the WHOLE max_tokens budget and come back with
-                            // finish=length, calls=0, content=0ch (observed repeatedly on complex
-                            // multi-tool turns — each such turn is a full wasted generation, not a
-                            // fast failure, and was the dominant cost in a ~9min turn taking 3 retries).
-                            // First attempt capped this at 3000, which was too tight: on a genuinely
-                            // multi-part task (several metrics + a new sheet + charts) the model's own
-                            // plan was cut off mid-thought, and it silently executed only the part of
-                            // the plan it had reasoned through before the cap hit — dropping charts,
-                            // dropping requested metrics, reusing an existing sheet instead of
-                            // creating the new one asked for. 8000 matches roughly what a complex turn
-                            // was observed actually needing, with max_tokens raised so >=12000 always
-                            // remains for the tool calls/content that follow regardless.
-                            { model: AI_MODEL, messages: convo, tools: phaseTools, temperature: 0.2, max_tokens: 20000, reasoning: { max_tokens: 8000 }, usage: { include: true } },
-                            { signal: abortController.signal, onTextDelta: live ? (chunk) => live.onDelta(chunk) : undefined },
-                        );
-                    } finally {
-                        if (live) live.finish();
+                // A fresh renderer per iteration: each iteration is its own model turn, so a turn
+                // that happens to emit a short preamble before calling a tool (rare, but real) gets
+                // its own bubble rather than being stitched onto an unrelated later turn. Unlike the
+                // old two-phase split, EVERY iteration's text is user-visible now — there is no
+                // hidden internal-handoff phase any more, just one continuous conversation.
+                const live = makeLiveRenderer();
+                let turn;
+                try {
+                    turn = await streamChatTurn(
+                        { model: AI_MODEL, messages: convo, tools: phaseTools, temperature: 0.2, max_tokens: 20000, reasoning: { max_tokens: 8000 }, usage: { include: true } },
+                        {
+                            signal: abortController.signal,
+                            onTextDelta: (chunk) => live.onDelta(chunk),
+                            onReasoningDelta: (chunk) => live.onReasoningDelta(chunk),
+                            onAnswering: () => live.onAnswering(),
+                        },
+                    );
+                } finally {
+                    live.finish();
+                }
+                const { message: msg, finishReason, usage } = turn;
+                const cost = usage?.cost;
+                if (cost != null) totalCostUsd += Number(cost) || 0;
+                debugAppend({ kind: "turn", phase: stage, iter: iter + 1, cost: cost != null ? Number(cost).toFixed(5) : "n/a", tokens: usage?.total_tokens ?? "?", calls: (msg?.tool_calls || []).length, finish: finishReason ?? "?", contentChars: (msg?.content || "").length });
+
+                lastFinish = finishReason || "";
+                if (!msg) break;
+                convo.push(msg);
+
+                const calls = msg.tool_calls || [];
+                if (!calls.length) {
+                    full = msg.content || "";
+                    if (!full && iter < MAX_TOOL_ITERS - 1) {
+                        debugAppend({ kind: "tool", phase: stage, name: "(empty response)", ok: false, ms: 0, args: `finish=${lastFinish}`, result: "no tool calls and no text — retrying" });
+                        convo.push({ role: "user", content: "Continue with the remaining steps of the task." });
+                        continue;
                     }
-                    const { message: msg, finishReason, usage } = turn;
-                    const cost = usage?.cost;
-                    if (cost != null) totalCostUsd += Number(cost) || 0;
-                    console.log(`[Chat] 💰 turn ${iter + 1} cost: ${cost != null ? "$" + Number(cost).toFixed(5) : "n/a"} | tokens: ${usage?.total_tokens ?? "?"}`);
-                    debugAppend({ kind: "turn", phase: label, iter: iter + 1, cost: cost != null ? Number(cost).toFixed(5) : "n/a", tokens: usage?.total_tokens ?? "?", calls: (msg?.tool_calls || []).length, finish: finishReason ?? "?", contentChars: (msg?.content || "").length });
+                    break;
+                }
 
-                    lastFinish = finishReason || "";
-                    if (!msg) break;
-                    convo.push(msg);
-
-                    const calls = msg.tool_calls || [];
-                    if (!calls.length) {
-                        full = msg.content || "";
-                        if (!full && iter < MAX_TOOL_ITERS - 1) {
-                            console.warn(`[Chat] empty turn ${iter + 1} (finish=${lastFinish}) — nudging once`);
-                            debugAppend({ kind: "tool", phase: label, name: "(empty response)", ok: false, ms: 0, args: `finish=${lastFinish}`, result: "no tool calls and no text — retrying" });
-                            convo.push({ role: "user", content: "Continue with the remaining steps of the task." });
-                            continue;
-                        }
-                        break;
+                // Runs one tool call and returns what happened, WITHOUT touching convo/turnActions —
+                // those are applied afterward, in original call order, by applyOne below. Splitting
+                // execution from bookkeeping this way is what makes the gather stage's full-batch
+                // concurrency safe: several of these can run at once, but the conversation still
+                // ends up with their results in EXACTLY the same order as the model asked for them.
+                const runOne = async (call) => {
+                    let args = {};
+                    try { args = JSON.parse(call.function.arguments || "{}"); } catch (e) { /* leave empty */ }
+                    if (!offeredTools.has(call.function.name)) {
+                        // Told plainly, so the model corrects course instead of retrying the same
+                        // unavailable tool with different guessed arguments — this is also what
+                        // keeps the write tools genuinely unreachable during gather: they are never
+                        // in offeredTools until findings_ready fires, not merely discouraged.
+                        return { call, args, refused: true, result: { error: `Tool "${call.function.name}" is not available in this step. Do not call it. Use only the tools you were given.` } };
                     }
-
-                    // Runs one tool call and returns what happened, WITHOUT touching convo/
-                    // debugAppend/catalogMsgIdx — those are applied afterward, in original call
-                    // order, by applyOne below. Splitting execution from bookkeeping this way is
-                    // what makes the parallel batching underneath safe: several of these can now
-                    // run concurrently, but the conversation ends up with their results in EXACTLY
-                    // the same order as before regardless of which one's network call actually
-                    // finished first.
-                    const runOne = async (call) => {
-                        let args = {};
-                        try { args = JSON.parse(call.function.arguments || "{}"); } catch (e) { /* leave empty */ }
-                        if (!offeredTools.has(call.function.name)) {
-                            // Told plainly, so the model corrects course instead of retrying the
-                            // same unavailable tool with different guessed arguments.
-                            return { call, args, refused: true, result: { error: `Tool "${call.function.name}" is not available in this step. Do not call it. Use only the tools you were given.` } };
-                        }
-                        let result;
-                        const startedAt = Date.now();
-                        if (EXCEL_SELF_MANAGED_UI_TOOLS.has(call.function.name)) {
-                            try { result = await callTool(call.function.name, args); } // renders its own confirm/running card
-                            catch (e) { result = { error: String(e.message || e) }; }
-                        } else if (EXCEL_TOOL_NAMES.has(call.function.name)) {
-                            const card = addCard(`${toolLabel(call.function.name, args)}…`, "run", call.function.name);
-                            try { result = await callTool(call.function.name, args); await settleCard(card, "done", "✓"); }
-                            catch (e) { result = { error: String(e.message || e) }; await settleCard(card, "err", "✕"); }
+                    let result;
+                    const startedAt = Date.now();
+                    if (call.function.name === "ask_website_datagpt") {
+                        if (dataGptCallCount >= DATAGPT_CALL_CAP) {
+                            result = { error: `You have already asked the research service ${DATAGPT_CALL_CAP} times this turn. Report what you have now instead of asking again.` };
                         } else {
-                            // MCP-provided tool
-                            const card = addCard(`Running "${call.function.name}"…`, "run", call.function.name);
+                            dataGptCallCount++;
+                            const request = String(args.data_request || "");
+                            const card = addCard("Retrieving data…", "run", "website_datagpt");
                             try {
-                                const r = await callMcpWithRetry(call.function.name, args);
-                                result = r.isError ? { error: r.text } : { text: capText(r.text, mcpCapFor(call.function.name)) };
-                                await settleCard(card, r.isError ? "err" : "done", r.isError ? "✕" : "✓");
-                            } catch (e) { result = { error: String(e.message || e) }; await settleCard(card, "err", "✕"); }
+                                if (!mcpAccessForTurn) mcpAccessForTurn = await ensureMcpAccess();
+                                if (mcpAccessForTurn.flag !== 3) {
+                                    result = {
+                                        error: mcpAccessForTurn.flag === 2 ? "MCP access has been revoked for this account."
+                                            : mcpAccessForTurn.flag === 1 ? "This account doesn't have an active MCP research subscription."
+                                                : "Couldn't verify MCP research access for this account.",
+                                    };
+                                    await settleCard(card, "err", "✕");
+                                } else {
+                                    const delegated = await fetchFromDataGPT({ question: request, mcpApiKey: mcpAccessForTurn.mcp_api_key, signal: abortController.signal });
+                                    if (delegated.aborted) { await settleCard(card, "err", "✕"); throw Object.assign(new Error("stopped"), { name: "AbortError" }); }
+                                    dataGptCalls.push({ request, delegated });
+                                    await settleCard(card, delegated.error ? "err" : "done", delegated.error ? "✕" : "✓");
+                                    if (delegated.error) {
+                                        result = { error: `GoIndiaStocks' research service couldn't answer (${delegated.error}).` };
+                                    } else {
+                                        // The website deducts its own cost from the wallet just after
+                                        // it sends `done`, so a refresh fired right now would read
+                                        // the balance before that lands.
+                                        setTimeout(() => { refreshWalletBalance(); }, 3000);
+                                        const parts = [];
+                                        if (delegated.tables.length) parts.push(`Raw output of the data queries (exact figures — prefer these over any rounded numbers quoted in prose):\n${delegated.tables.map(t => t.slice(0, 20000)).join("\n\n").slice(0, 60000)}`);
+                                        if (delegated.finalText) parts.push(`The research assistant's own summary (may state caveats, e.g. a year missing from the database):\n${delegated.finalText}`);
+                                        result = { findings: parts.join("\n\n") || "(no data returned)" };
+                                    }
+                                }
+                            } catch (e) {
+                                if (abortController.signal.aborted || e.name === "AbortError") throw e; // a user Stop must not be swallowed as a tool error
+                                result = { error: String(e.message || e) };
+                            }
                         }
-                        return { call, args, result, ms: Date.now() - startedAt };
-                    };
-                    // Was a blanket .slice(0, 6000), which silently re-truncated everything the
-                    // per-tool caps had just been widened to allow — get_catalog would have been
-                    // cut at 6,000 chars no matter what MCP_RESULT_CAPS said. The caps above are
-                    // the real bound now; this is just a backstop against a pathological result.
-                    // The one place that sees both what went in and what came back, whichever kind
-                    // of tool it was — called in ORIGINAL call order after a batch settles, never
-                    // in whatever order the batch's own promises happened to resolve.
-                    const applyOne = ({ call, args, result, ms, refused }) => {
-                        if (refused) {
-                            debugAppend({ kind: "tool", phase: label, name: call.function.name, ok: false, ms: 0, args: JSON.stringify(args), result: "REFUSED - not offered in this phase" });
-                            convo.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(result) });
-                            return;
-                        }
-                        const failed = !!(result && result.error);
-                        debugAppend({
-                            kind: "tool",
-                            phase: label,
-                            name: call.function.name,
-                            ok: !failed,
-                            ms,
-                            args: JSON.stringify(args),
-                            // Full text on failure — the whole point is to stop losing the error.
-                            result: failed ? String(result.error) : String(result && result.text != null ? result.text : JSON.stringify(result)).slice(0, DEBUG_OK_PREVIEW),
-                        });
-                        convo.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(result).slice(0, 70000) });
-                        if (call.function.name === "get_catalog") catalogMsgIdx.push(convo.length - 1);
-                    };
-                    // Runs a consecutive group of format_cells calls through ONE shared Excel.run
-                    // (toolFormatCellsBatch) instead of one round trip per call — observed live: a
-                    // single write-phase turn with 9 separate format_cells calls, ~460ms each,
-                    // sequentially, none of which have any actual dependency on each other (each
-                    // targets its own range). A card is still created per call, same as before —
-                    // only the underlying Excel.run count changes, not what the user sees listed.
+                    } else if (call.function.name === "findings_ready") {
+                        stage = "write";
+                        result = { ok: true, note: "You can now write to the sheet." };
+                    } else if (EXCEL_SELF_MANAGED_UI_TOOLS.has(call.function.name)) {
+                        try { result = await callTool(call.function.name, args); } // renders its own confirm/running card
+                        catch (e) { result = { error: String(e.message || e) }; }
+                    } else if (EXCEL_TOOL_NAMES.has(call.function.name)) {
+                        const card = addCard(`${toolLabel(call.function.name, args)}…`, "run", call.function.name);
+                        try { result = await callTool(call.function.name, args); await settleCard(card, "done", "✓"); }
+                        catch (e) { result = { error: String(e.message || e) }; await settleCard(card, "err", "✕"); }
+                    } else {
+                        result = { error: `Unknown tool "${call.function.name}"` };
+                    }
+                    return { call, args, result, ms: Date.now() - startedAt };
+                };
+                const applyOne = ({ call, args, result, ms, refused }) => {
+                    if (refused) {
+                        debugAppend({ kind: "tool", phase: stage, name: call.function.name, ok: false, ms: 0, args: JSON.stringify(args), result: "REFUSED - not offered in this step" });
+                        convo.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(result) });
+                        return;
+                    }
+                    const failed = !!(result && result.error);
+                    debugAppend({
+                        kind: "tool", phase: stage, name: call.function.name, ok: !failed, ms, args: JSON.stringify(args),
+                        // Full text on failure — the whole point is to stop losing the error.
+                        result: failed ? String(result.error) : String(result && result.text != null ? result.text : JSON.stringify(result)).slice(0, DEBUG_OK_PREVIEW),
+                    });
+                    convo.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(result).slice(0, 70000) });
+                    if (!failed && call.function.name !== "ask_website_datagpt" && call.function.name !== "findings_ready") turnActions.push({ name: call.function.name, args });
+                };
+
+                if (stage === "gather") {
+                    // Nothing offered during gather can mutate the workbook, so the WHOLE batch the
+                    // model returned runs concurrently — unlike the write stage below, there is no
+                    // overlapping-range risk to guard against here.
+                    const settledGroup = calls.length > 1 ? await Promise.all(calls.map(runOne)) : [await runOne(calls[0])];
+                    for (const settled of settledGroup) applyOne(settled);
+                } else {
+                    // Write stage: format_cells calls still batch through one shared Excel.run; every
+                    // other write stays strictly one-at-a-time, since overlapping ranges can't safely race.
                     const runFormatCellsGroup = async (group) => {
                         const parsed = group.map(call => { try { return JSON.parse(call.function.arguments || "{}"); } catch (e) { return {}; } });
                         const cards = group.map((call, i) => addCard(`${toolLabel(call.function.name, parsed[i])}…`, "run", call.function.name));
@@ -9999,24 +11233,7 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
                         await Promise.all(results.map((result, i) => settleCard(cards[i], result && result.error ? "err" : "done", result && result.error ? "✕" : "✓")));
                         return group.map((call, i) => ({ call, args: parsed[i], result: results[i], ms }));
                     };
-                    // Only MCP research calls (search_company, get_schema, get_catalog, run_query)
-                    // are safe to run concurrently — they are read-only and, per the MCP server's
-                    // own documented behaviour, each run_query gets a genuinely FRESH Python
-                    // environment with no shared state between calls, so nothing about them depends
-                    // on order. Excel writes stay strictly one-at-a-time exactly as before: two
-                    // calls touching overlapping ranges (a write_cells immediately followed by
-                    // format_cells on the same range, say) cannot safely race, so nothing in that
-                    // family is ever run CONCURRENTLY — only consecutive RUNS of MCP-only calls are.
-                    // format_cells is the one exception given its own batched (not concurrent) path
-                    // above: applying nine formats one after another within a single Excel.run has
-                    // none of the same-range race risk true concurrency would, since it is still
-                    // one operation at a time, just without nine separate round trips for it.
-                    const kindOf = (call) => {
-                        if (!offeredTools.has(call.function.name) || EXCEL_SELF_MANAGED_UI_TOOLS.has(call.function.name)) return "sequential";
-                        if (call.function.name === "format_cells") return "format_cells";
-                        if (EXCEL_TOOL_NAMES.has(call.function.name)) return "sequential";
-                        return "mcp";
-                    };
+                    const kindOf = (call) => (call.function.name === "format_cells" ? "format_cells" : "sequential");
                     let ci = 0;
                     while (ci < calls.length) {
                         if (kindOf(calls[ci]) === "format_cells") {
@@ -10026,178 +11243,42 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
                             ci = fj;
                             continue;
                         }
-                        if (kindOf(calls[ci]) !== "mcp") {
-                            applyOne(await runOne(calls[ci]));
-                            ci++;
-                            continue;
-                        }
-                        let cj = ci;
-                        while (cj < calls.length && kindOf(calls[cj]) === "mcp") cj++;
-                        const group = calls.slice(ci, cj);
-                        const settledGroup = group.length > 1 ? await Promise.all(group.map(runOne)) : [await runOne(group[0])];
-                        for (const settled of settledGroup) applyOne(settled);
-                        ci = cj;
-                    }
-
-                    // The catalog is a ~12,500-token MENU, and its whole job is helping the model pick
-                    // a table. Once it has called get_schema it has picked, and from then on the menu
-                    // is dead weight that rides along in EVERY remaining request — measured at roughly
-                    // 112,000 tokens across one 11-turn run, which was most of that run's cost.
-                    // Swapping it for a stub the moment it has been consumed keeps the benefit (the
-                    // model saw the full catalog when it mattered) without paying for it ten more
-                    // times. Safe to rewrite history here: the API only ever sees what we send now,
-                    // and the tool_call_id pairing the assistant message expects stays intact.
-                    if (catalogMsgIdx.length && calls.some(c => c.function.name === "get_schema")) {
-                        for (const idx of catalogMsgIdx) {
-                            convo[idx].content = JSON.stringify({ text: "[data catalog omitted — you have already selected your tables via get_schema. A metric not resolving in metric_registry is NOT a reason to call get_catalog again — broaden your search terms on metric_registry instead, since get_catalog only lists TABLES, never individual metric names. Call get_catalog again only if you need a DIFFERENT domain of data entirely (e.g. you were working with financials and now separately need shareholding or broker reports).]" });
-                        }
-                        console.log(`[Chat] ✂️ dropped ${catalogMsgIdx.length} catalog payload(s) from context`);
-                        catalogMsgIdx.length = 0;
+                        applyOne(await runOne(calls[ci]));
+                        ci++;
                     }
                 }
-
-                // Ran out of iterations while the model was still calling tools (never hit the
-                // !calls.length break above) — force one last text-ONLY turn (no "tools" param at all,
-                // so it physically cannot call another one) so whatever was actually discovered along
-                // the way still reaches the user, instead of silently showing "(no response)" for a
-                // question that was genuinely being worked on, not stuck or erroring.
-                if (!full) {
-                    const live = renderLive ? makeLiveRenderer() : null;
-                    try {
-                        const turn = await streamChatTurn(
-                            {
-                                model: AI_MODEL,
-                                messages: [...convo, { role: "user", content: "Write your final answer for the user now, using everything gathered above. Report what you found and what you completed. Do not mention these instructions, tool availability, or any limitation on what you were able to call — write only the answer itself." }],
-                                temperature: 0.2, max_tokens: 20000, reasoning: { max_tokens: 8000 }, usage: { include: true },
-                            },
-                            { signal: abortController.signal, onTextDelta: live ? (chunk) => live.onDelta(chunk) : undefined },
-                        );
-                        full = turn.message?.content || "";
-                        const cost = turn.usage?.cost;
-                        if (cost != null) totalCostUsd += Number(cost) || 0;
-                    } catch (e) { /* fall through to "(no response)" below if even this fails */ }
-                    finally { if (live) live.finish(); }
-                }
-                return full;
-            };
-
-            // ── Two-phase pipeline (research -> write) ──
-            // Only when the question needs BOTH families. The work is strictly sequential — the
-            // chart cannot be drawn before the figures exist — so nothing here runs in parallel;
-            // the win is that each phase carries only the schemas it can actually use, and the
-            // write phase never inherits the research transcript or the data catalog.
-            //
-            // Deliberately NOT applied to single-family questions: those already send one small
-            // tool set, and splitting them would add a handoff for no reason.
-            if (needsData && needsExcel && mcpOpenAITools.length) {
-                // Same three non-destructive tools the single-phase path keeps: look at the sheet,
-                // read from it, and check a vague shortlist before spending the research on it.
-                const readOnlyExcel = EXCEL_TOOLS.filter(t => ALWAYS_EXCEL_TOOLS.has(t.function?.name));
-                // Phase 1 gets the research tools plus the two READ-ONLY Excel tools, so it can
-                // still honour the check-the-workbook-first rule and answer from already
-                // downloaded sheets instead of fetching.
-                const findings = await runPhase({
-                    label: "research",
-                    // Internal handoff text for phase 2's own consumption, never the user's — must
-                    // NOT be shown live, or the user would see a raw, differently-toned "figures
-                    // gathered" report appear to type out as if it were the actual answer, then a
-                    // second, unrelated-looking message replace it once phase 2 finishes.
-                    renderLive: false,
-                    phaseTools: mcpOpenAITools.concat(readOnlyExcel),
-                    seed: [...history.slice(-8)],
-                    system: system +
-                        `\n\nTHIS IS THE RESEARCH STEP. Gather every figure needed to answer, then STOP and report them — do not attempt to write to the workbook, and do not describe what you are about to do. A separate step handles the workbook using only what you report here, and it CANNOT fetch anything you leave out. So state the numbers in full, with the company, the metric, the unit and the period for each, plus any caveat (a year genuinely missing from the database, a figure that is an estimate). Report the data, nothing else.\n` +
-                        // The Rules block above lists every Excel tool by name, and the model acted
-                        // on that list even though this phase was handed only two of them —
-                        // inventing argument shapes for create_sheet/write_cells/create_chart from
-                        // memory and failing on all of them. The dispatcher now refuses un-offered
-                        // tools outright; this stops the model wasting turns discovering that.
-                        `IGNORE every workbook-editing tool named earlier (create_sheet, write_cells, fill_formula, format_cells, conditional_format, create_chart, autofit, tables, named_ranges, modify_structure, comments, undo_last_change). They are NOT available to you in this step and calling them is refused. Your only non-research tools here are get_workbook_overview and read_range (for checking whether data is already downloaded) and confirm_companies.\n` +
-                        // The Rules block already says this, and it was ignored — it sits ~25 rules
-                        // deep. Repeated here because this suffix is short, specific to this step,
-                        // and read last. Getting the shortlist wrong is the most expensive mistake
-                        // available at this point: every figure, ranking and comparison after it
-                        // inherits the error.
-                        `SHORTLIST CHECK — if the user described a CATEGORY of companies instead of naming them ("companies with gold exposure", "large-cap IT", "cement peers"), you MUST call confirm_companies with your candidate list before you fetch financials for them, and then use exactly the list it returns. This is not optional and it is not a fallback for when you are unsure — do it whenever the companies were inferred rather than named. Skip it only when the user named the companies outright.`,
-                });
-                // Phase 2 starts from a CLEAN context: the question and the figures, with no
-                // research transcript, no catalog and no MCP schemas. It also cannot fetch, which
-                // is why it is told to say so rather than invent a number it was not given.
-                full = await runPhase({
-                    label: "write",
-                    renderLive: true, // this phase's final content IS the user-visible answer
-                    phaseTools: EXCEL_TOOLS,
-                    // history (not just the bare `q`) so the actual instruction still reaches this
-                    // phase when the CURRENT turn's raw input is only a disambiguation answer (e.g.
-                    // "Adani Enterprises Ltd (NSE: ADANIENT)") — that's all `q` would be in that
-                    // case, and findings is deliberately figures-only ("Report the data, nothing
-                    // else"), so neither one carries the original ask on its own. history is cheap
-                    // here: it holds only short user/assistant text, never the tool-call payloads
-                    // that live in each phase's own private `convo` — reusing it doesn't reintroduce
-                    // the catalog/schema bloat the phase split exists to avoid.
-                    seed: [...history.slice(-8), { role: "user", content: `--- Figures already retrieved for you ---\n${findings}\n--- end of figures ---\n\nUse ONLY these figures for the numbers — you have no access to the research tools, so if something you need is missing, say so plainly instead of inventing it. Now do the workbook work requested above.` }],
-                    system: system.replace(/\n\nThe following operating rules come from GoIndia[\s\S]*$/, "") +
-                        // Observed: asked for a sheet named "Gold Impact", it made "Gold Prices" —
-                        // and signed off with "I only had the figures you supplied — no access to
-                        // research tools", which is this pipeline's internals leaking into a reply
-                        // to someone who has no idea the work was split in two.
-                        `\n\nTHIS IS THE WORKBOOK STEP. The figures have already been fetched and are given to you below. Do the workbook work that was asked for — create sheets, write the values, format, chart — then give the user a short answer that includes the figures themselves, so the reply stands on its own without them having to open the sheet.\n` +
-                                // Observed: asked for "Gold Impact", produced "Gold Analysis" — twice now,
-                        // so the instruction needs to be blunt rather than merely present.
-                        `Follow the user's explicit instructions EXACTLY: if they named a sheet, use that EXACT name — "Gold Impact" means a sheet called "Gold Impact", not "Gold Analysis" or "Gold Prices". If they asked for a specific chart type or range, use it. Never substitute your own naming.\n` +
-                        // Observed: workbook already had a similarly-shaped sheet from an earlier,
-                        // unrelated question in the same session (get_workbook_overview shows it);
-                        // asked for "a new sheet", the model instead read that existing sheet and
-                        // appended the new company's row onto the end of it.
-                        `If the user asked for "a new sheet" (or equivalent), you MUST call create_sheet and put the work there — even when get_workbook_overview shows an existing sheet with a similar or matching column layout left over from an earlier question in this session. Never append to or reuse an existing sheet just because its shape happens to fit, unless the user is plainly asking you to update that specific sheet.\n` +
-                        // Observed: asked for 9 named metrics, only 3 ended up written — the other 6
-                        // had already been fetched successfully in the research step (present in the
-                        // figures below) but were silently dropped when writing the table. Also
-                        // observed: asked to plot a chart per metric, none were ever created — the
-                        // turn ended with a finished-sounding final answer instead.
-                        `Before writing your final answer, re-read the user's original request above line by line against what you actually did: every metric they named must be in the sheet (or explicitly reported as unavailable — never silently dropped), and every sheet/table/chart they asked for must exist. If you find something you asked-for but skipped, go back and do it now instead of finishing.\n` +
-                        // Observed: a chart titled "FY2026 Revenue" whose range spanned FY24 Rev,
-                        // FY24 PAT, FY25 Rev, FY25 PAT and FY26 Rev — five unnamed series, with
-                        // revenue (778,716) and PAT (113) on one axis so every PAT bar vanished.
-                        `Charting rules:\n` +
-                        `- The source_range MUST start at the header row and include the label column, or the series come out as "Series1"/"Series2" with no indication of which is Revenue and which is PAT.\n` +
-                        `- Never put series of wildly different magnitude on one axis — revenue in the tens of thousands next to PAT in the hundreds flattens the smaller one to nothing. Either make separate charts, or pass the smaller series' names in create_chart's secondary_series (with secondary_axis_title).\n` +
-                        `- "Freeze the top row" and similar are modify_structure with action freeze_rows / freeze_columns / unfreeze.\n` +
-                        `- The title must describe exactly what is plotted. If the range covers FY24-FY26 revenue, do not title it "FY2026 Revenue".\n` +
-                        `- Write the whole table ONCE, in one write_cells call, before formatting or charting. Writing a block and then re-writing rows inside it shifts everything below and leaves charts pointing at stale ranges.\n` +
-                        // Observed: a metric genuinely missing from the figures (e.g. Gross Block,
-                        // unavailable in the database for that company) got blamed on "my tooling
-                        // here doesn't include a write-back function in this step" — a fabricated
-                        // capability excuse. This phase DOES have full write access; it is the one
-                        // that writes to Excel. Any gap here is a DATA gap (the figure wasn't in the
-                        // database), never a TOOL gap — inventing the latter is worse than the plain
-                        // truth and just as much an internals-leak as naming the research step.
-                        `Write as if you did the whole task yourself. The user does not know the work was split into steps — never mention "the figures you supplied", "the research step", not having research tools, or any other invented tool/capability limitation on this step (you have full read/write access here). If a metric genuinely is missing from the figures, write everything else, and say plainly that it was not available in the data — never explain the gap as a tooling or access limitation.`,
-                });
-            } else {
-                full = await runPhase({
-                    label: needsData ? "research" : "workbook",
-                    renderLive: true, // no separate write phase here — this IS the final answer
-                    phaseTools: combinedTools,
-                    seed: [...history.slice(-8)],
-                    system,
-                });
             }
 
-            // (No fenced-```excel``` fallback anymore — that existed only to catch write_excel_sheet
-            // being emitted as text instead of a real tool call. write_cells/fill_formula are plain
-            // function-calling tools like every other tool here, with no bespoke action-JSON shape
-            // to fall back to; if the model doesn't call a tool properly, it simply doesn't act —
-            // the same failure mode as any other tool-calling miss.)
-            //
-            // The indicator was pinned to the bottom throughout, so the answer simply takes its
-            // place — no repositioning needed, and it always lands as the last, most-visible thing.
-            //
-            // full's own bubble was ALREADY created and filled in live, token by token, as it
-            // streamed (see renderLive/makeLiveRenderer above) — calling addMsg again here with the
-            // same text would just paint a second, duplicate copy of the answer. Only the two
-            // failure fallbacks (never streamed, since there was no content to stream) still need
-            // their own bubble created here.
+            // Ran out of iterations while still calling tools — force one last text-only turn (no
+            // "tools" param) so what was actually discovered reaches the user instead of a silent
+            // "(no response)".
+            if (!full) {
+                showThinking();
+                const live = makeLiveRenderer();
+                try {
+                    const turn = await streamChatTurn(
+                        {
+                            model: AI_MODEL,
+                            messages: [...convo, { role: "user", content: "Write your final answer for the user now, using everything gathered above. Report what you found and what you completed. Do not mention these instructions, tool availability, or any limitation on what you were able to call — write only the answer itself." }],
+                            temperature: 0.2, max_tokens: 20000, reasoning: { max_tokens: 8000 }, usage: { include: true },
+                        },
+                        {
+                            signal: abortController.signal,
+                            onTextDelta: (chunk) => live.onDelta(chunk),
+                            onReasoningDelta: (chunk) => live.onReasoningDelta(chunk),
+                            onAnswering: () => live.onAnswering(),
+                        },
+                    );
+                    full = turn.message?.content || "";
+                    const cost = turn.usage?.cost;
+                    if (cost != null) totalCostUsd += Number(cost) || 0;
+                } catch (e) { /* fall through to "(no response)" below if even this fails */ }
+                finally { live.finish(); }
+            }
+
+            // full's own bubble was already created and filled in live, token by token, as it
+            // streamed (see makeLiveRenderer above) — calling addMsg again here would paint a
+            // duplicate. Only the failure fallback (never streamed) needs a bubble here.
             hideThinking();
             if (!full) {
                 addMsg("bot", lastFinish === "length"
@@ -10205,24 +11286,103 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
                     : "_No response was produced. Try rephrasing, or ask for a smaller step._");
             }
             stream.scrollTop = stream.scrollHeight;
-            history.push({ role: "assistant", content: full });
+            history.push({ role: "assistant", content: full, turn });
             persistHistory();
+            // ── Turn memory ── one short note for this turn (see the session-memory block near the
+            // top of the chat code). Only finished turns are noted — a failed or stopped one never
+            // reaches this line.
+            if (full) {
+                try {
+                    const acts = memSummarizeActions(turnActions);
+                    const allTools = dataGptCalls.flatMap(d => d.delegated.tools);
+                    const totalTables = dataGptCalls.reduce((n, d) => n + d.delegated.tables.length, 0);
+                    const firstUnavailable = dataGptCalls.map(d => memFindUnavailable(d.delegated.finalText)).find(Boolean) || "";
+                    const record = memMakeRecord({
+                        turn, now: Date.now(), intent: q, route: dataGptCalls.length ? "both" : "excel_only",
+                        asked: dataGptCalls.map(d => d.request).join(" | "), tools: memCompactTools(allTools), tables: totalTables,
+                        read: acts.read, wrote: acts.wrote,
+                        unavailable: firstUnavailable || memFindUnavailable(full),
+                        // The research service's own raw output for this turn, across every
+                        // ask_website_datagpt call — kept separate from `answer` (the final,
+                        // possibly paraphrased reply actually shown to the user) so a later turn
+                        // can go back to the exact figures instead of trusting whatever
+                        // rounding/rephrasing the write stage happened to use.
+                        findings: dataGptCalls.map(d => d.delegated.tables.length ? d.delegated.tables.join("\n\n") : d.delegated.finalText).filter(Boolean).join("\n\n"),
+                        answer: memAnswerText(full, MEM_ANSWER_CHARS),
+                    });
+                    memStore = memAdd(memStore, { key: memBookKey(docUrl(), bookName), name: bookName, record, now: Date.now() });
+                    memSave(memStore);
+                } catch (e) { /* note not saved — next turn just has one fewer note to draw on */ }
+            }
             // Query is fully complete (tool calls done, final answer rendered) — deduct+log the
             // summed cost now. Fire-and-forget, same as the financial-model deduction elsewhere.
-            console.log("[Chat] 💾 run saveChatLog() to download this session's tool-call log");
+            const totalDataGptCostInr = dataGptCalls.reduce((n, d) => n + (d.delegated.costInr || 0), 0);
+            console.log(`[Chat] 💰 question total — our OpenRouter calls: $${totalCostUsd.toFixed(5)} (billed by us)${dataGptCalls.length ? ` | website DataGPT: Rs ${totalDataGptCostInr.toFixed(2)} (billed by the website itself, not deducted again here)` : ""}`);
             if (totalCostUsd > 0) deductChatCost({ question: q, costUsd: totalCostUsd });
+            if (debugAutoSave) saveTurnLog(turn);
         } catch (e) {
             hideThinking();
             // A user-initiated Stop is not an error and must not be dressed as one.
             const aborted = abortController.signal.aborted || e.name === "AbortError";
-            addMsg("bot", aborted ? "_Stopped._" : "⚠ " + e.message);
+            const note = aborted ? "_Stopped._" : "⚠ " + e.message;
+            addMsg("bot", note);
+            // Close the pair in `history` too, not just the visible chat bubble — otherwise this
+            // turn's user message sits with no reply, and a LATER turn's rawWindow() shows it as a
+            // still-open question right above the new one, with nothing marking it abandoned. That
+            // was a real bug: stop a turn mid-answer, ask something unrelated next, and the model
+            // picked the stopped question back up instead of the new one.
+            history.push({ role: "assistant", content: note, turn });
+            persistHistory();
+            if (debugAutoSave) saveTurnLog(turn); // a stopped/failed turn's trace is often the most useful one to see
             stream.scrollTop = stream.scrollHeight;
-            if (aborted) console.log("[Chat] ⏹ stopped by user");
-            console.error("[Chat] error", e);
         } finally {
-            if (mcpClient) { try { await mcpClient.close(); } catch (e) { /* already torn down */ } }
             try { abortController.abort(); } catch (e) { /* no-op if already settled */ }
             setBusy(false); currentAbort = null;
         }
     }
+    const greet = () => addMsg("bot",
+        "Hi — I'm connected to your GoIndia data and this workbook. Ask me about the selected company, or to write something into a sheet. (Experimental)");
+
+    // Re-render whatever chat history survived from the last session.
+    history.forEach(m => addMsg(m.role === "assistant" ? "bot" : "user", m.content));
+
+    const openPanel = () => { panel.style.display = "flex"; fab.style.display = "none"; if (!stream.childElementCount) greet(); input.focus(); };
+    const closePanel = () => { panel.style.display = "none"; fab.style.display = ""; if (modeMenu) modeMenu.classList.remove("open"); };
+    fab.addEventListener("click", openPanel);
+
+    // Ribbon handshake: the "Ask DataGPT" button's ShowTaskpane action points at
+    // taskpane.html?view=datagpt (see manifest.xml), so auto-open the chat panel for that view too.
+    // Reads ?view= directly rather than document.body.dataset.view, since this IIFE runs
+    // synchronously before Office.onReady (which sets that dataset attribute) can fire — relying
+    // on it here was a real race that left the panel closed behind the fab.
+    let initialView = "main";
+    try { initialView = new URLSearchParams(location.search).get("view") || "main"; } catch (e) { /* malformed query string */ }
+    if (initialView === "datagpt") openPanel();
+    // (No close button any more — see the chat header in taskpane.html.)
+    const chatClear = byId("chatClear");
+    if (chatClear) {
+        chatClear.addEventListener("click", async () => {
+            const ok = await addConfirmCard("Clear all chat history?", { approveLabel: "Clear", rejectLabel: "Cancel" });
+            if (!ok) return;
+            history = [];
+            persistHistory();
+            // The turn notes go with it: they describe conversations the user just asked to forget.
+            memStore = memEmptyStore();
+            try { localStorage.removeItem(MEM_KEY); } catch (e) { /* nothing to remove */ }
+            stream.innerHTML = "";
+            greet();
+        });
+    }
+    input.addEventListener("input", () => { input.style.height = "auto"; input.style.height = Math.min(96, input.scrollHeight) + "px"; });
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
+    sendBtn.addEventListener("click", () => { if (busy) stopCurrentTurn(); else send(); });
+    renderSendBtn(); // markup ships the send glyph; make the JS the single source of truth from here
+
+    // ── GoIndia MCP access ──
+    // goindia-mcp.fly.dev sends no Access-Control-Allow-Origin header, so the browser blocks this
+    // add-in from calling it directly; the wallet backend proxies it server-to-server instead
+    // (see routers/wallet.py). Route is /wallet/mcp (Streamable HTTP, one endpoint), not the old
+    // /wallet/mcp/sse. The proxy must also send Access-Control-Expose-Headers naming
+    // Mcp-Session-Id — otherwise the browser withholds that non-safelisted header, no session is
+    // ever captured, and every call after initialize fails with HTTP 400 "Missing session ID".
 })();

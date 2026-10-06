@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <OfficeApp xmlns="http://schemas.microsoft.com/office/appforoffice/1.1" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:bt="http://schemas.microsoft.com/office/officeappbasictypes/1.0" xmlns:ov="http://schemas.microsoft.com/office/taskpaneappversionoverrides" xsi:type="TaskPaneApp">
   <Id>e6da381b-1909-47c4-82b7-71d53cd3306c</Id>
-  <Version>1.6.0.0</Version>
+  <Version>1.7.0.0</Version>
   <ProviderName>Go India Stocks</ProviderName>
   <DefaultLocale>en-US</DefaultLocale>
   <DisplayName DefaultValue="GoIndia Stocks for Excel (LOCAL DEV)"/>
@@ -64,6 +64,26 @@
                     <SourceLocation resid="Taskpane.Download.Url"/>
                   </Action>
                 </Control>
+                <!-- Download Table feature — COMMENTED OUT for now (2026-09), DataGPT changes
+                     ship first. Resume by uncommenting this control (matching entries are commented
+                     out in the Urls/ShortStrings/LongStrings sections below, and in taskpane.js/html).
+                <Control xsi:type="Button" id="DownloadTableButton">
+                  <Label resid="DownloadTableButton.Label"/>
+                  <Supertip>
+                    <Title resid="DownloadTableButton.Label"/>
+                    <Description resid="DownloadTableButton.Tooltip"/>
+                  </Supertip>
+                  <Icon>
+                    <bt:Image size="16" resid="Icon.Download.16x16"/>
+                    <bt:Image size="32" resid="Icon.Download.32x32"/>
+                    <bt:Image size="80" resid="Icon.Download.80x80"/>
+                  </Icon>
+                  <Action xsi:type="ShowTaskpane">
+                    <TaskpaneId>ButtonId1</TaskpaneId>
+                    <SourceLocation resid="Taskpane.DownloadTable.Url"/>
+                  </Action>
+                </Control>
+                -->
               </Group>
               <Group id="ChatGroup">
                 <Label resid="ChatGroup.Label"/>
@@ -185,6 +205,9 @@
         <bt:Url id="Commands.Url" DefaultValue="https://localhost:3000/commands.html"/>
         <bt:Url id="Taskpane.DataGPT.Url" DefaultValue="https://localhost:3000/taskpane.html?view=datagpt"/>
         <bt:Url id="Taskpane.Download.Url" DefaultValue="https://localhost:3000/taskpane.html?view=download"/>
+        <!-- Download Table — commented out
+             <bt:Url id="Taskpane.DownloadTable.Url" DefaultValue="https://localhost:3000/taskpane.html?view=downloadtable"/>
+        -->
         <bt:Url id="Taskpane.Profile.Url" DefaultValue="https://localhost:3000/taskpane.html?view=profile"/>
         <bt:Url id="Taskpane.Feedback.Url" DefaultValue="https://localhost:3000/taskpane.html?view=feedback"/>
       </bt:Urls>
@@ -193,6 +216,9 @@
         <bt:String id="GoIndiaTab.Label" DefaultValue="GoIndia Stocks"/>
         <bt:String id="DataGroup.Label" DefaultValue="Data"/>
         <bt:String id="DownloadDataButton.Label" DefaultValue="Download Data"/>
+        <!-- Download Table — commented out
+             <bt:String id="DownloadTableButton.Label" DefaultValue="Download Table"/>
+        -->
         <bt:String id="ChatGroup.Label" DefaultValue="DataGPT"/>
         <bt:String id="AskDataGPTButton.Label" DefaultValue="Ask DataGPT"/>
         <bt:String id="FeedbackGroup.Label" DefaultValue="Feedback"/>
@@ -204,6 +230,9 @@
       <bt:LongStrings>
         <bt:String id="GetStarted.Description" DefaultValue="Go India Stocks add-in loaded successfully. Open the 'GoIndia Stocks' tab in the ribbon at the top of Excel to download company data, ask DataGPT, and view your profile."/>
         <bt:String id="DownloadDataButton.Tooltip" DefaultValue="Open a focused view to search for a company, choose data sources, optionally enable the AI Financial Model, and download — all in one place"/>
+        <!-- Download Table — commented out
+             <bt:String id="DownloadTableButton.Tooltip" DefaultValue="Pick a table from the list and download it as it is into a new sheet"/>
+        -->
         <bt:String id="AskDataGPTButton.Tooltip" DefaultValue="Open the side panel with DataGPT chat only"/>
         <bt:String id="FeedbackButton.Tooltip" DefaultValue="Send feedback about a company's data to the GoIndia team"/>
         <bt:String id="ProfileButton.Tooltip" DefaultValue="View your profile, wallet balance and history, and the disclaimer"/>
