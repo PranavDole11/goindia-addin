@@ -51,30 +51,9 @@
             box-shadow: 0 2px 4px rgba(0,0,0,0.2);
         }
 
-        /* Download Data — primary, solid navy */
-        #refreshBtn {
-            background: #173760;
-            border-radius: 10px;
-            padding: 7px 14px;
-            font-size: 13px;
-            font-weight: 600;
-            box-shadow: 0 2px 8px rgba(23,55,96,0.35);
-        }
-        #refreshBtn:hover {
-            background: #1d4576;
-            transform: translateY(-1px);
-            box-shadow: 0 0 16px rgba(47,111,208,0.55), 0 6px 14px rgba(0,0,0,0.28);
-        }
-        #refreshBtn:active {
-            transform: translateY(0);
-            box-shadow: 0 2px 6px rgba(0,0,0,0.2);
-        }
-        #refreshBtn:disabled {
-            background: #9fb3cc;
-            box-shadow: none;
-            cursor: default;
-            transform: none;
-        }
+        /* Download Data's primary/secondary buttons now use the shared .fb-submit/
+           .fb-btn-secondary classes (see DESIGN_SYSTEM.md) instead of bespoke #refreshBtn/#helpBtn
+           rules — #refreshBtn/#helpBtn stay as JS hooks only, no styling of their own any more. */
 
         #refreshStatusBtn {
             background-color: #4b9f27; /* Bootstrap green */
@@ -90,28 +69,6 @@
         }
         #refreshStatusBtn:disabled {
             background-color: #999999; /* Bootstrap green */
-        }
-
-        /* Help — secondary "ghost" button in brand red */
-        #helpBtn {
-            background: #ffffff;
-            color: #d80404;
-            border: 1.5px solid #d80404;
-            border-radius: 10px;
-            padding: 6px 14px;
-            font-size: 13px;
-            font-weight: 600;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.12);
-        }
-        #helpBtn:hover {
-            background: #d80404;
-            color: #ffffff;
-            transform: translateY(-1px);
-            box-shadow: 0 4px 10px rgba(216,4,4,0.3);
-        }
-        #helpBtn:active {
-            transform: translateY(0);
-            box-shadow: 0 1px 3px rgba(0,0,0,0.12);
         }
 
         #logoutBtn:hover {
@@ -145,14 +102,14 @@
 
         .dropdown {
             position: relative;
-            width: 280px;
+            width: 100%;
             font-family: Arial, sans-serif;
         }
 
         .dropdown-toggle {
             padding: 10px 12px;
             width: 100%;
-            border: 3px solid #d6e5f5;
+            border: 1.5px solid #d6e5f5;
             border-radius: 8px;
             cursor: text;
             background-color: white;
@@ -163,12 +120,9 @@
             font-family: Arial, sans-serif;
         }
 
-        .dropdown-toggle:active {
-            border: 3px solid #8bbef4;
-        }
-
+        .dropdown-toggle:active,
         .dropdown-toggle:focus {
-            border: 3px solid #8bbef4;
+            border-color: #2f6fd0;
         }
 
         .dropdown-menu {
@@ -176,7 +130,7 @@
             top: 100%;
             left: 0;
             right: 0;
-            border: 1px solid #8bbef4;
+            border: 1.5px solid #2f6fd0;
             border-top: none;
             border-radius: 0 0 8px 8px;
             background-color: white;
@@ -193,7 +147,7 @@
 
         #customDropdown.open .dropdown-toggle {
             border-radius: 8px 8px 0 0;
-            border-color: #8bbef4;
+            border-color: #2f6fd0;
         }
 
         
@@ -230,26 +184,66 @@
             align-items: baseline;
             flex-wrap: wrap;
             gap: 2px 7px;
-            margin-top: 44px; /* clears the absolutely-positioned profile bar above it */
             font-family: Arial, sans-serif;
         }
-        /* The ribbon's "download"-view (see applyRibbonView in taskpane.js) hides the profile/
-           wallet bar entirely — since that bar is position:absolute (out of normal flow), hiding
-           it doesn't reclaim the 44px .format-row otherwise reserves to clear it, leaving a bare
-           gap at the top. Collapse it back down to ordinary breathing room in that view only. */
-        body[data-view="download"] .format-row {
-            margin-top: 12px;
+        /* #downloadFeatureBox (the "Download Data" card — see its own HTML comment) is now the
+           first flowed element in this cluster, so IT carries the clearance for the absolutely-
+           positioned profile bar above it that .format-row used to (that bar is out of normal
+           flow, so hiding it in the "main" view — where the box keeps its normal card look and
+           this clearance — doesn't reclaim this gap on its own). In the "download" ribbon view the
+           box goes edge-to-edge instead (see the overrides below), so no clearance is needed there. */
+        #downloadFeatureBox {
+            margin-top: 44px;
         }
-        /* Shrinks the outer shell's own padding so the download-only module and its Download
-           Data button sit higher, closer to the top of the side panel — main view is untouched. */
+        /* Same edge-to-edge treatment Query Data uses (body[data-view="downloadtable"] above) —
+           #loginWrapper/#memberContent/#addinUI all reserve their own padding and (via
+           #loginWrapper's align-items:start) don't stretch their child to full width, which is
+           what was actually causing the left/right/top gap around the card, not any padding on the
+           card itself. Unlike Query Data this view does NOT also force #downloadFeatureBox to
+           flex:1/height:100%+.fb-body to overflow-y:auto — the company-search dropdown's
+           suggestion list is a descendant of .fb-body, and a scrolling/clipping ancestor there
+           would cut it off (or trap it inside a scrollbar) instead of letting it float over the
+           page like a dropdown should. Download Data's content is modest enough that it doesn't
+           need to fill/scroll within a fixed height the way Query Data's "Your Tables" list does —
+           the page can just grow and scroll as a whole instead. */
         body[data-view="download"] #loginWrapper {
-            padding-top: 0.5rem;
+            padding: 0; min-height: 100vh; align-items: stretch !important; box-sizing: border-box;
         }
-
-        .format-label {
-            font-size: 10px;
-            font-weight: 600;
-            color: #6b7c93;
+        body[data-view="download"] #memberContent {
+            padding: 0; align-items: stretch; width: 100%; box-sizing: border-box;
+        }
+        body[data-view="download"] #addinUI {
+            display: flex; flex-direction: column; width: 100%; padding: 0; box-sizing: border-box;
+        }
+        body[data-view="download"] #downloadFeatureBox {
+            margin-top: 0; border: none; border-radius: 0; box-shadow: none;
+        }
+        body[data-view="download"] .fb-header-self-rounded {
+            border-radius: 0;
+        }
+        /* #downloadFeatureBox's own content stays inset via .fb-body's 16px padding even in this
+           edge-to-edge view, but these status/banner elements (infoBox, dataStatusRow,
+           walletDeductBanner, aiStatusBox, warningMsg, modelChecksBtn) are separate siblings of the
+           box, not inside it — now that #addinUI itself has no padding either (see above), they
+           were sticking flush to the window's edges. Give them the same 16px inset as the box's own
+           content so everything still lines up. */
+        body[data-view="download"] #infoBox,
+        body[data-view="download"] #dataStatusRow,
+        body[data-view="download"] #walletDeductBanner,
+        body[data-view="download"] #aiStatusBox,
+        body[data-view="download"] #warningMsg,
+        body[data-view="download"] #modelChecksBtn {
+            margin-left: 16px;
+            margin-right: 16px;
+        }
+        /* #modelChecksBtn and #dataStatusRow both carry an inline width:100% (inline styles beat
+           stylesheet rules, so the margins above would otherwise just push them 32px past the
+           container's right edge — margin is added OUTSIDE a width, border-box sizing or not).
+           calc() accounts for exactly the margin just added, same effective inset as their
+           siblings above. */
+        body[data-view="download"] #modelChecksBtn,
+        body[data-view="download"] #dataStatusRow {
+            width: calc(100% - 32px) !important;
         }
 
         .format-opt {
@@ -345,12 +339,13 @@
         }
 
         /* AI Financial Model — a "hero" feature card with a toggle switch. Width matches the
-           company dropdown (280px) so the stacked controls line up uniformly. */
+           company dropdown (100% of the available field width) so the stacked controls line up
+           uniformly and both sit evenly inset from the panel's edges. */
         .model-card {
             display: flex;
             align-items: flex-start;
             gap: 10px;
-            width: 280px;
+            width: 100%;
             box-sizing: border-box;
             margin-top: 14px;
             padding: 11px 13px;
@@ -489,7 +484,7 @@
         .sector-select {
             padding: 10px 12px;
             width: 100%;
-            border: 3px solid #d6e5f5;
+            border: 1.5px solid #d6e5f5;
             border-radius: 8px;
             background-color: white;
             font-size: 14px;
@@ -501,7 +496,7 @@
         }
 
         .sector-select:focus {
-            border-color: #8bbef4;
+            border-color: #2f6fd0;
         }
 
         /* Center the entire login container on the page */
@@ -772,6 +767,16 @@
             color: #000;
         }
 
+        /* #dataStatus's semantic states (see setDataStatus in taskpane.js) — replaces plain CSS
+           color keywords (orange/green/blue/red) with the add-in's actual palette. "action" draws
+           the eye toward clicking Refresh; "neutral" is deliberately muted since there's nothing to
+           do; "warn"/"err" match the amber/red tones used elsewhere in the add-in. */
+        #dataStatus { font-size: 12.5px; }
+        .data-status-neutral { color: #6b7686; }
+        .data-status-action { color: #173760; font-weight: 700; }
+        .data-status-warn { color: #92400e; }
+        .data-status-err { color: #b80000; }
+
     </style>
 
     <!-- Login Screen -->
@@ -978,36 +983,177 @@
                     </div>
                 </div>
 
-                <!-- Download Table feature — COMMENTED OUT for now (2026-09), DataGPT changes ship
-                     first. Resume by uncommenting this section and the matching CSS block below
-                     (search "Download Table"), and the manifest/taskpane.js pieces noted there. -->
-                <!--
-                Ribbon "Download Table" view (?view=downloadtable). One dropdown fed by the backend's
-                allow-list (GIS.dbo.AddinDownloadableTables) and one button: the chosen table is
-                written, as it is, to a NEW sheet. Deliberately no free-text table name anywhere —
-                only what the backend lists can be picked. Wired up by setupDownloadTableView()
-                in taskpane.js; reuses the Feedback view's box styles (.fb-*).
+                <!-- "Query Data" view (?view=downloadtable). Replaces the earlier dropdown-based
+                     Download Table feature (pick one allow-listed table, download it as-is): the
+                     user now describes what they want in PLAIN ENGLISH, via a two-stage flow —
+                     (1) an LLM picks the right table(s) from the MCP data catalog (fetched from its
+                     public S3 index.json, see DOWNLOADTABLE_CATALOG_URL), (2) a second LLM call
+                     writes SQL against those table(s)' real per-table schema (dbcatalog/<table>.md).
+                     The generated SQL is then run via /wallet/excel_run_query (backend/routers/
+                     wallet.py), which re-validates it server-side as untrusted input (SELECT/WITH
+                     only, no comments, a DDL/DML/admin keyword blocklist, row-capped) before
+                     executing it and returning rows, written to a new sheet the same way
+                     writeDownloadedTableToSheet already did for the old feature.
+                     Wired up inline in applyRibbonView() in taskpane.js; reuses the Feedback
+                     view's box styles (.fb-*). -->
                 <div id="downloadTableSection" style="display:none;">
                     <div class="fb-box">
-                        <div class="fb-header">Download Table</div>
-                        <div class="fb-body">
-                            <div class="fb-field">
-                                <label class="fb-label" for="dtSelect">Table</label>
-                                <select id="dtSelect" class="fb-input" disabled>
-                                    <option value="">Loading tables…</option>
-                                </select>
-                                <div class="dt-purpose" id="dtPurpose"></div>
-                                <div class="dt-info" id="dtInfo"></div>
-                            </div>
-                            <div class="fb-status" id="dtStatus" style="display:none;"></div>
-                            <button type="button" class="dt-link" id="dtRetry" style="display:none;">Try again</button>
+                        <div class="fb-header">Table Builder</div>
+
+                        <!-- Download Data and Your Tables are separate tabs again (an earlier
+                             revision of this view merged them into one scrolling panel — see git
+                             history for that layout and the ORIGINAL switchDtTab). Both selection
+                             polls (grid-as-query and the Your Tables selection highlight) still run
+                             continuously regardless of which tab is active, same as the merged
+                             view — only which PANEL is visible changes on a tab click; see the
+                             current switchDtTab in taskpane.js. -->
+                        <div class="dt-tabs" id="dtTabs">
+                            <button type="button" class="dt-tab-btn active" id="dtTabDownload" data-tab="download">Download Data</button>
+                            <button type="button" class="dt-tab-btn" id="dtTabYourTables" data-tab="yourtables">
+                                <span>Your Tables</span>
+                                <span class="dt-yt-count-badge" id="dtYtTabCount">0</span>
+                            </button>
                         </div>
-                        <div class="fb-footer">
-                            <button type="button" class="fb-submit" id="dtDownload" disabled>Download to a new sheet</button>
+                        <div id="dtDownloadBody">
+                            <div class="fb-body" id="dtQueryFieldWrap">
+                                <div class="fb-field" id="dtQueryField">
+                                    <textarea id="dtQuery" class="fb-textarea dt-query-textarea" rows="3" placeholder="e.g. Revenue and EBITDA of Reliance Industries for the last 5 years"></textarea>
+                                </div>
+                                <!-- Shown INSTEAD of the textarea above whenever the user's live sheet
+                                     selection looks like a hand-built table skeleton (company/metric
+                                     labels, a column of years, etc.) rather than a single cell or a
+                                     blank destination-picking selection — see startSelectionPolling /
+                                     checkSelectionOnce in taskpane.js. Purely an honest echo of what's
+                                     selected (real address + the actual cell text), not a pretend
+                                     semantic breakdown — the real interpretation only happens once the
+                                     request is actually sent. "Type a request instead" is the escape
+                                     hatch back to the textarea above. -->
+                                <div class="fb-field" id="dtSelectionField" style="display:none;">
+                                    <div class="dt-field-header-row">
+                                        <label class="fb-label dt-section-title">Using the table you've selected</label>
+                                        <button type="button" class="dt-mode-toggle-btn" id="dtSelectionUseTextInstead">Type a request</button>
+                                    </div>
+                                    <div class="dt-info" id="dtSelectionAddress"></div>
+                                    <div id="dtSelectionGrid"></div>
+                                </div>
+                                <div class="fb-status" id="dtStatus" style="display:none;"></div>
+                            </div>
+                            <!-- Always visible, in both input modes (unlike the hint below it) — the
+                                 one shared submit action for a typed request OR a selected skeleton. -->
+                            <div class="fb-footer dt-download-footer" id="dtDownloadFooter">
+                                <div class="dt-query-hint" id="dtQueryHint">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"></rect><rect x="14" y="3" width="7" height="7" rx="1"></rect><rect x="3" y="14" width="7" height="7" rx="1"></rect><rect x="14" y="14" width="7" height="7" rx="1"></rect></svg>
+                                    <span>Or select headers in your sheet</span>
+                                </div>
+                                <button type="button" class="fb-submit dt-download-btn" id="dtDownload">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                                    <span>Download</span>
+                                </button>
+                            </div>
+
+                            <!-- ── Tutorial — Download Data tab only, for now (Your Tables doesn't
+                                 have one yet) — see the tutorial step engine in taskpane.js (search
+                                 "dtTutorialSteps") for the step content and what each step actually
+                                 automates. Deliberately NOT built on .dz-overlay (that family of
+                                 modal always dims the whole window behind it, position:fixed;
+                                 inset:0) — this "expands" from the button's own bottom-right corner
+                                 instead (transform-origin, see .dt-tutorial-panel below) and leaves
+                                 everything else fully visible/usable, since a couple of its steps
+                                 specifically want the user watching the composer/sheet update live
+                                 while it plays. #dtDownloadBody is this pair's own positioned
+                                 ancestor (position:relative, see its CSS) rather than the whole
+                                 .fb-box, so it never overlaps the tab bar above. -->
+                            <button type="button" id="dtTutorialBtn" class="dt-tutorial-fab" title="Tutorial: how to use Download Data">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M9.5 9a2.5 2.5 0 0 1 5 0c0 1.4-1.25 1.8-1.75 2.75-.2.4-.25.75-.25 1.25"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
+                                <span>Tutorial</span>
+                            </button>
+                            <div id="dtTutorialPanel" class="dt-tutorial-panel" style="display:none;">
+                                <button type="button" id="dtTutorialX" class="dt-icon-btn dt-tutorial-x-btn" title="Close tutorial" aria-label="Close tutorial">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                                </button>
+                                <div class="dt-tutorial-body" id="dtTutorialBody"></div>
+                                <div class="dt-tutorial-footer">
+                                    <button type="button" id="dtTutorialPrev" class="dt-tutorial-nav-btn" disabled>Previous</button>
+                                    <span id="dtTutorialStepLabel" class="dt-tutorial-step-label">Step 1 of 3</span>
+                                    <button type="button" id="dtTutorialNext" class="fb-submit dt-tutorial-next-btn"><span>Next</span></button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- "Your Tables" — every table in THIS workbook that this feature created,
+                             found by scanning every sheet's cell comments for one containing
+                             "Table Identifier:" (see writeDownloadedTableToSheet's refresh-tag
+                             comment) — not a separate persisted index, so it can never drift out of
+                             sync with the workbook; it only ever reflects what's actually there
+                             right now. Scanned automatically (on load, on an interval, and after any
+                             write/refresh/delete here) rather than needing a manual refresh — there's
+                             no button for that any more. Every row is always fully expanded — title,
+                             location, description, and the Refresh/Modify/Delete actions — the title
+                             and location are themselves buttons that jump to that table in the sheet
+                             (see renderYourTablesList/navigateToTable). Its own tab panel — see
+                             #dtTabs above — toggled by switchDtTab in taskpane.js. No section header
+                             of its own any more (it used to repeat "Your tables" + the count badge
+                             right here, directly under the #dtTabYourTables tab button that already
+                             says both) — just the plain list below. -->
+                        <div id="dtYourTablesPanel" style="display:none;">
+                            <div class="dt-yt-body" id="dtYourTablesBody">
+                                <div class="fb-field" id="dtYourTablesField">
+                                    <div id="dtYourTablesList" class="dt-yt-list">
+                                        <div class="dt-info">Scanning…</div>
+                                    </div>
+                                </div>
+                                <!-- Shared Undo toast — per-row Delete uses this (see showYtUndoToast in
+                                     taskpane.js) instead of a confirm modal. Floats over the bottom of
+                                     the panel (position:absolute, #dtYourTablesBody is its positioned
+                                     ancestor) rather than taking flex layout space, since it's transient. -->
+                                <div class="dt-yt-toast" id="dtYourTablesToast" style="display:none;">
+                                    <span class="dt-yt-toast-message" id="dtYourTablesToastMessage"></span>
+                                    <button type="button" class="dt-yt-toast-undo" id="dtYourTablesToastUndo">Undo</button>
+                                </div>
+                            </div>
+
+                            <!-- ── Tutorial — Your Tables ── Same shell/CSS as the Download Data
+                                 tutorial (#dtTutorialBtn/#dtTutorialPanel — see its own comment for
+                                 why this isn't a .dz-overlay) under a separate id prefix, so both
+                                 can exist independently. This one walks through editing an EXISTING
+                                 table rather than creating one — a disposable sample table (clearly
+                                 labeled as such in its own title/description) is created on its own
+                                 temporary sheet when the tutorial opens and that whole sheet is
+                                 deleted when it closes, specifically so nothing here ever touches a
+                                 real table of the user's own — see "dtYtTutorialSteps" in
+                                 taskpane.js. #dtYourTablesPanel is this pair's own positioned
+                                 ancestor (position:relative, same rule #dtDownloadBody shares). -->
+                            <button type="button" id="dtYtTutorialBtn" class="dt-tutorial-fab" title="Tutorial: how to use Your Tables">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M9.5 9a2.5 2.5 0 0 1 5 0c0 1.4-1.25 1.8-1.75 2.75-.2.4-.25.75-.25 1.25"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
+                                <span>Tutorial</span>
+                            </button>
+                            <div id="dtYtTutorialPanel" class="dt-tutorial-panel" style="display:none;">
+                                <button type="button" id="dtYtTutorialX" class="dt-icon-btn dt-tutorial-x-btn" title="Close tutorial" aria-label="Close tutorial">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                                </button>
+                                <div class="dt-tutorial-body" id="dtYtTutorialBody"></div>
+                                <div class="dt-tutorial-footer">
+                                    <button type="button" id="dtYtTutorialPrev" class="dt-tutorial-nav-btn" disabled>Previous</button>
+                                    <span id="dtYtTutorialStepLabel" class="dt-tutorial-step-label">Step 1 of 5</span>
+                                    <button type="button" id="dtYtTutorialNext" class="fb-submit dt-tutorial-next-btn"><span>Next</span></button>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>
-                -->
+
+                <!-- Blocking "something is happening" overlay for any write/modify/refresh/move on
+                     a table — see showQueryDataOverlay/hideQueryDataOverlay in taskpane.js. Covers
+                     the whole window (position:fixed;inset:0) rather than just updating a status
+                     line, specifically so an AUTO-triggered refresh (the user editing a Description
+                     cell or a header cell directly, not clicking any button here) is still obviously
+                     visible even if the user isn't looking at this panel at that exact moment. -->
+                <div id="dtLoadingOverlay" class="dt-loading-overlay">
+                    <div class="dt-loading-box">
+                        <div class="dt-loading-spinner"></div>
+                        <div class="dt-loading-text" id="dtLoadingText">Working…</div>
+                    </div>
+                </div>
 
                 <!-- AI Financial Model automated checks popup — dismissible, reopenable via
                      #modelChecksBtn (see renderModelChecks in taskpane.js) -->
@@ -1023,88 +1169,104 @@
                     </div>
                 </div>
                 
-                <!-- Data Type Tabs — TEMPORARY: hidden pre-deployment per request. Company tab
-                     stays active/default and Compare's markup already starts display:none, so
-                     hiding this bar leaves Company shown and Compare unreachable with no other
-                     change needed. To re-enable, just remove this inline style. -->
-                <div class="data-tabs" id="dataTypeTabs" style="display:none;">
-                    <button class="data-tab active" data-type="company">Company</button>
-                    <button class="data-tab" data-type="compare">Compare</button>
-                </div>
-
-                <!-- Format selector (Company tab) — inline multi-select text toggles -->
-                <div id="companyDataControls" class="format-row">
-                    <span class="format-label">Data sources:</span>
-                    <label class="format-opt" title="Standardised Ind-AS statements">
-                        <input type="checkbox" id="indASCheck" checked>
-                        <span class="chk"></span>
-                        <span class="lbl">IndAS</span>
-                    </label>
-                    <label class="format-opt" title="Granular, detailed line-item breakdown">
-                        <input type="checkbox" id="detailedCheck" checked>
-                        <span class="chk"></span>
-                        <span class="lbl">Detailed</span>
-                    </label>
-                    <label class="format-opt" title="Operational / business KPIs, downloaded on their own — no financial model required">
-                        <input type="checkbox" id="operationalCheck">
-                        <span class="chk"></span>
-                        <span class="lbl">Operational</span>
-                    </label>
-                </div>
-
-                <!-- Company Dropdown -->
-                <div id="companyDropdownWrap" style="margin-top:12px;">
-                    <div class="dropdown" id="customDropdown">
-                        <input type="text" class="dropdown-toggle" id="dropdownToggle"
-                               data-value="" data-sector=""
-                               placeholder="Search company..." autocomplete="off" />
-                        <div class="dropdown-menu" id="dropdownMenu">
-                            <ul id="dropdownList"></ul>
+                <!-- "Download Data" — wrapped in the same .fb-box/.fb-header/.fb-body/.fb-footer
+                     shell Query Data and Feedback use (see DESIGN_SYSTEM.md), so this reads as a
+                     coherent card instead of controls floating loose in the panel. This same
+                     markup also renders inside the unfiltered "main" view (no ?view= at all — see
+                     applyRibbonView/RIBBON_VIEW_ALLOWLIST.download in taskpane.js, which narrows
+                     #addinUI down to a few ids including this box's) — the box reads fine there
+                     too, it just sits alongside the rest of that page's other sections. -->
+                <div id="downloadFeatureBox" class="fb-box fb-box-overflow-visible">
+                    <div class="fb-header fb-header-self-rounded">Download Financial Data</div>
+                    <div class="fb-body">
+                        <!-- Data Type Tabs — TEMPORARY: hidden pre-deployment per request. Company
+                             tab stays active/default and Compare's markup already starts
+                             display:none, so hiding this bar leaves Company shown and Compare
+                             unreachable with no other change needed. To re-enable, just remove
+                             this inline style. -->
+                        <div class="data-tabs" id="dataTypeTabs" style="display:none;">
+                            <button class="data-tab active" data-type="company">Company</button>
+                            <button class="data-tab" data-type="compare">Compare</button>
                         </div>
-                    </div>
-                </div>
 
-                <!-- Sector Dropdown (Sector only) -->
-                <div id="sectorDropdownWrap" style="display:none; margin-top:12px;">
-                    <select id="sectorSelect" class="sector-select">
-                        <option value="">Select Sector...</option>
-                    </select>
-                </div>
-
-                <!-- Compare controls -->
-                <div id="compareControls" style="display:none;">
-                    <div style="margin-top:12px;">
-                        <div class="dropdown" id="compareDropdown">
-                            <input type="text" class="dropdown-toggle" id="compareToggle"
-                                   placeholder="Search & add companies..." autocomplete="off" />
-                            <div class="dropdown-menu" id="compareDropdownMenu">
-                                <ul id="compareDropdownList"></ul>
+                        <!-- Format selector (Company tab) — inline multi-select text toggles -->
+                        <div class="fb-field">
+                            <label class="fb-label">Data sources</label>
+                            <div id="companyDataControls" class="format-row">
+                                <label class="format-opt" title="Standardised Ind-AS statements">
+                                    <input type="checkbox" id="indASCheck" checked>
+                                    <span class="chk"></span>
+                                    <span class="lbl">IndAS</span>
+                                </label>
+                                <label class="format-opt" title="Granular, detailed line-item breakdown">
+                                    <input type="checkbox" id="detailedCheck" checked>
+                                    <span class="chk"></span>
+                                    <span class="lbl">Detailed</span>
+                                </label>
+                                <label class="format-opt" title="Operational / business KPIs, downloaded on their own — no financial model required">
+                                    <input type="checkbox" id="operationalCheck">
+                                    <span class="chk"></span>
+                                    <span class="lbl">Operational</span>
+                                </label>
                             </div>
                         </div>
+
+                        <!-- Company Dropdown -->
+                        <div class="fb-field">
+                            <label class="fb-label">Select Company</label>
+                            <div id="companyDropdownWrap">
+                                <div class="dropdown" id="customDropdown">
+                                    <input type="text" class="dropdown-toggle" id="dropdownToggle"
+                                           data-value="" data-sector=""
+                                           placeholder="Search company..." autocomplete="off" />
+                                    <div class="dropdown-menu" id="dropdownMenu">
+                                        <ul id="dropdownList"></ul>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Sector Dropdown (Sector only) -->
+                        <div id="sectorDropdownWrap" style="display:none;">
+                            <select id="sectorSelect" class="sector-select">
+                                <option value="">Select Sector...</option>
+                            </select>
+                        </div>
+
+                        <!-- Compare controls -->
+                        <div id="compareControls" style="display:none;">
+                            <div class="dropdown" id="compareDropdown">
+                                <input type="text" class="dropdown-toggle" id="compareToggle"
+                                       placeholder="Search & add companies..." autocomplete="off" />
+                                <div class="dropdown-menu" id="compareDropdownMenu">
+                                    <ul id="compareDropdownList"></ul>
+                                </div>
+                            </div>
+                            <div id="selectedChips" class="selected-chips"></div>
+                            <div class="compare-hint">Select 2–5 companies, then click Download Data</div>
+                        </div>
+
+                        <!-- AI Financial Model (Company tab) — optional hero feature, whole card is the toggle -->
+                        <label id="includeOptions" class="model-card" title="Turn on to also build a full AI financial model">
+                            <input type="checkbox" id="aiModelCheck" class="mc-input">
+                            <span class="mc-icon">✨</span>
+                            <span class="mc-body">
+                                <span class="mc-titlerow">
+                                    <span class="mc-title">AI Financial Model</span>
+                                </span>
+                                <span class="mc-desc">Generate a financial model for the selected company using AI.</span>
+                                <span class="mc-cost">₹15–30, depending on company</span>
+                                <span class="mc-insufficient">Insufficient balance</span>
+                            </span>
+                            <span class="mc-switch"><span class="mc-track"></span></span>
+                        </label>
                     </div>
-                    <div id="selectedChips" class="selected-chips"></div>
-                    <div class="compare-hint">Select 2–5 companies, then click Download Data</div>
-                </div>
-
-                <!-- AI Financial Model (Company tab) — optional hero feature, whole card is the toggle -->
-                <label id="includeOptions" class="model-card" title="Turn on to also build a full AI financial model">
-                    <input type="checkbox" id="aiModelCheck" class="mc-input">
-                    <span class="mc-icon">✨</span>
-                    <span class="mc-body">
-                        <span class="mc-titlerow">
-                            <span class="mc-title">AI Financial Model</span>
-                        </span>
-                        <span class="mc-desc">Generate a financial model for the selected company using AI.</span>
-                        <span class="mc-cost">₹15–30, depending on company</span>
-                        <span class="mc-insufficient">Insufficient balance</span>
-                    </span>
-                    <span class="mc-switch"><span class="mc-track"></span></span>
-                </label>
-
-                <!-- Buttons -->
-                <div id="buttons">
-                    <button id="refreshBtn">Download Data</button>
-                    <button id="helpBtn">Help</button>
+                    <div class="fb-footer">
+                        <div id="buttons" style="display:flex; gap:10px;">
+                            <button type="button" id="refreshBtn" class="fb-submit" style="flex:2;">Download Data</button>
+                            <button type="button" id="helpBtn" class="fb-btn-secondary" style="flex:1;">Help</button>
+                        </div>
+                    </div>
                 </div>
 
                 <!-- Briefly shown after a financial model's cost is deducted from the wallet -->
@@ -1207,6 +1369,12 @@
                     body[data-view="feedback"] #addinUI { display: flex; flex-direction: column; padding: 18px 6px; }
                     .fb-box { background: #fff; border: 1.5px solid #e6eaf0; border-radius: 12px; overflow: hidden; font-family: Arial, sans-serif; }
                     .fb-header { background: #173760; color: #fff; padding: 12px 16px; font-weight: 700; font-size: 14px; border-bottom: 2px solid #d80404; }
+                    /* Download Data's box needs its dropdown suggestion list to visually extend
+                       below the card — .fb-box's overflow:hidden (which normally just clips the
+                       header's square corners to the box's rounded ones) would cut that list off,
+                       so this instance opts out and rounds its own header directly instead. */
+                    .fb-box-overflow-visible { overflow: visible; }
+                    .fb-header-self-rounded { border-radius: 10.5px 10.5px 0 0; }
                     .fb-body { padding: 16px; display: flex; flex-direction: column; gap: 14px; }
                     .fb-field { display: flex; flex-direction: column; gap: 6px; }
                     .fb-label { font-size: 11.5px; font-weight: 700; color: #173760; }
@@ -1227,20 +1395,525 @@
                     }
                     .fb-submit:hover { background: #21497e; }
                     .fb-submit:disabled { opacity: 0.6; cursor: default; }
+                    /* Secondary action next to a .fb-submit (e.g. "Help" next to "Download Data")
+                       — navy outline on white, not .dt-link's red (that one means cancel/dismiss,
+                       this one doesn't). See DESIGN_SYSTEM.md's button table. */
+                    .fb-btn-secondary {
+                        display: block; box-sizing: border-box; margin: 0; box-shadow: none;
+                        background: #fff; color: #173760; border: 1.5px solid #d6e5f5;
+                        border-radius: 8px; padding: 10px 14px; font-size: 13px; font-weight: 700;
+                        cursor: pointer; font-family: inherit;
+                    }
+                    .fb-btn-secondary:hover { background: #f0f5ff; border-color: #b9cff0; }
+                    .fb-btn-secondary:disabled { opacity: 0.6; cursor: default; }
                     .fb-status { font-size: 11.5px; padding: 8px 10px; border-radius: 8px; }
                     .fb-status.ok { background: #eafaf0; color: #1a7a3d; border: 1px solid #bfe8cf; }
                     .fb-status.err { background: #fff0f0; color: #b80000; border: 1px solid #f3caca; }
-                    /* Download Table feature — COMMENTED OUT for now (2026-09), DataGPT changes ship
-                       first. Resume by uncommenting this block and the matching HTML section above
-                       (search "Download Table"), and the manifest/taskpane.js pieces noted there.
-                    body[data-view="downloadtable"] #loginWrapper { padding-left: 0.5rem; padding-right: 0.5rem; }
-                    body[data-view="downloadtable"] #addinUI { display: flex; flex-direction: column; padding: 18px 6px; }
-                    select.fb-input { background: #fff; cursor: pointer; }
-                    select.fb-input:disabled { cursor: default; opacity: 0.7; }
-                    .dt-purpose { font-size: 12px; color: #4a5563; line-height: 1.5; }
+                    /* "Query Data" view — see the HTML section above for what replaced the earlier
+                       dropdown-based Download Table feature. Sized to fill the whole taskpane
+                       edge-to-edge, the same full-bleed treatment body[data-view="datagpt"]
+                       #chatPanel gets above (inset:0, no outer padding) — this view's own content
+                       (the SQL box, the cell-grid preview) benefits from the same room, and unlike
+                       chat it's laid out inline rather than as its own fixed-position overlay, so
+                       getting there is a few height/flex rules instead of position:fixed. */
+                    /* #loginWrapper carries an INLINE style (align-items:center, among others) —
+                       inline styles beat any external stylesheet rule regardless of selector, so
+                       overriding align-items here needs !important. Centering a shrink-to-fit
+                       child is exactly what left a gap on both sides even after this view's own
+                       padding was zeroed out below: align-items:stretch is what actually makes
+                       #addinUI (and therefore .fb-box) fill the full width edge-to-edge. */
+                    body[data-view="downloadtable"] #loginWrapper { padding: 0; min-height: 100vh; align-items: stretch !important; box-sizing: border-box; }
+                    /* #memberContent sits BETWEEN #loginWrapper and #addinUI and carries its own
+                       padding: 1rem + align-items: start (see its plain #memberContent rule above)
+                       — the actual source of the remaining top/side gap, since nothing done to
+                       #loginWrapper or #addinUI can reach outside of it. DataGPT's #chatPanel never
+                       hits this at all: position:fixed;inset:0 skips every ancestor, padding or
+                       not. Query Data has no such escape hatch, so this layer has to be zeroed too. */
+                    body[data-view="downloadtable"] #memberContent { padding: 0; align-items: stretch; width: 100%; height: 100vh; box-sizing: border-box; }
+                    body[data-view="downloadtable"] #addinUI { display: flex; flex-direction: column; width: 100%; padding: 0; height: 100%; box-sizing: border-box; }
+                    /* #downloadTableSection is set to display:flex (not block) in taskpane.js so it
+                       stretches to #addinUI's full height as a flex item here, rather than
+                       shrink-wrapping its own content — which .fb-box's "flex: 1; ..." rule just
+                       below depends on to actually fill the window instead of collapsing to
+                       whatever height the (deliberately compact) composer happens to need. */
+                    body[data-view="downloadtable"] #downloadTableSection { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+                    /* .fb-box's base rule (see above) styles it as a small rounded card — a border,
+                       border-radius, and clipped corners. For this view it should instead read as
+                       its own complete module filling the whole window, the same flat edge-to-edge
+                       treatment body[data-view="datagpt"] #chatPanel already gets (border-radius:
+                       0, no border, no shadow) — not a box floating inside extra chrome. */
+                    body[data-view="downloadtable"] .fb-box { flex: 1; display: flex; flex-direction: column; min-height: 0; border: none; border-radius: 0; box-shadow: none; }
+                    /* Download Data and Your Tables are two separate tab panels (#dtTabs picks
+                       which one is visible — see switchDtTab in taskpane.js) rather than one
+                       continuous scrolling view. Each panel takes the full remaining height below
+                       the tab bar — the composer no longer needs to stay shrink-to-fit now that
+                       nothing shares the space below it, and this keeps both panels filling the
+                       window the same way regardless of which is active. */
+                    /* Flush against .fb-header (margin:0, plain white — no background/top-border
+                       of its own) rather than reading as a separate light-gray strip floating
+                       below it; shorter vertical padding than the first pass (11px -> 6px) so the
+                       whole bar reads as a compact continuation of the header, not its own block. */
+                    #dtTabs { display: flex; flex-shrink: 0; margin: 0; background: #fff; border-bottom: 1.5px solid #e6eaf0; }
+                    .dt-tab-btn {
+                        flex: 1; display: flex; align-items: center; justify-content: center; gap: 6px;
+                        margin: 0; background: none; border: none; border-bottom: 3px solid transparent;
+                        padding: 6px 10px; font-family: Arial, sans-serif; font-size: 12.5px; font-weight: 700;
+                        color: #6b7686; cursor: pointer; transition: color .15s, border-color .15s;
+                    }
+                    .dt-tab-btn:hover { color: #173760; }
+                    /* The active tab's own rule wins over :hover for color regardless of source
+                       order, since both are plain classes of equal specificity — !important here
+                       just guarantees the active tab never looks like it's merely being hovered. */
+                    .dt-tab-btn.active { color: #173760 !important; border-bottom-color: #173760; }
+                    /* position:relative so the tutorial button/panel (position:absolute, see below)
+                       anchor to THIS panel's own box — bottom-right of the Download Data tab
+                       specifically, never drifting outside it or overlapping the tab bar above. */
+                    #dtDownloadBody, #dtYourTablesPanel { flex: 1; display: flex; flex-direction: column; min-height: 0; position: relative; }
+                    #dtYourTablesBody { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+                    /* ── Tutorial (Download Data tab only — see the HTML's own comment on
+                       #dtTutorialBtn for why this isn't built on .dz-overlay) ── */
+                    .dt-tutorial-fab {
+                        position: absolute; right: 12px; bottom: 12px; z-index: 40;
+                        display: inline-flex; align-items: center; gap: 6px;
+                        background: #fff; color: #173760; border: 1.5px solid #d6e5f5; border-radius: 20px;
+                        padding: 7px 14px; font-family: inherit; font-size: 11.5px; font-weight: 700;
+                        cursor: pointer; box-shadow: 0 2px 8px rgba(23,55,96,0.12);
+                    }
+                    .dt-tutorial-fab:hover { background: #f0f5ff; border-color: #b9cff0; }
+                    /* Anchored to the SAME corner the button sits in, with transform-origin matching
+                       — the open/close transition visibly grows out of/shrinks back into the button,
+                       which is the "expands into a modal" effect that was asked for. No backdrop
+                       (unlike .dz-overlay): position:absolute within #dtDownloadBody only, not
+                       position:fixed;inset:0, so the sheet/composer behind it stay fully visible and
+                       interactive the whole time — several steps specifically rely on the user
+                       watching those update live while this stays open alongside them. The
+                       display:none -> flex + class-added-a-frame-later split (dt-tutorial-panel-open)
+                       mirrors the same two-step pattern .dt-yt-refresh-form-open uses elsewhere in
+                       this file, for the same reason: display itself can't be transitioned. */
+                    .dt-tutorial-panel {
+                        /* bottom: 12px, NOT the Tutorial button's own clearance (it used to match the
+                           54px needed to sit above that button) — the button is hidden the moment this
+                           panel opens (see tutorialBtn.style.display = "none"), so there's nothing left
+                           to clear underneath it, and the reclaimed ~40px goes straight to the text,
+                           which is what was cramped. */
+                        position: absolute; right: 12px; bottom: 12px; z-index: 45; width: 340px; max-width: calc(100% - 24px);
+                        /* Caps the panel's own growth against the real viewport (not just its
+                           absolute-positioned container) so a short task pane window can never force
+                           it taller than there's room for — .dt-tutorial-body scrolls internally
+                           instead of pushing the header/footer out of view or getting clipped. */
+                        max-height: min(460px, calc(100vh - 50px));
+                        flex-direction: column; background: #fff; border-radius: 12px;
+                        box-shadow: 0 10px 32px rgba(23,55,96,0.28); border: 1px solid #e6eaf0;
+                        transform-origin: bottom right; opacity: 0; transform: scale(0.85);
+                        transition: opacity .16s ease, transform .16s ease;
+                    }
+                    .dt-tutorial-panel.dt-tutorial-panel-open { opacity: 1; transform: scale(1); }
+                    @media (prefers-reduced-motion: reduce) { .dt-tutorial-panel { transition: none; } }
+                    /* Floated into the panel's own top-right corner (.dt-tutorial-panel is already
+                       position:absolute, so it's this button's containing block too) rather than
+                       sitting in a dedicated header row — a whole row was a lot of vertical space to
+                       spend on one small icon. .dt-tutorial-body's top padding below is sized to clear
+                       it, so the close button reads as floating over the corner of the text, not
+                       colliding with it. */
+                    .dt-tutorial-x-btn { position: absolute; top: 6px; right: 6px; z-index: 1; }
+                    .dt-tutorial-body { padding: 32px 16px 14px; font-size: 12.5px; line-height: 1.55; color: #2c3744; overflow-y: auto; min-height: 0; }
+                    .dt-tutorial-body p { margin: 0 0 8px; }
+                    .dt-tutorial-body p:last-child { margin-bottom: 0; }
+                    .dt-tutorial-body b { color: #173760; }
+                    /* One row: Previous — "Step X of Y" — Next/Finish. Three flex children with
+                       space-between reads as Prev pinned left, Next pinned right, and the label
+                       settling naturally in the middle between them. */
+                    .dt-tutorial-footer {
+                        display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-shrink: 0;
+                        padding: 4px 14px 8px;
+                    }
+                    .dt-tutorial-step-label { font-size: 10.5px; font-weight: 700; color: #6b7686; text-transform: uppercase; letter-spacing: 0.04em; }
+                    .dt-tutorial-nav-btn {
+                        background: #fff; color: #173760; border: 1.5px solid #d6e5f5; border-radius: 6px;
+                        padding: 6px 10px; font-family: inherit; font-size: 11.5px; font-weight: 700; cursor: pointer;
+                    }
+                    .dt-tutorial-nav-btn:hover { background: #f0f5ff; border-color: #b9cff0; }
+                    .dt-tutorial-nav-btn:disabled { opacity: 0.45; cursor: default; }
+                    .dt-tutorial-next-btn { width: auto; margin: 0; padding: 6px 14px; font-size: 11.5px; }
+                    /* A generic "look here" ring — shared by every tutorial (Download Data's own
+                       Download button, and Your Tables' pencil/location-row/textarea/Update-bar/
+                       Refresh-button, see its own step engine further down in taskpane.js), applied
+                       via plain classList.add/remove on whichever element a step is currently
+                       pointing at. Same navy the rest of this view already uses for "this matters
+                       right now" emphasis (the selected-table focus ring, the pending-update
+                       highlight). border-radius is harmless on an element that already has its own
+                       rounder/squarer corners — the ring itself still reads clearly either way. */
+                    .dt-tutorial-spotlight {
+                        box-shadow: 0 0 0 3px rgba(23,55,96,0.28) !important; border-radius: 6px;
+                        animation: dtTutorialPulse 1.4s ease-in-out infinite;
+                    }
+                    @keyframes dtTutorialPulse {
+                        0%, 100% { box-shadow: 0 0 0 3px rgba(23,55,96,0.28); }
+                        50% { box-shadow: 0 0 0 6px rgba(23,55,96,0.12); }
+                    }
+                    @media (prefers-reduced-motion: reduce) { .dt-tutorial-spotlight { animation: none; } }
+                    /* Composer kept deliberately compact — no "Get data" header/subtitle any more,
+                       tighter padding/gap than this view's own Download Data/Feedback neighbors use,
+                       and a shorter textarea/footer/button (see dt-query-textarea/dt-download-footer/
+                       dt-download-btn below) — this is the view's entry point, not its main content,
+                       so it shouldn't compete with Your Tables for vertical space. */
+                    #dtQueryFieldWrap { padding: 10px 16px; gap: 8px; }
                     .dt-info { font-size: 11.5px; color: #6b7686; }
-                    .dt-link { align-self: flex-start; background: none; border: none; box-shadow: none; padding: 0; margin: 0; color: #2f6fd0; font-size: 12px; font-family: inherit; text-decoration: underline; cursor: pointer; }
-                    */
+                    /* A real multi-line box (not the single-line chat-composer style
+                       .dt-yt-refresh-input uses for the per-table Edit panel further down), since the
+                       question typed here is often longer — but short enough to keep this section
+                       compact overall. */
+                    .dt-query-textarea { min-height: 54px; resize: vertical; }
+                    /* Hint (left) + the one shared Download button (right) — always visible in both
+                       input modes, unlike the hint itself (see checkGridSelectionOnce/
+                       exitGridQueryMode in taskpane.js, which hide the hint only once a selection is
+                       actually being used as the query). Tighter padding than the shared .fb-footer
+                       default, again to keep this whole section compact. */
+                    .dt-download-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 16px; }
+                    .dt-query-hint { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: #6b7686; min-width: 0; }
+                    .dt-query-hint svg { flex-shrink: 0; }
+                    /* Slightly smaller than the shared .fb-submit default (10px/14px padding, 13px
+                       font) — not drastically, just enough to match the rest of this now-compact
+                       section instead of looming over it. */
+                    .dt-download-btn { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; width: auto; padding: 8px 12px; font-size: 12px; }
+                    /* The count badge now lives only on the #dtTabYourTables tab button — a quick
+                       "how many do I have" glance, not a control. (It used to also repeat here, in
+                       a section header above the list — removed as a duplicate.) */
+                    .dt-yt-count-badge {
+                        display: inline-flex; align-items: center; justify-content: center;
+                        min-width: 20px; height: 20px; padding: 0 6px; border-radius: 10px;
+                        background: #eaf1fd; color: #173760; font-size: 11px; font-weight: 700;
+                    }
+                    /* Stylized radio "pills" for the destination picker — native radio input kept
+                       for accessibility/keyboard use but visually hidden; the label itself is the
+                       clickable, styled control, toggled via the sibling :checked selector so no JS
+                       class-juggling is needed just to reflect which one is selected. nowrap + a
+                       smaller footprint (font/padding/dot all reduced) so all 3 (Current/New/Custom)
+                       reliably sit on one row instead of the 3rd one wrapping below the other two. */
+                    .dt-dest-options { display: flex; flex-wrap: nowrap; gap: 5px; }
+                    .dt-radio {
+                        flex: 1 1 0; min-width: 0; display: flex; align-items: center; justify-content: center; gap: 4px;
+                        padding: 6px 4px; border: 1.5px solid #d6e5f5; border-radius: 7px;
+                        font-size: 10.5px; font-weight: 600; color: #4a5563; background: #fff;
+                        cursor: pointer; user-select: none; white-space: nowrap;
+                        transition: border-color .15s, background .15s, color .15s;
+                    }
+                    .dt-radio:hover { border-color: #b9cff0; }
+                    .dt-radio input { position: absolute; opacity: 0; width: 0; height: 0; }
+                    /* Lets a pill's own label text ellipsize rather than visually overflow its
+                       shrunk box if the panel gets narrower than all 3 labels can fit in full. */
+                    .dt-radio span { overflow: hidden; text-overflow: ellipsis; }
+                    .dt-radio::before {
+                        content: ""; width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0;
+                        border: 1.5px solid #c3d4ea; box-sizing: border-box;
+                        transition: border-color .15s, background .15s, box-shadow .15s;
+                    }
+                    /* :has() covers modern WebView2 on its own; the plain .selected class (toggled
+                       in JS on change) is a belt-and-suspenders fallback for anywhere it isn't
+                       supported — same rule, two selectors. */
+                    .dt-radio:has(input:checked), .dt-radio.selected {
+                        border-color: #2f6fd0; background: #eef4fd; color: #173760;
+                    }
+                    .dt-radio:has(input:checked)::before, .dt-radio.selected::before {
+                        border-color: #2f6fd0; background: #2f6fd0;
+                        box-shadow: inset 0 0 0 2.5px #fff;
+                    }
+                    /* Cell-range preview — a mockup of the actual Excel grid the result will land
+                       in: real column-letter/row-number headers for the exact target cells, the
+                       real column names in the row that becomes the written header, and generic
+                       placeholders ("…") standing in for the data itself, which is deliberately NOT
+                       shown here — this is about confirming WHERE and roughly what SHAPE, not a
+                       second copy of the data. Nothing is written until the user confirms it. */
+                    /* Every "Cancel" in this view (write-confirm, Modify form, Delete confirm) —
+                       a real bordered button, not underlined text, so it reads as dismissing an
+                       action rather than a casual link. */
+                    .dt-link {
+                        align-self: flex-start; display: inline-flex; align-items: center; justify-content: center;
+                        background: #fff; color: #b80000; border: 1.5px solid #b80000;
+                        border-radius: 8px; padding: 9px 14px; margin: 0; box-shadow: none;
+                        font-size: 12.5px; font-weight: 700; font-family: inherit; cursor: pointer;
+                    }
+                    .dt-link:hover { background: #fdf0ee; }
+                    .dt-link:disabled { opacity: 0.5; cursor: default; }
+                    .dt-grid-wrap { overflow-x: auto; border: 1px solid #d6e5f5; border-radius: 8px; max-width: 100%; }
+                    .dt-grid { border-collapse: collapse; font-size: 11px; font-family: Consolas, Monaco, monospace; }
+                    .dt-grid th, .dt-grid td { border: 1px solid #e3eaf3; padding: 4px 9px; text-align: left; white-space: nowrap; }
+                    .dt-grid th.dt-grid-corner { background: #f0f3f8; }
+                    .dt-grid th.dt-grid-colhead, .dt-grid th.dt-grid-rowhead { background: #e4ebf5; color: #4a5563; font-weight: 700; text-align: center; }
+                    .dt-grid td.dt-grid-header-row { background: #173760; color: #fff; font-weight: 700; }
+                    .dt-grid td.dt-grid-placeholder { color: #9aa6b5; font-style: italic; text-align: center; }
+                    /* The title/description rows written above every table — see QD_TABLE_META_ROWS
+                       (the refresh tag itself is a cell comment, not a 3rd visible row — see
+                       writeDownloadedTableToSheet). Only the first shown column ever gets text
+                       (matching what's actually written); dt-grid-blank cells are genuinely
+                       empty, not a "data goes here" placeholder. */
+                    .dt-grid td.dt-grid-meta { background: #f7f9fc; color: #3c4858; font-style: italic; }
+                    .dt-grid td.dt-grid-blank { background: #fff; }
+                    .dt-preview-actions { display: flex; align-items: center; gap: 14px; margin-top: 10px; }
+                    .dt-preview-actions .fb-submit { flex: 1; margin: 0; }
+                    /* "Your Tables" — the on-demand workbook scan's results list (see
+                       scanYourTables), filling the space below the compact Download composer (see
+                       #dtYourTablesBody) and scrolling independently of it. */
+                    /* "Describe what data you want" shares this with the (now-removed) old "Your
+                       Tables" inline label — kept as a named size rather than inlining it, in case
+                       another section title needs to match later. */
+                    .dt-section-title { font-size: 13px; }
+                    /* #dtYourTablesBody is the positioned ancestor for the Undo toast below
+                       (position:absolute, anchored to this panel's bottom edge rather than the
+                       whole window). */
+                    .dt-yt-body { position: relative; }
+                    .dt-yt-item-loc-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+                    .dt-yt-item-header-left { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
+                    /* A soft grey backdrop (not the stark white the row cards sit on) shows through
+                       the gaps between rows now that each one is its own rounded, bordered card. */
+                    .dt-yt-list { max-height: 320px; overflow-y: auto; background: #eef1f5; padding: 6px; border-radius: 8px; }
+                    .dt-yt-list .dt-info { padding: 10px; margin: 0; }
+                    /* A flat row with a bottom divider (Excel's own Queries & Connections pane,
+                       Gmail/Drive lists) instead of a bordered/shadowed card per table — title and
+                       the two header icon buttons (Refresh/Delete) share one header line; clicking
+                       anywhere on the row other than an actual control navigates to the table (see
+                       the click delegation in taskpane.js). */
+                    .dt-yt-item {
+                        border: 1px solid #b9cff0; border-bottom: 2px solid #173760; border-radius: 8px;
+                        padding: 10px 8px; background: #fff; box-shadow: none; font-size: 12px;
+                        margin-bottom: 6px; cursor: pointer;
+                    }
+                    .dt-yt-item:hover { background: #f7f9fc; }
+                    .dt-yt-item:last-child { margin-bottom: 0; }
+                    /* A pending (not-yet-final) Delete hides the row immediately — see the Undo
+                       toast in taskpane.js; the actual deleteYourTable call is deferred until the
+                       toast's timeout fires with no Undo click. */
+                    .dt-yt-item.dt-yt-item-pending-delete { display: none; }
+                    .dt-yt-item-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+                    .dt-yt-item-title-group { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; }
+                    .dt-yt-item-title-btn {
+                        text-align: left; background: none; border: none; box-shadow: none; padding: 0; margin: 0;
+                        font-family: inherit; font-weight: 700; font-size: 13px; color: #173760; cursor: pointer;
+                    }
+                    .dt-yt-item-title-btn:hover { text-decoration: underline; }
+                    /* The cell range as a small monospace "badge" rather than another button
+                       competing with the title — metadata, not a primary action. */
+                    .dt-yt-item-loc-badge {
+                        display: inline-block; font-size: 10.5px; font-family: Consolas, Monaco, monospace;
+                        background: #f3f6fb; color: #6b7686; border: 1px solid #e3eaf3; border-radius: 4px;
+                        padding: 1px 6px; margin: 0; box-shadow: none; cursor: pointer;
+                    }
+                    .dt-yt-item-loc-badge:hover { background: #eef2f8; color: #2f6fd0; border-color: #c7d7ee; }
+                    /* Swaps in for the badge above once Modify is clicked (see setLocEditing) — a
+                       destination-sheet picker (defaults to this table's own sheet), two compact
+                       monospace cell boxes with a ":" between them (not one "B2:D15" text field),
+                       and tick/cross buttons to commit or cancel — committing moves the table (see
+                       commitTableMove/moveYourTable). A full-width row of its own now (a sibling of
+                       .dt-yt-item-header, not nested inside its narrower title column — nested
+                       there, this row's content overflowed RIGHT UNDER the header's own fixed-width
+                       Refresh/Delete icons instead of fitting; see the HTML's own comment on this
+                       element for the full story), so there's no flex-wrap to worry about — every
+                       control here comfortably fits on one line with real room to spare. */
+                    .dt-yt-item-loc-edit { display: flex; align-items: center; gap: 4px; margin-top: 6px; }
+                    .dt-yt-item-loc-sheet-select {
+                        width: auto; max-width: 110px; font-size: 10.5px; font-family: inherit;
+                        padding: 1px 2px; border-radius: 4px; border: 1.5px solid #d6e5f5; color: #2c3744;
+                    }
+                    .dt-yt-item-loc-cell-input {
+                        /* A bare cell ("B5", or "XFD1048576" at the extreme) is all either of
+                           these ever has to hold — the ":" lives outside as its own element now,
+                           so neither box needs the wider budget a full "A3:C16" range used to. */
+                        width: auto; max-width: 70px; flex-shrink: 1; min-width: 0; display: inline-block;
+                        font-size: 10.5px; font-family: Consolas, Monaco, monospace;
+                        padding: 1px 6px; border-radius: 4px;
+                    }
+                    .dt-yt-item-loc-colon { flex-shrink: 0; color: #6b7686; font-size: 10.5px; font-weight: 700; }
+                    /* Tick (commit)/cross (cancel) pinned to the end of the row — reuse the generic
+                       small icon button (.dt-icon-btn, the same one the description's pencil edit
+                       toggle uses), cross additionally tinted red on hover (.dt-btn-danger, already
+                       used for Delete) purely to read as visually distinct from tick at a glance,
+                       not because cancelling is destructive. */
+                    .dt-yt-item-loc-edit .dt-icon-btn { flex-shrink: 0; margin-left: 2px; }
+                    /* Two icon-only buttons in the row's own header — Refresh, then Delete
+                       (rightmost). Each gets a full 44x44px tap target even though the drawn icon
+                       inside is much smaller, per standard touch-target guidance. */
+                    .dt-yt-item-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; position: relative; }
+                    .dt-yt-icon-action-btn {
+                        display: inline-flex; align-items: center; justify-content: center;
+                        width: 44px; height: 44px; background: transparent; color: #6b7686;
+                        border: none; border-radius: 8px; padding: 0; margin: 0; box-shadow: none; cursor: pointer;
+                    }
+                    .dt-yt-icon-action-btn svg { width: 14px; height: 14px; flex-shrink: 0; }
+                    .dt-yt-icon-action-btn:hover, .dt-yt-icon-action-btn:focus-visible { background: #f0f3f8; color: #173760; }
+                    .dt-yt-icon-action-btn:disabled { opacity: 0.5; cursor: default; }
+                    /* Delete stays grey like Refresh until hovered/focused/pressed — only then does
+                       it turn red, so a row doesn't read as "dangerous" at a glance. */
+                    .dt-yt-icon-action-btn.dt-yt-delete-btn:hover,
+                    .dt-yt-icon-action-btn.dt-yt-delete-btn:focus-visible,
+                    .dt-yt-icon-action-btn.dt-yt-delete-btn:active { background: #fdf0ee; color: #b80000; }
+                    .dt-icon-btn {
+                        display: inline-flex; align-items: center; justify-content: center;
+                        width: 24px; height: 24px; background: transparent; border: none; box-shadow: none;
+                        border-radius: 5px; padding: 0; margin: 0; color: #6b7686; cursor: pointer;
+                    }
+                    .dt-icon-btn:hover { background: #f0f3f8; color: #173760; }
+                    .dt-icon-btn:disabled { opacity: 0.5; cursor: default; }
+                    .dt-icon-btn.dt-btn-danger { color: #c0392b; }
+                    .dt-icon-btn.dt-btn-danger:hover { background: #fdf0ee; color: #a80000; }
+                    .dt-yt-item-body { margin-top: 6px; }
+                    /* Description + its pencil edit-toggle sit on the row itself now — it used to
+                       live hidden inside the Edit form, only shown once Edit was clicked. flex:1 +
+                       min-width:0 on the text is what lets it actually wrap/clamp inside this row
+                       instead of pushing the pencil button out to the side. */
+                    .dt-yt-item-desc-row { display: flex; align-items: flex-start; gap: 6px; }
+                    .dt-yt-item-desc { flex: 1; min-width: 0; color: #6b7686; font-style: italic; font-size: 11.5px; margin: 0; line-height: 1.4; }
+                    .dt-yt-item-desc-row .dt-yt-modify-btn { flex-shrink: 0; }
+                    /* A single full-width button now — Edit moved up beside the description above
+                       (the pencil button, see .dt-yt-item-desc-row) instead of sitting next to the
+                       Update bar here, so this wrapper only ever has the one child these days. Kept
+                       as its own element (rather than just using .dt-yt-update-bar directly) since
+                       the Edit-open handler still needs a single thing to hide/show as a unit — see
+                       the dt-yt-modify-btn handler. */
+                    .dt-yt-item-footer { display: flex; align-items: stretch; margin-top: 8px; }
+                    /* Update bar — same position/size whether idle or pending, so the row never
+                       jumps. Idle: quiet grey, not disabled (aria-disabled only, so it's still
+                       reachable by a screen reader, just not operable) and deliberately given no
+                       hover effect so it doesn't look clickable. Pending: filled navy, a real
+                       button, labeled with what changed (see pollTableMetaEdits/classifyDataRowChange
+                       for how that's detected) — text alone carries the state, not just color. */
+                    .dt-yt-update-bar {
+                        flex: 1; min-width: 0; min-height: 30px; display: flex; align-items: center;
+                        justify-content: center; gap: 6px; background: #eef1f5; color: #6b7686;
+                        border: none; border-radius: 6px; padding: 5px 8px; font-family: inherit;
+                        font-size: 11px; font-weight: 700; box-shadow: none; cursor: default;
+                    }
+                    .dt-yt-update-bar svg { width: 12px; height: 12px; flex-shrink: 0; }
+                    .dt-yt-update-bar.dt-yt-update-bar-pending { background: #173760; color: #fff; cursor: pointer; }
+                    .dt-yt-update-bar.dt-yt-update-bar-pending:hover { background: #21497e; }
+                    .dt-yt-update-bar.dt-yt-update-bar-pending:disabled { opacity: 0.6; cursor: default; }
+                    /* The inline "describe what you want changed" row — the Edit button above
+                       "transforms into" this (the button hides, this fades in in the exact same
+                       slot — see the dt-yt-modify-btn handler) rather than opening a separate panel
+                       below a button that stays visible. display:none by default (so its fields
+                       are fully out of the tab order while closed) — opening it adds
+                       .dt-yt-refresh-form-open (display:flex, the tinted "shared card" background)
+                       and then, one frame later, .dt-yt-refresh-form-visible to actually fade/slide
+                       it in (display can't itself be transitioned, hence the two-step). Closing
+                       removes both immediately, same instant hide, and restores the Edit button.
+                       Only ever ONE of these is open at a time across the whole list. */
+                    .dt-yt-refresh-form { display: none; flex-direction: column; gap: 8px; }
+                    .dt-yt-refresh-form.dt-yt-refresh-form-open {
+                        /* Vertical padding only — horizontal padding here would inset the textarea
+                           (and Cancel) further than the card's own edges, making the input row look
+                           noticeably narrower than everything else on the row (the description,
+                           header, Update bar) above and below it. */
+                        display: flex; margin-top: 8px; padding: 8px 0; border-radius: 6px; background: #f7f9fc;
+                        opacity: 0; transform: translateY(-4px); transition: opacity .15s ease, transform .15s ease;
+                    }
+                    .dt-yt-refresh-form.dt-yt-refresh-form-open.dt-yt-refresh-form-visible { opacity: 1; transform: translateY(0); }
+                    @media (prefers-reduced-motion: reduce) {
+                        .dt-yt-refresh-form.dt-yt-refresh-form-open { transition: none; }
+                    }
+                    /* Clamped to 3 lines by default — "Show more"/"Show less" only appears when the
+                       text actually overflows that (checked once the panel opens, see the
+                       dt-yt-modify-btn handler — a hidden element has no scrollHeight to measure
+                       against). */
+                    .dt-yt-item-desc-clamped {
+                        display: -webkit-box; -webkit-line-clamp: 3; line-clamp: 3; -webkit-box-orient: vertical;
+                        overflow: hidden;
+                    }
+                    .dt-yt-item-desc-clamped.dt-yt-item-desc-expanded { display: block; -webkit-line-clamp: unset; line-clamp: unset; overflow: visible; }
+                    .dt-yt-desc-toggle-btn {
+                        align-self: flex-start; background: none; border: none; box-shadow: none; padding: 0;
+                        margin: -2px 0 0; color: #2f6fd0; font-size: 11px; font-weight: 700; font-family: inherit; cursor: pointer;
+                    }
+                    .dt-yt-desc-toggle-btn:hover { text-decoration: underline; }
+                    /* Small uppercase label above the change textarea — a plain caption, not a
+                       control. (Used to also caption the description above it, back when the
+                       description lived inside this same form — it's always on the row now.) */
+                    .dt-yt-field-label {
+                        font-size: 10px; font-weight: 700; color: #6b7686; text-transform: uppercase;
+                        letter-spacing: 0.04em; margin-top: 2px;
+                    }
+                    .dt-yt-refresh-input { font-size: 12px; }
+                    .dt-yt-refresh-input-tall { min-height: 64px; resize: vertical; }
+                    /* "Apply change" (filled navy, same .fb-submit as Download) + "Cancel" (outlined
+                       .dt-link) side by side below the textarea — real, full-size buttons rather
+                       than an icon-only send button sitting inside the textarea itself. */
+                    .dt-yt-refresh-actions { display: flex; align-items: center; gap: 8px; margin-top: 2px; }
+                    .dt-yt-refresh-actions .fb-submit { flex: 1; margin: 0; display: inline-flex; align-items: center; justify-content: center; gap: 7px; }
+                    .dt-yt-refresh-actions .fb-submit svg { width: 13px; height: 13px; flex-shrink: 0; }
+                    /* Label + mode-toggle button sharing one row, right-aligned — the toggle stays
+                       in this exact top-right spot whether it currently reads "Using the table
+                       you've selected" or "Type a request instead", so switching modes never makes
+                       the control jump around. */
+                    .dt-field-header-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+                    .dt-mode-toggle-btn {
+                        flex-shrink: 0; display: inline-flex; align-items: center; gap: 5px;
+                        background: #fff; color: #b80000; border: 1.5px solid #b80000; border-radius: 6px;
+                        padding: 4px 11px; margin: 0; font-family: inherit; font-size: 10.5px; font-weight: 700;
+                        cursor: pointer; box-shadow: none; white-space: nowrap;
+                    }
+                    .dt-mode-toggle-btn:hover { background: #fdf0ee; }
+                    .dt-mode-toggle-btn:disabled { opacity: 0.5; cursor: default; }
+                    .dt-mode-toggle-btn svg { width: 12px; height: 12px; flex-shrink: 0; }
+                    /* A table whose description/company/period was edited directly in the sheet
+                       (see pollTableMetaEdits) — subtle, static highlight on its OWN row, alongside
+                       the row's own Update bar (which carries the actual "what changed" text and
+                       is the only way to apply it). */
+                    .dt-yt-item.dt-yt-item-pending-change { border-left: 3px solid #173760; background: #eaf1fd; }
+                    /* The table whose range currently contains the selected Excel cell (see
+                       checkYtSelectionOnce) — a soft focus ring (thin blue border + a faint glow),
+                       the same visual language as keyboard focus, which reads as "this is the
+                       current one" without competing with the pending-change highlight above (a left
+                       navy accent + tint, meaning "needs updating"). Deliberately NOT a thicker
+                       border in the SAME navy as pending-change — that looked identical to it at a
+                       glance. The two can still combine on one card (tint + left bar + ring + the
+                       eyebrow label below), and still never look like the same state. */
+                    .dt-yt-item.dt-yt-item-cell-selected { border: 1px solid #2f6fd0; box-shadow: 0 0 0 3px rgba(47, 111, 208, 0.18); }
+                    /* The state doesn't rely on the ring/color alone — this label is why the card
+                       is highlighted, same 10px caps treatment as .dt-yt-field-label elsewhere in
+                       this view's edit panel, just in the brand blue instead of grey. */
+                    .dt-yt-selected-eyebrow {
+                        display: flex; align-items: center; gap: 4px; margin-bottom: 2px;
+                        font-size: 10px; font-weight: 700; color: #2f6fd0; text-transform: uppercase; letter-spacing: 0.04em;
+                    }
+                    .dt-yt-selected-dot { font-size: 8px; line-height: 1; }
+                    /* Shared Undo toast (per-row Delete) — floats over the bottom of
+                       #dtYourTablesBody (its positioned ancestor, see .dt-yt-body) rather than
+                       taking flex layout space, since it's transient. */
+                    .dt-yt-toast {
+                        position: absolute; left: 12px; right: 12px; bottom: 12px; z-index: 30;
+                        display: flex; align-items: center; justify-content: space-between; gap: 12px;
+                        background: #173760; color: #fff; border-radius: 8px; padding: 10px 14px;
+                        font-size: 12px; box-shadow: 0 8px 22px rgba(0, 0, 0, 0.25);
+                    }
+                    .dt-yt-toast-message { flex: 1; min-width: 0; }
+                    .dt-yt-toast-undo {
+                        flex-shrink: 0; background: none; border: none; box-shadow: none; color: #9ecbff;
+                        font-weight: 700; font-size: 12px; font-family: inherit; cursor: pointer; padding: 0;
+                    }
+                    .dt-yt-toast-undo:hover { color: #fff; text-decoration: underline; }
+                    /* Blocking overlay shown for the duration of any write/modify/refresh/move —
+                       see showQueryDataOverlay/hideQueryDataOverlay in taskpane.js. Same dimmed-
+                       backdrop + centered white card language as .dz-overlay/.dz-box, just with a
+                       spinner instead of a form, and a higher z-index so it always sits above any
+                       other modal/dropdown this view might have open underneath it. */
+                    .dt-loading-overlay {
+                        position: fixed; inset: 0; background: rgba(0,0,0,0.45);
+                        display: none; align-items: center; justify-content: center;
+                        z-index: 1400; font-family: Arial, sans-serif;
+                    }
+                    .dt-loading-box {
+                        background: #fff; border-radius: 12px; padding: 26px 30px;
+                        display: flex; flex-direction: column; align-items: center; gap: 14px;
+                        box-shadow: 0 14px 44px rgba(0,0,0,0.35); max-width: 260px; text-align: center;
+                    }
+                    .dt-loading-spinner {
+                        width: 32px; height: 32px; border-radius: 50%; flex-shrink: 0;
+                        border: 3.5px solid #d6e5f5; border-top-color: #173760;
+                        animation: dtLoadingSpin 0.8s linear infinite;
+                    }
+                    @keyframes dtLoadingSpin { to { transform: rotate(360deg); } }
+                    @media (prefers-reduced-motion: reduce) {
+                        .dt-loading-spinner { animation-duration: 2.4s; }
+                    }
+                    .dt-loading-text { font-size: 13px; font-weight: 700; color: #173760; line-height: 1.4; }
                     .dz-footer {
                         display: flex; justify-content: flex-end; gap: 10px;
                         padding: 12px 16px; border-top: 1px solid #eee;
@@ -1438,9 +2111,9 @@
                 </div>
 
 
-                <!-- Data status container — width matches the dropdown (280px) for uniformity -->
-                <div id="dataStatusRow" style="margin-top:22px; width:280px; box-sizing:border-box; display:flex; padding:8px; align-items:center; gap:10px; border:1px solid #ccc; border-radius:5px;">
-                    <div id="dataStatus" style="font-size: small; flex: 1 1 auto; min-width: 0;">
+                <!-- Data status container — full width, matching the dropdown/model-card above -->
+                <div id="dataStatusRow" style="margin-top:22px; width:100%; box-sizing:border-box; display:flex; padding:10px 12px; align-items:center; gap:10px; background:#fff; border:1.5px solid #d6e5f5; border-radius:8px;">
+                    <div id="dataStatus" class="data-status-neutral" style="flex: 1 1 auto; min-width: 0;">
                         Checking for new data...
                     </div>
                     <button id="refreshStatusBtn" disabled>Refresh</button>
@@ -1572,19 +2245,33 @@
                        model's own chain-of-thought is actually streaming (see showReasoningText/
                        hideReasoningText in the JS), then drops away again once it moves on to
                        producing the answer or calling a tool — the dot alone carries on for that
-                       part, same as it always did. This briefly showed the live chain-of-thought
-                       ITSELF instead of just a label, in a small scrolling boxed window — removed
-                       again: the model is fast enough that the stream flew by too quickly to read. */
+                       part, same as it always did.
+                       .chat-thinking-box (below) streams the chain-of-thought text itself, live,
+                       into a fixed-height scrolling window under the dot+label row — a second
+                       attempt at this same idea (an earlier one was removed for streaming by too
+                       fast to read); monospace + italic + a muted, desaturated tone are
+                       deliberately NOT the chat bubble's own serif-free/full-contrast look, so even
+                       mid-scroll this unmistakably reads as scratch thinking, not the real answer. */
                     /* Indented to line up with the collapsed step list above it (.chat-steps-body
                        uses the same 14px), so it reads as "the next step" rather than a stray dot. */
-                    .chat-thinking { display: flex; align-items: center; gap: 6px; padding: 5px 2px 5px 14px; }
+                    .chat-thinking { display: flex; flex-direction: column; gap: 6px; padding: 5px 2px 5px 14px; }
+                    .chat-thinking-row { display: flex; align-items: center; gap: 6px; }
                     .chat-thinking-dot {
                         width: 11px; height: 11px; border-radius: 50%; background: #173760;
                         animation: chatThinkingDotPulse 1.1s ease-in-out infinite;
+                        flex-shrink: 0;
                     }
                     .chat-thinking-text {
                         font-size: 11px; font-weight: 600; color: #8a94a3;
                         animation: chatThinkingTextPulse 1.1s ease-in-out infinite;
+                    }
+                    .chat-thinking-box {
+                        height: 92px; overflow-y: auto; margin-right: 10px;
+                        background: #f4f6f9; border: 1px solid #e6eaf0; border-radius: 7px;
+                        padding: 8px 10px; box-sizing: border-box;
+                        font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+                        font-style: italic; font-size: 10.5px; line-height: 1.5; color: #8a94a3;
+                        white-space: pre-wrap; word-break: break-word;
                     }
                     @keyframes chatThinkingDotPulse {
                         0%, 100% { opacity: 0.25; transform: scale(0.8); }
@@ -1850,9 +2537,30 @@
         </div>
     </div>
 
+    <!-- ── Query Data -> DataGPT delegation notice ──────────────────────────────────────────
+         Shown when the lightweight intent check (see QD_INTENT_CLASSIFIER_MODEL in taskpane.js)
+         decides a typed Query Data question is really a modify/mixed request, not a plain
+         download — DataGPT, not the deterministic query builder, is what can actually act on an
+         existing table. Same reasoning as ribbonMoveModal above for sitting outside
+         #loginWrapper/#addinUI: this can fire from the "downloadtable" view specifically, and must
+         render regardless of whatever that view's own allowlist hides. -->
+    <div id="qdDelegateModal" class="dz-overlay">
+        <div class="dz-box">
+            <div class="dz-header">Switching to DataGPT</div>
+            <div class="dz-body">
+                <div class="dz-gen" id="qdDelegateText">
+                    Your question has been delegated to DataGPT, since this is more suited to DataGPT.
+                </div>
+            </div>
+            <div class="dz-footer">
+                <button id="qdDelegateContinue" class="dz-agree">Continue</button>
+            </div>
+        </div>
+    </div>
 
 
-    
+
+
 
     <script>
 

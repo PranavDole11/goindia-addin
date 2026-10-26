@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=Edge" />
+    <title>Sign in with Google</title>
+    <style>
+        body {
+            margin: 0; display: flex; align-items: center; justify-content: center; height: 100vh;
+            font-family: Arial, sans-serif; color: #555; font-size: 13px; background: #fff;
+        }
+    </style>
+</head>
+<body>
+    <div>Redirecting you to Google sign-in…</div>
+    <script>
+        // First page an Office dialog opens MUST be same-origin as taskpane.html (protocol,
+        // subdomain and port) — that's an Office dialog API requirement, not a Google one. Its
+        // only job is to immediately hand off to Google's own OAuth consent screen. Unlike Google
+        // Identity Services' rendered sign-in button (a window.open() popup, which desktop Excel's
+        // WebView2 host kicks out to an external browser tab it can no longer talk back to — see
+        // the comment on startGoogleSignIn in taskpane.html), the Office dialog IS a real separate
+        // browser/webview instance Office itself manages, so Google's sign-in page loads correctly
+        // here even on desktop Excel.
+        const CLIENT_ID = "588713186952-isq15ehjattbfce2hhhqnuffdfln3nco.apps.googleusercontent.com";
+        const redirectUri = `${location.origin}/google-signin-callback.html`;
+        const nonce = Math.random().toString(36).slice(2) + Date.now().toString(36);
+        const params = new URLSearchParams({
+            client_id: CLIENT_ID,
+            redirect_uri: redirectUri,
+            response_type: "id_token",
+            scope: "openid email profile",
+            nonce: nonce,
+            prompt: "select_account",
+        });
+        location.replace(`https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`);
+    </script>
+</body>
+</html>
