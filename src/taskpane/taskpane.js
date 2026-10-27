@@ -1800,16 +1800,67 @@ function showAddinUI() {
 //     assumption (written into the old comments, never tested) that a validation rule is a purely
 //     declarative flag with no cost proportional to range size. Measured live, that was simply
 //     false: applying or clearing it on ONE sheet took 6-8 SECONDS. The bounded range below is
-//     ~44,000x smaller and is what brings a single apply/clear into the sub-second range. It's a
+//     ~165,000x smaller and is what brings a single apply/clear into the sub-second range. It's a
 //     plain constant precisely so it's easy to widen if anyone genuinely works outside it.
 // ════════════════════════════════════════════════════════════════════════════════════════════
 
-// 78 columns x 5,000 rows. Far wider and deeper than any hand-built query skeleton or written
-// table realistically needs, while staying small enough that Excel applies/clears it in one quick
-// operation. Deliberately NOT the whole sheet — see the design note above.
-const QD_AUTOFILL_RANGE = "A1:BZ5000";
+// 52 columns x 2,000 rows = 104,000 cells. Far wider and deeper than any hand-built query skeleton
+// or written table realistically needs, while staying small enough that Excel applies/clears it in
+// one quick operation. Deliberately NOT the whole sheet — see the design note above.
+//
+// Was A1:BZ5000 (78 x 5,000 = 390,000 cells), which measured fine on Excel for the WEB — where the
+// ~0.8s network round trip dwarfs the validation work itself — but not on Excel for MAC, where the
+// sync is local and the per-cell validation work IS the cost. moveAutofillToSheet clears this range
+// on the old sheet and applies it to the new one on every active-sheet change, so a user working
+// across several sheets paid that full round every time they switched; at 390,000 cells that was
+// 780,000 cells of validation churn per switch, now 208,000. A plain constant precisely so it's
+// easy to widen again if anyone genuinely works past column AZ or row 2,000.
+const QD_AUTOFILL_RANGE = "A1:AZ2000";
 
 let autofillActive = false; // true only while Query Data is the open view, this page load (requirement 2/3)
+
+// ── Excel request-channel contention gate ──
+// Office.js serves one request channel per host, and in Excel ON THE WEB every context.sync() is a
+// real network round trip (~0.8s when that channel is idle). This view runs THREE recurring polls
+// against it (the merged selection poll and pollTableMetaEdits), and the user's own actions —
+// writing a table, refreshing one, applying/clearing the dropdown's 104,000-cell validation range —
+// are many syncs each. Those compete for the same channel.
+//
+// Confirmed live, across several machines, after v1.8.0.0 shipped the Your Tables watchers: a
+// 1-round-trip Your Tables scan took 17s in one session and 76s in a longer-lived one, and a single
+// data-validation clear took 16s — both while the workbook had ZERO tables. Nothing about those
+// operations is itself expensive; they were simply queued behind a backlog of background poll ticks
+// that the channel could never drain, and the backlog grew the longer the pane stayed open.
+//
+// So: every background poll stands down entirely while a user-initiated operation holds this gate,
+// giving the thing the user is actually waiting on an uncontested channel. A COUNTER, not a
+// boolean — these operations legitimately nest (writeRefreshedTable clears a block, then writes a
+// table, each wrapped) and an inner one finishing must not release the gate for the outer one.
+let qdExcelBusy = 0;
+const qdWithExcelBusy = async (fn) => {
+    qdExcelBusy++;
+    try {
+        return await fn();
+    } finally {
+        qdExcelBusy--;
+    }
+};
+
+// Excel repaints the grid after EVERY context.sync(). On Excel for the web that repaint is cheap
+// next to the ~0.8s network round trip the sync itself costs, so it never showed up in the timing
+// logs that drove the contention gate above. On Excel for MAC the balance is inverted: the sync is
+// a local bridge call, but the repaint is a synchronous native layout pass on the main thread, and
+// it is the dominant cost of a multi-sync write. Suspending it collapses a write's several syncs
+// into ONE repaint at the end, which is also what the user actually wants to see — the finished
+// table appearing at once rather than materialising a band at a time.
+//
+// The suspension lasts for exactly one sync, so it has to be re-armed before each one rather than
+// set once per Excel.run. Guarded rather than feature-detected via isSetSupported: that call has
+// its own cost and this is called on every sync, and a host predating ExcelApi 1.9 (Excel for Mac
+// below 16.21) simply throws here and repaints exactly as it did before.
+const qdSuspendRepaint = (ctx) => {
+    try { ctx.application.suspendScreenUpdatingUntilNextSync(); } catch (e) { /* host predates ExcelApi 1.9 — no suspension, same behavior as before */ }
+};
 
 // A fresh id per SCRIPT LOAD (not per call) tags every debug log below — if the console ever shows
 // what looks like duplicate/overlapping timing, this makes it immediately obvious whether that's a
@@ -1864,7 +1915,10 @@ const clearAutofillValidationEverywhere = async (reason) => {
     const t0 = performance.now();
     qdClearInFlight = (async () => {
         try {
-            await Excel.run(async (context) => {
+            // Holds the contention gate: clearing validation across QD_AUTOFILL_RANGE's 104,000
+            // cells is one of the heaviest single operations here, and it runs at startup with
+            // the dropdown's first appearance waiting directly behind it — see qdWithExcelBusy.
+            await qdWithExcelBusy(() => Excel.run(async (context) => {
                 // ONE round trip, deliberately. The obvious getItemOrNullObject + isNullObject
                 // existence check costs a whole extra sync — i.e. an extra ~0.8s of network in
                 // Excel for the web — and this runs at the worst possible moment for that: the
@@ -1873,7 +1927,7 @@ const clearAutofillValidationEverywhere = async (reason) => {
                 // ItemNotFound below instead of paying to ask first.
                 context.workbook.worksheets.getItem(sheetName).getRange(QD_AUTOFILL_RANGE).dataValidation.clear();
                 await context.sync();
-            });
+            }));
             setValidatedSheetName(null); // only now that it's actually gone
             console.log(`[QueryData timing][${QD_AUTOFILL_TAG}] clear #${callNum} — DONE — cleared "${sheetName}": ${(performance.now() - t0).toFixed(0)}ms`);
         } catch (e) {
@@ -3440,9 +3494,12 @@ function applyRibbonView() {
                     + "(and quarter, 1-4, ONLY if quarterly-grained).\n"
                     + "- \"latest\": no period named at all — whatever is most recently available per company.\n"
                     + "- \"range\" with range_count set to N: a RELATIVE count with NO named boundary — \"the "
-                    + "last N years\", \"the past N periods\". This is always anchored to whichever period "
-                    + "turns out to be most recent when the query actually runs, not to a fixed year you'd "
-                    + "compute from today's date.\n"
+                    + "last N years\", \"the past N periods\", \"the last N quarters\". This is always anchored "
+                    + "to whichever period turns out to be most recent when the query actually runs, not to a "
+                    + "fixed year you'd compute from today's date. range_count counts PERIODS AT THE REQUESTED "
+                    + "GRANULARITY (see \"granularity\" below), so \"the last 4 quarters\" is range_count 4 with "
+                    + "granularity \"quarterly\" — never 4 with granularity \"annual\", and never translated "
+                    + "into some number of years.\n"
                     + "- \"years\" with \"values\" set to an explicit list of {\"fiscal_year\": <int>, "
                     + "\"quarter\": <1-4 or null>}: an EXPLICIT, FIXED span or list of named periods — \"from "
                     + "FY22 to FY25\", \"2020 to 2023\", \"FY21 and FY23\", \"Q1 FY24 through Q3 FY24\". "
@@ -3455,6 +3512,26 @@ function applyRibbonView() {
                     + "2022, \"quarter\": null}, {\"fiscal_year\": 2023, \"quarter\": null}, {\"fiscal_year\": "
                     + "2024, \"quarter\": null}, {\"fiscal_year\": 2025, \"quarter\": null}] — four explicit "
                     + "years, NOT range_count 4.\n\n"
+                    + "SEPARATELY from the mode, always set period.granularity to \"quarterly\" or \"annual\" "
+                    + "— whichever the request asks for — or null if it genuinely doesn't say. This is the ONLY "
+                    + "way a quarterly request can be expressed in the two modes that name no period at all "
+                    + "(\"latest\" and \"range\"), so it matters just as much there as anywhere: set it from the "
+                    + "WORDS of the request, independently of whether you also filled in a quarter number. Any "
+                    + "of \"quarterly\", \"per quarter\", \"quarter-on-quarter\", \"QoQ\", \"Q1/Q2/Q3/Q4\", "
+                    + "\"last N quarters\", \"quarterly results\", \"latest quarter\" means \"quarterly\". "
+                    + "\"annual\", \"yearly\", \"per year\", \"FY\", \"last N years\" means \"annual\". "
+                    + "Examples, all of which are quarterly even though only the last names a quarter:\n"
+                    + "  \"quarterly revenue for Reliance\" -> mode \"latest\", granularity \"quarterly\"\n"
+                    + "  \"revenue and EBITDA for the last 4 quarters\" -> mode \"range\", range_count 4, "
+                    + "granularity \"quarterly\"\n"
+                    + "  \"quarterly PAT for TCS in FY26\" -> mode \"specific\", fiscal_year 2026, quarter "
+                    + "null, granularity \"quarterly\" (the year is named, the quarter is not — that's every "
+                    + "quarter of FY26, so do NOT invent a quarter number)\n"
+                    + "  \"Q3 FY26 revenue\" -> mode \"specific\", fiscal_year 2026, quarter 3, granularity "
+                    + "\"quarterly\"\n"
+                    + "Getting this wrong is not a small miss: granularity is what decides which real TABLE the "
+                    + "metrics are read from, so an unset or wrong value on a quarterly request silently "
+                    + "returns ANNUAL figures instead.\n\n"
                     + "Map each metric to the PLAIN, LEVEL column for the thing asked for — the metric's own "
                     + "value, not a transformation of it. This catalog routinely carries derived variants of "
                     + "the same metric right alongside the plain one (e.g. \"Revenue\" next to \"Revenue CAGR "
@@ -3493,7 +3570,8 @@ function applyRibbonView() {
                     + "\"companies\": [\"<company name as named in the request>\"], "
                     + "\"period\": {\"mode\": \"specific\"|\"latest\"|\"range\"|\"years\", \"fiscal_year\": <int "
                     + "or null>, \"quarter\": <1-4 or null>, \"range_count\": <int or null>, \"values\": "
-                    + "[{\"fiscal_year\": <int>, \"quarter\": <1-4 or null>}] or null — only for mode \"years\"}, "
+                    + "[{\"fiscal_year\": <int>, \"quarter\": <1-4 or null>}] or null — only for mode \"years\", "
+                    + "\"granularity\": \"annual\"|\"quarterly\"|null — set for EVERY mode, not just \"specific\"}, "
                     + "\"metrics\": [{\"table\": \"<exact table name from the catalog>\", \"column\": \"<exact column name>\"}], "
                     + "\"ranking\": {\"column\": \"<exact metric column>\", \"direction\": \"desc\"|\"asc\", \"limit\": <int or null>} | null, "
                     + "\"reason_if_infeasible\": \"<empty string if feasible>\"}";
@@ -3592,7 +3670,22 @@ function applyRibbonView() {
                 const quarterlyFlags = new Set(periodMetas.map((p) => p.format === PERIOD_FORMAT_MONTH_YEAR_QUARTERLY));
                 if (quarterlyFlags.size > 1) return null;
 
-                const period = (plan.period && plan.period.mode) ? plan.period : { mode: "latest" };
+                let period = (plan.period && plan.period.mode) ? plan.period : { mode: "latest" };
+                // "quarterly PAT for TCS in FY26" names a YEAR but no quarter, with granularity
+                // "quarterly" — and standardizePlanMetrics has already pointed the metrics at the
+                // quarterly table, so anchorIsQuarterly is true here. A lone fiscal year has no
+                // single literal to filter on in a quarterly table (literalPeriodValue returns
+                // null for that shape), which would send the whole request to the freeform-LLM
+                // fallback. It isn't ambiguous though — it means every quarter OF that year — so
+                // expand it into the four quarters and let the "years" branch below filter them as
+                // a plain IN-list, the same path the skeleton-grid fast path already uses.
+                const anchorIsQuarterly = quarterlyFlags.has(true);
+                if (anchorIsQuarterly && period.mode === "specific" && period.fiscal_year && !period.quarter) {
+                    period = {
+                        mode: "years",
+                        values: [1, 2, 3, 4].map((q) => ({ fiscalYear: period.fiscal_year, quarter: q })),
+                    };
+                }
                 if (period.mode === "specific" && !period.fiscal_year) return null;
                 if (period.mode === "range" && !(period.range_count > 0)) return null;
                 if (period.mode === "years" && !(Array.isArray(period.values) && period.values.length)) return null;
@@ -3714,6 +3807,15 @@ function applyRibbonView() {
                         const anchorAlias = aliasFor.get(anchorTable);
                         on += ` AND ${normalizedYearExpr(alias, meta.period.column, meta.period)} = `
                             + `${normalizedYearExpr(anchorAlias, anchorMeta.period.column, anchorMeta.period)}`;
+                        // Tying only on the YEAR is enough while both sides are annual, but two
+                        // QUARTERLY tables have four rows per year each — year-only equality would
+                        // cross-join them into 16 rows per company-year. The granularity check
+                        // above already guarantees both sides share a format, so whenever the
+                        // anchor is quarterly this side is too and the quarter must match as well.
+                        if (anchorIsQuarterly) {
+                            on += ` AND ${quarterNoExpr(alias, meta.period.column)} = `
+                                + `${quarterNoExpr(anchorAlias, anchorMeta.period.column)}`;
+                        }
                     }
                     joins.push(`JOIN ${source.from} ON ${on}${source.extraWhere.length ? ` AND ${source.extraWhere.join(" AND ")}` : ""}`);
                 });
@@ -3754,8 +3856,16 @@ function applyRibbonView() {
                 // by company name/period — same TRY_CAST + '-'-placeholder-exclusion convention
                 // used everywhere else numeric comparison happens on these text-stored columns.
                 let rankingWhere = null;
+                // Year DESC alone leaves a quarterly table's four rows per year in whatever order
+                // the engine happens to return them, so a quarterly table would land on the sheet
+                // with its quarters shuffled inside each year. Sort by quarter too when the anchor
+                // is quarterly — the same two-key ordering the ROW_NUMBER window above uses.
+                const anchorPeriodOrder = anchorTable
+                    ? `${normalizedYearExpr(aliasFor.get(anchorTable), metaByTable.get(anchorTable).period.column, metaByTable.get(anchorTable).period)} DESC`
+                        + (anchorIsQuarterly ? `, ${quarterNoExpr(aliasFor.get(anchorTable), metaByTable.get(anchorTable).period.column)} DESC` : "")
+                    : null;
                 let orderBy = anchorTable
-                    ? `ORDER BY b.CompName, ${normalizedYearExpr(aliasFor.get(anchorTable), metaByTable.get(anchorTable).period.column, metaByTable.get(anchorTable).period)} DESC`
+                    ? `ORDER BY b.CompName, ${anchorPeriodOrder}`
                     : "ORDER BY b.CompName";
                 let topClause = "";
                 if (ranking) {
@@ -4235,8 +4345,18 @@ function applyRibbonView() {
             // One poll tick: a CHEAP read first (address/dimensions only); the fuller .text read
             // only runs when the address actually changed, so steady-state cost is one tiny
             // Excel.run regardless of how long a selection sits still.
+            let gridSelectionPollInFlight = false;
             const checkGridSelectionOnce = async () => {
                 if (generateBtn.disabled) return; // a request is already in flight — don't flicker the UI mid-request
+                // Never let two ticks be in flight at once, and never compete with an operation the
+                // user is actually waiting on. Both guards were missing, and in Excel ON THE WEB a
+                // single tick's own context.sync() routinely takes LONGER than this poll's 700ms
+                // interval did — so ticks were being started faster than they could finish and
+                // simply accumulated on Office.js's one request channel. That backlog is what made
+                // every unrelated Excel operation progressively slower the longer the pane stayed
+                // open (a 1-round-trip scan measured at 17s, then 76s). See qdWithExcelBusy.
+                if (gridSelectionPollInFlight || qdExcelBusy > 0) return;
+                gridSelectionPollInFlight = true;
                 try {
                     let address = null, rowIndex = 0, colIndex = 0, rowCount = 0, columnCount = 0, isSingleMergedCell = false, sheetName = null;
                     await Excel.run(async (context) => {
@@ -4308,11 +4428,19 @@ function applyRibbonView() {
                     queryHint.style.display = "none";
                 } catch (e) {
                     console.warn("[QueryData] couldn't read the current selection for grid-query detection:", e.message);
+                } finally {
+                    gridSelectionPollInFlight = false;
                 }
             };
+            // 1200ms, not the 700ms this used to be: a single tick's own Excel round trip in Excel
+            // for the web is ~0.8s on an IDLE channel, so a 700ms interval was asking for ticks
+            // faster than they could possibly complete. With the in-flight guard above that no
+            // longer piles up, but an interval shorter than the work it schedules just means the
+            // poll runs continuously — see QD_META_EDIT_POLL_MS for the same correction.
+            const QD_SELECTION_POLL_MS = 1200;
             const startGridSelectionPolling = () => {
                 if (gridSelectionPollTimer) return;
-                gridSelectionPollTimer = setInterval(checkGridSelectionOnce, 700);
+                gridSelectionPollTimer = setInterval(checkGridSelectionOnce, QD_SELECTION_POLL_MS);
             };
             const stopGridSelectionPolling = () => {
                 clearInterval(gridSelectionPollTimer);
@@ -4331,7 +4459,14 @@ function applyRibbonView() {
             // outside any known table, only moving again once a DIFFERENT table's cell is selected.
             let ytSelectionPollTimer = null;
             let lastSeenYtSelectionKey = undefined; // undefined = never checked yet
+            let ytSelectionPollInFlight = false;
             const checkYtSelectionOnce = async () => {
+                // Same two guards, same reason, as checkGridSelectionOnce above — see its comment.
+                // This one mattered even more: it ALSO fires moveAutofillToSheet on every tick,
+                // so a pileup here could stack validation applies across 104,000 cells on top of
+                // each other.
+                if (ytSelectionPollInFlight || qdExcelBusy > 0) return;
+                ytSelectionPollInFlight = true;
                 try {
                     let sheetName, row, col;
                     await Excel.run(async (context) => {
@@ -4368,13 +4503,26 @@ function applyRibbonView() {
                     }
                 } catch (e) {
                     console.warn("[QueryData] couldn't read the current selection for the Your Tables highlight:", e.message);
+                } finally {
+                    ytSelectionPollInFlight = false;
                 }
             };
+            let ytSelectionPollStartTimer = null;
             const startYtSelectionPolling = () => {
-                if (ytSelectionPollTimer) return;
-                ytSelectionPollTimer = setInterval(checkYtSelectionOnce, 700);
+                if (ytSelectionPollTimer || ytSelectionPollStartTimer) return;
+                // Deliberately offset by half the interval from the grid poll above, so the two
+                // land in the gaps between each other instead of both firing on the same tick and
+                // queueing two round trips back to back. The handle is kept so stopping during
+                // this initial delay can cancel it, rather than letting the interval come up
+                // afterwards with nothing left to stop it.
+                ytSelectionPollStartTimer = setTimeout(() => {
+                    ytSelectionPollStartTimer = null;
+                    ytSelectionPollTimer = setInterval(checkYtSelectionOnce, QD_SELECTION_POLL_MS);
+                }, Math.floor(QD_SELECTION_POLL_MS / 2));
             };
             const stopYtSelectionPolling = () => {
+                clearTimeout(ytSelectionPollStartTimer);
+                ytSelectionPollStartTimer = null;
                 clearInterval(ytSelectionPollTimer);
                 ytSelectionPollTimer = null;
             };
@@ -5357,7 +5505,11 @@ function applyRibbonView() {
                 const tScan = performance.now();
                 const found = [];
                 let blockReads = 0;
-                await Excel.run(async (context) => {
+                // Holds the contention gate: this runs at startup (with the whole Your Tables list
+                // waiting on it), after every write, and on a 60s timer — it must not sit behind a
+                // backlog of poll ticks. Measured at 17s and 76s for a ONE-round-trip scan of an
+                // empty workbook before this gate existed; see qdWithExcelBusy.
+                await qdWithExcelBusy(() => Excel.run(async (context) => {
                     const comments = context.workbook.comments;
                     comments.load("items/content");
                     await context.sync();
@@ -5404,7 +5556,7 @@ function applyRibbonView() {
                         }
                         pending = stillPending;
                     }
-                });
+                }));
                 // Comment order is whatever the workbook happens to store, so sort explicitly —
                 // the list must come back in the same order every scan or the rendered cards
                 // would shuffle under the user on each background tick.
@@ -5456,6 +5608,10 @@ function applyRibbonView() {
                 mixedChange: "Company & period changed",
                 headerAdd: "New column added",
                 headerRename: "Column renamed",
+                // A table whose orientation the structured editors don't read positionally (see
+                // isStructuredLayout) — deliberately vague, because the honest answer is "something
+                // in this table changed" and the model works out what from the sheet itself.
+                layoutEdit: "Table edited",
             }[kind] || "Table changed");
             // The description is always on the row now (it used to live hidden inside the Edit
             // form, measured only once the form opened) — its "Show more"/"Show less" toggle has
@@ -5819,25 +5975,36 @@ function applyRibbonView() {
                 const newTotalRows = newMetaRows + (data.rows?.length || 0) + 1;
                 const newTotalCols = Math.max(singleCompanyInfo ? 2 : 1, (data.columns?.length || 1) - (singleCompanyInfo ? 1 : 0));
 
-                statusEl.textContent = "Checking available space…";
-                const mustShift = await wouldRefreshOverwriteOtherContent(entry, newTotalRows, newTotalCols, ignoreHeaderRow, ignoreDataRowsBelow);
-                let writeTarget;
-                if (mustShift) {
-                    const newBlock = await findFirstBlankBlockInSheet(entry.sheetName, newTotalRows, newTotalCols);
-                    writeTarget = { sheetName: newBlock.sheetName, row: newBlock.row, col: newBlock.col };
-                } else {
-                    writeTarget = { sheetName: entry.sheetName, row: entry.titleRow + 1, col: entry.titleCol + 1 };
-                }
+                // The WHOLE sequence below holds the contention gate as one unit, not just the
+                // individual steps that already do. It is five or six SEPARATE Excel.runs back to
+                // back (space check, maybe a blank-block search, the old block's clear, the write
+                // itself, then a rescan) — a dozen-odd round trips — and without gating the whole
+                // thing, background poll ticks were free to interleave between every one of them,
+                // each adding its own round trip to what the user sees as a single "Writing the
+                // refreshed table…" step. Nesting is deliberate and safe: clearTableBlock/
+                // writeDownloadedTableToSheet/runYourTablesScan hold it too, and qdExcelBusy is a
+                // counter precisely so an inner one finishing can't release this outer one.
+                return qdWithExcelBusy(async () => {
+                    statusEl.textContent = "Checking available space…";
+                    const mustShift = await wouldRefreshOverwriteOtherContent(entry, newTotalRows, newTotalCols, ignoreHeaderRow, ignoreDataRowsBelow);
+                    let writeTarget;
+                    if (mustShift) {
+                        const newBlock = await findFirstBlankBlockInSheet(entry.sheetName, newTotalRows, newTotalCols);
+                        writeTarget = { sheetName: newBlock.sheetName, row: newBlock.row, col: newBlock.col };
+                    } else {
+                        writeTarget = { sheetName: entry.sheetName, row: entry.titleRow + 1, col: entry.titleCol + 1 };
+                    }
 
-                statusEl.textContent = "Writing the refreshed table…";
-                await clearTableBlock(entry.sheetName, entry.titleRow, entry.titleCol, entry.metaRows + entry.tableRows, entry.tableCols);
-                const sheetName = await writeDownloadedTableToSheet(data, writeTarget, singleCompanyInfo);
-                const rangeAddr = blockAddress(writeTarget.row, writeTarget.col, newTotalRows, newTotalCols);
-                const whereText = `"${sheetName}" at ${rangeAddr}`;
-                const shiftedNotice = mustShift ? ` Your table has been shifted to new range ${rangeAddr} to avoid overwriting data.` : "";
-                statusEl.textContent = `Refreshed — ${data.row_count.toLocaleString()} row${data.row_count === 1 ? "" : "s"}.${shiftedNotice}`;
-                await runYourTablesScan(); // ranges may have changed size — re-scan rather than patch the list in place
-                return `\n\nEXECUTION: success — ${data.row_count} row(s) refreshed at ${whereText}.${shiftedNotice}`;
+                    statusEl.textContent = "Writing the refreshed table…";
+                    await clearTableBlock(entry.sheetName, entry.titleRow, entry.titleCol, entry.metaRows + entry.tableRows, entry.tableCols);
+                    const sheetName = await writeDownloadedTableToSheet(data, writeTarget, singleCompanyInfo);
+                    const rangeAddr = blockAddress(writeTarget.row, writeTarget.col, newTotalRows, newTotalCols);
+                    const whereText = `"${sheetName}" at ${rangeAddr}`;
+                    const shiftedNotice = mustShift ? ` Your table has been shifted to new range ${rangeAddr} to avoid overwriting data.` : "";
+                    statusEl.textContent = `Refreshed — ${data.row_count.toLocaleString()} row${data.row_count === 1 ? "" : "s"}.${shiftedNotice}`;
+                    await runYourTablesScan(); // ranges may have changed size — re-scan rather than patch the list in place
+                    return `\n\nEXECUTION: success — ${data.row_count} row(s) refreshed at ${whereText}.${shiftedNotice}`;
+                });
             };
 
             // Runs a word-based MODIFY for one table: decrypt its tag -> ask the model to update
@@ -6858,15 +7025,18 @@ function applyRibbonView() {
             // gates the actual rewrite (that only ever fires on an explicit click, see the
             // dt-yt-update-bar handler) — so it can run short without risking a premature apply;
             // all it risks is the pending label flickering through an intermediate value while
-            // someone is still actively typing, which is harmless. Poll interval can run just as
-            // short: pollTableMetaEditsInFlight already refuses to let two ticks overlap, so a tick
-            // that fires while the previous one's own context.sync() is still in flight (the real
-            // cost here, not this constant — ~0.8s round trip in Excel for the web) just no-ops
-            // instead of queuing; the interval only controls the gap AFTER a sync finishes before
-            // the next one starts, so setting it low makes polling run essentially back-to-back
-            // without ever doubling up network calls.
+            // someone is still actively typing, which is harmless.
+            //
+            // The poll interval, however, was 250ms, on the reasoning that
+            // pollTableMetaEditsInFlight already prevents two ticks overlapping so a short interval
+            // "just no-ops" — which was true but missed the real cost: it meant this poll ran
+            // essentially BACK-TO-BACK, permanently occupying Office.js's single request channel
+            // with one ~0.8s round trip after another for as long as any table existed. Everything
+            // else the user did then had to take its turn behind it. 900ms still surfaces a pending
+            // change well inside the 1200ms debounce window it's feeding (the debounce, not this
+            // interval, is what decides when a change appears), at roughly a third of the traffic.
             const QD_META_EDIT_DEBOUNCE_MS = 1200;
-            const QD_META_EDIT_POLL_MS = 250;
+            const QD_META_EDIT_POLL_MS = 900;
             // How many blank cells past the table's current last column also get watched, so typing
             // a brand-new header (not just editing an existing one) is caught too. Columns beyond
             // this are out of scope — a reasonable bound on how many new headers can be typed in one go.
@@ -7105,7 +7275,24 @@ function applyRibbonView() {
             const periodGranularityHints = (period) => {
                 if (!period) return { quarterly: false, future: false };
                 const values = Array.isArray(period.values) ? period.values : [];
-                const quarterly = !!(period.quarter || values.some((v) => v && v.quarter));
+                // period.granularity is what lets a request be quarterly WITHOUT naming a specific
+                // quarter. Before it existed, "quarterly" was only ever inferrable from a quarter
+                // NUMBER attached to a named period — so the two modes that carry no named period
+                // at all could not express it, and every request in them silently resolved to the
+                // annual table:
+                //   "quarterly revenue for Reliance"   -> mode "latest",  no quarter -> annual
+                //   "revenue for the last 4 quarters"  -> mode "range",   no quarter -> annual
+                //                                         (and 4 YEARS back, not 4 quarters)
+                // That is the "asks for quarterly, gets yearly" bug. A named quarter still implies
+                // quarterly on its own, so an explicit quarter can never be overridden by a stray
+                // granularity: "annual" — the two are OR'd, deliberately.
+                // Read tolerantly: this value comes straight from a small model, which will happily
+                // return "Quarterly", "quarter" or "QoQ" for the same intent, and anything other
+                // than an exact match would silently fall back to annual — the very bug this field
+                // exists to fix. Anything unrecognized just leaves it to the quarter-number check.
+                const granularity = String(period.granularity || "").trim().toLowerCase();
+                const quarterly = /^(quarter|quarterly|quarters|qoq|q)$/.test(granularity)
+                    || !!(period.quarter || values.some((v) => v && v.quarter));
                 const years = [period.fiscal_year, ...values.map((v) => v && v.fiscalYear)].filter(Number.isFinite);
                 return { quarterly, future: years.length ? Math.max(...years) > lastCompletedFiscalYear() : false };
             };
@@ -7293,7 +7480,10 @@ function applyRibbonView() {
                         console.log(`[QueryData timing][${QD_AUTOFILL_TAG}]   Autofill: QD_Autofill_Data sheet write — list unchanged, but this workbook has no autofill sheet/name yet — writing anyway`);
                     }
                     const tSheetWrite = performance.now();
-                    await Excel.run(async (context) => {
+                    // Holds the contention gate: four syncs plus three ~5,000-row column writes
+                    // (metrics, companies, combined) — and on a first-time workbook the dropdown
+                    // cannot appear at all until this finishes. See qdWithExcelBusy.
+                    await qdWithExcelBusy(() => Excel.run(async (context) => {
                         let sheet = context.workbook.worksheets.getItemOrNullObject(QD_AUTOFILL_SHEET_NAME);
                         sheet.load("isNullObject");
                         await context.sync();
@@ -7357,7 +7547,7 @@ function applyRibbonView() {
                             sheet.getRangeByIndexes(newMaxRow, 0, previousRowCount - newMaxRow, 3).clear(Excel.ClearApplyTo.contents);
                             await context.sync();
                         }
-                    });
+                    }));
                     try { sessionStorage.setItem(QD_AUTOFILL_WRITE_FINGERPRINT_KEY, fingerprint); } catch (e) { /* best-effort only — a failed save just means the next open re-does this write unnecessarily, not incorrectly */ }
                     console.log(`[QueryData timing][${QD_AUTOFILL_TAG}]   Autofill: QD_Autofill_Data sheet write (create/clear/write values/defined names): ${(performance.now() - tSheetWrite).toFixed(0)}ms`);
                 } catch (e) {
@@ -7389,7 +7579,9 @@ function applyRibbonView() {
                     // active sheet), so getActiveWorksheet() replaces a name lookup plus its
                     // existence-check round trip; and clearing the old sheet batches into the same
                     // sync as applying to the new one. Net: 2 syncs for a first apply, 3 for a move.
-                    await Excel.run(async (context) => {
+                    // Holds the contention gate throughout — this is what the user is waiting on
+                    // for the dropdown to appear at all, so it must not queue behind poll ticks.
+                    await qdWithExcelBusy(() => Excel.run(async (context) => {
                         const target = context.workbook.worksheets.getActiveWorksheet();
                         let old = null;
                         if (previous) {
@@ -7419,7 +7611,7 @@ function applyRibbonView() {
                         await context.sync();
                         originalSelection.select();
                         await context.sync();
-                    });
+                    }));
                 } catch (e) {
                     // Includes the one case the offset nudge can't survive — a selection sitting on
                     // the very last row, where offsetting down is out of bounds. Not worth a guard
@@ -7739,6 +7931,31 @@ function applyRibbonView() {
             // their own company changes come exclusively from the separate "Company" meta-cell
             // watch in pollTableMetaEdits; this function only ever looks at Period for them, at
             // column 0 instead of column 1.
+            // Whether this table is laid out the way every STRUCTURED editor below assumes: company
+            // down column 0 (multi-company) or Period down column 0 (single-company, its company
+            // folded into its own meta row). That is what writeDownloadedTableToSheet produces for
+            // a buildDeterministicQuery result, and what classifyDataRowChange/runTableHeaderRename/
+            // runTableAddColumns all read positionally.
+            //
+            // A table can legitimately be on the sheet in a DIFFERENT orientation — most commonly
+            // companies across the header row with metrics down column 0, which the freeform SQL
+            // writer produces when the user lays a skeleton out that way. Nothing about writing or
+            // displaying that is wrong; the bug was that the editors went on reading column 0 as
+            // "the company column" regardless. On a companies-across table, column 0 holds METRIC
+            // names, so an edit anywhere reported `companyChange` with companies like
+            // ["Revenue","EBITDA","PAT"] — and the LLM fallback then got handed that same garbage
+            // premise as fact ("the companies shown are now Revenue, EBITDA, PAT"), which is why
+            // the update failed outright and the table just stayed as it was.
+            //
+            // So: detect it, and route those tables' edits through the model with an HONEST
+            // description instead of a positional misreading. "Compname" is what
+            // formatColumnHeaderLabel turns the unaliased b.CompName into; compared case-insensitively
+            // since it is only ever a display label.
+            const isStructuredLayout = (entry, headerRowValues) => {
+                const first = String(headerRowValues?.[0] ?? "").trim().toLowerCase();
+                if (entry.companyName) return first === "period"; // single-company: Period is its only positional hook
+                return first === "compname" || first === "company name";
+            };
             const classifyDataRowChange = (s, dataRowValues, hasPeriodCol, isSingleCompany) => {
                 const baseline = s.baselineDataColumns;
                 const periodColIdx = isSingleCompany ? 0 : 1;
@@ -7784,6 +8001,12 @@ function applyRibbonView() {
                 if (a.kind === "headerRename") {
                     return sameStrArr(a.changes.map((c) => `${c.from}\u0000${c.to}`), b.changes.map((c) => `${c.from}\u0000${c.to}`));
                 }
+                // A non-standard-layout edit (see isStructuredLayout) carries no companies/periods
+                // to compare — only a flattened snapshot of what the watched cells now say. Without
+                // comparing THAT, two different consecutive edits to such a table would both look
+                // "equal" and the Update bar would keep applying the first one, which is exactly the
+                // stale-pending-change bug the other kinds already had fixed.
+                if (a.kind === "layoutEdit") return a.signature === b.signature;
                 return sameStrArr(a.companies, b.companies) && sameStrArr(a.periods, b.periods); // companyChange / periodChange / mixedChange
             };
 
@@ -7805,6 +8028,7 @@ function applyRibbonView() {
             let pollTableMetaEditsInFlight = false;
             const pollTableMetaEdits = async () => {
                 if (pollTableMetaEditsInFlight) return; // never let a slow tick overlap the next one
+                if (qdExcelBusy > 0) return; // and never compete with an operation the user is waiting on — see qdWithExcelBusy
                 const states = Array.from(tableMetaWatchState.values()).filter(s => !s.refreshing);
                 if (!states.length) return;
                 pollTableMetaEditsInFlight = true;
@@ -7958,6 +8182,11 @@ function applyRibbonView() {
                         }
                         const dataRowValues = rawDataRowValues.slice(0, dataWatchEnd);
 
+                        // Decided once per tick and used by BOTH the data-row and header sections
+                        // below — see isStructuredLayout for what a non-standard orientation is and
+                        // why reading column 0 positionally on one produces nonsense.
+                        const structuredLayout = isStructuredLayout(s.entry, headerRowValues);
+
                         if (s.baselineDataColumns === null) {
                             s.baselineDataColumns = dataRowValues; // just started watching — nothing to compare against yet
                         } else {
@@ -8006,7 +8235,14 @@ function applyRibbonView() {
                                     // or different here.
                                     const isSingleCompany = !!s.entry.companyName;
                                     const hasPeriodCol = headerRowValues[isSingleCompany ? 0 : 1] === "Period";
-                                    const change = classifyDataRowChange(s, dataRowValues, hasPeriodCol, isSingleCompany);
+                                    // On a non-standard orientation, column 0 is NOT the company
+                                    // column — classifying positionally there is what produced
+                                    // companies like ["Revenue","EBITDA","PAT"]. Report the edit
+                                    // honestly instead and let the model read the real sheet (see
+                                    // isStructuredLayout, and the layoutEdit routing on the Update bar).
+                                    const change = structuredLayout
+                                        ? classifyDataRowChange(s, dataRowValues, hasPeriodCol, isSingleCompany)
+                                        : { kind: "layoutEdit", where: "the table's first column", signature: dataRowValues.map((r) => r.join("\u0000")).join("\u0001") };
                                     const foreignCompanyChange = isSingleCompany && s.pendingDataRowChange && s.pendingDataRowChange.kind === "companyChange";
                                     if (!foreignCompanyChange && !pendingChangeEquals(change, s.pendingDataRowChange)) {
                                         s.pendingDataRowChange = change;
@@ -8064,6 +8300,20 @@ function applyRibbonView() {
                         // stable instead: without it, this would reclassify (cheaply) AND re-fire
                         // every ~250ms for as long as the change sits unapplied, since nothing above
                         // resets pendingHeaderRowSince once the debounce is first satisfied.
+                        // On a non-standard orientation the header row holds COMPANY names, not
+                        // metric names — so "a new header appeared" means a new company column, and
+                        // "a header was retyped" means a company was swapped, neither of which
+                        // addColumnsToTable/runTableHeaderRename can express (both only ever reason
+                        // about metric columns). Surfaced honestly as a layoutEdit for the model to
+                        // handle instead of being forced into the wrong one of those two.
+                        if (!structuredLayout) {
+                            const freshLayoutChange = { kind: "layoutEdit", where: "the table's header row", signature: headerRowValues.join("\u0000") };
+                            if (!pendingChangeEquals(freshLayoutChange, s.pendingHeaderChange)) {
+                                s.pendingHeaderChange = freshLayoutChange;
+                                notifyPendingChangeDetected();
+                            }
+                            continue;
+                        }
                         const additions = [];
                         for (let i = s.entry.tableCols; i < headerRowValues.length; i++) {
                             const v = headerRowValues[i];
@@ -8300,7 +8550,18 @@ function applyRibbonView() {
                         if (!pendingDesc && !pendingData && !pendingHeader) return;
                         btn.disabled = true;
                         let run;
-                        if (pendingDesc) {
+                        // A layoutEdit can arrive on EITHER pending slot (the data-row watcher sets
+                        // one, the header watcher the other) and is handled the same way from both:
+                        // through runTableRefresh, the one path that hands the model the stored SQL
+                        // plus a live sample of the sheet and lets it work out the change itself.
+                        // Checked before the positional branches below, since those would otherwise
+                        // try to read companies/periods/metric columns that aren't where they assume.
+                        const pendingLayout = (pendingData && pendingData.kind === "layoutEdit" && pendingData)
+                            || (pendingHeader && pendingHeader.kind === "layoutEdit" && pendingHeader);
+                        if (pendingLayout) {
+                            if (state) { state.pendingDataRowChange = null; state.pendingHeaderChange = null; }
+                            run = runTableRefresh(entry, `The user directly edited ${pendingLayout.where} in the sheet. This table is NOT laid out in the usual one-row-per-company shape — read the sample rows below to see its actual orientation (for example companies across the header row with metrics down the first column) before deciding what changed. Rebuild the query so the table matches what the sheet now shows, keeping that same orientation and overall shape.`, statusEl);
+                        } else if (pendingDesc) {
                             run = runTableRefresh(entry, pendingDesc.instruction, statusEl).then(() => { if (state) state.pendingDescriptionChange = null; });
                         } else if (pendingData) {
                             if (state) state.pendingDataRowChange = null;
@@ -8892,7 +9153,13 @@ async function writeDownloadedTableToSheet(data, writeTarget, singleCompanyInfo)
     const rows = (Array.isArray(data.rows) ? data.rows : []).map((r) => r.filter((_, i) => !singleCompanyInfo || i !== singleCompanyInfo.colIndex));
 
     let sheetName;
-    await Excel.run(async (ctx) => {
+    // Holds the contention gate for the whole write. This is the single heaviest run of syncs in
+    // the feature — a used-range read, the meta/header/format writes, then one sync per chunk of
+    // rows (see CHUNK below) — and it is exactly what the user is staring at a spinner waiting
+    // for. Before this gate, every one of those syncs took its turn behind whatever background
+    // poll ticks happened to be queued, which is why a 50+ row table felt so much slower than a
+    // small one: more chunks, each paying the full backlog again. See qdWithExcelBusy.
+    await qdWithExcelBusy(() => Excel.run(async (ctx) => {
         let sheet, metaR0, c0;
         if (writeTarget) {
             sheet = ctx.workbook.worksheets.getItem(writeTarget.sheetName);
@@ -8945,7 +9212,17 @@ async function writeDownloadedTableToSheet(data, writeTarget, singleCompanyInfo)
         // rather than erroring; only if none exists yet does this fall back to creating one. Never
         // lets a failure here (unsupported host, anything) break the write itself — the table
         // still gets its title/period either way, it just won't be refreshable this time.
-        if (data.refresh_token) {
+        //
+        // DEFERRED until after the data rows are on the sheet (see the call site below the chunk
+        // loop), not run here where it was first written. On a brand-new table there is no comment
+        // on that cell yet, so getItemByCell ALWAYS throws — that's a full failed round trip — and
+        // the add() fallback costs a second sync. Both used to happen BEFORE the first value was
+        // written, so the user sat watching an empty sheet (title and description merged, nothing
+        // else) for two round trips of pure overhead. Nothing in the data write depends on the
+        // comment, and nothing reads the comment back until the next scan, so it costs nothing to
+        // let the figures land first.
+        const attachRefreshTagComment = async () => {
+            if (!data.refresh_token) return;
             let commentContent = `${QD_TABLE_ID_COMMENT_PREFIX}${data.refresh_token}`;
             if (singleCompanyInfo) commentContent += `\n${QD_SINGLE_COMPANY_PREFIX}${singleCompanyInfo.companyName}`;
             try {
@@ -8960,7 +9237,7 @@ async function writeDownloadedTableToSheet(data, writeTarget, singleCompanyInfo)
                     console.warn("[QueryData] couldn't attach the refresh tag comment:", e2);
                 }
             }
-        }
+        };
 
         // A single-company result gets one extra meta row — "Company" / the name — directly
         // below Description and above the header, instead of repeating that company's name
@@ -9073,10 +9350,16 @@ async function writeDownloadedTableToSheet(data, writeTarget, singleCompanyInfo)
             if (isPercentRatioColumn(c && c.name)) return { decimals: 1, numberFormat: "0.0" };
             return { decimals: 0, numberFormat: "[>=10000000]##\\,##\\,##\\,##0;[>=100000]##\\,##\\,##0;#,##0" };
         });
-        if (rows.length) {
-            columns.forEach((c, i) => {
-                sheet.getRangeByIndexes(r0 + 1, c0 + i, rows.length, 1).numberFormat = Array.from({ length: rows.length }, () => [columnFormats[i].numberFormat]);
-            });
+        // ONE range assignment for the whole data block, not one per column. columnFormats is
+        // columns.map(...) so it's index-aligned with the grid, and every row of a column carries
+        // the same format — so the payload is identical either way, but this creates a single
+        // range proxy instead of one per column. Office.js re-serializes the context's whole
+        // tracked-object list on every subsequent sync, so a dozen extra proxies created here were
+        // being re-sent with each chunk sync below and with the final format sync.
+        if (rows.length && columns.length) {
+            const formatRow = columnFormats.map((f) => f.numberFormat);
+            sheet.getRangeByIndexes(r0 + 1, c0, rows.length, columns.length).numberFormat =
+                Array.from({ length: rows.length }, () => formatRow);
         }
 
         // Written in chunks rather than one multi-thousand-row assignment: keeps any single
@@ -9108,8 +9391,12 @@ async function writeDownloadedTableToSheet(data, writeTarget, singleCompanyInfo)
                     return roundToDecimals(v, columnFormats[i].decimals);
                 }));
             }
+            qdSuspendRepaint(ctx);
             await ctx.sync();
         }
+
+        // Only now that the figures are actually on the sheet — see attachRefreshTagComment.
+        await attachRefreshTagComment();
 
         if (columns.length) {
             const wholeTableRange = sheet.getRangeByIndexes(r0, c0, Math.max(1, rows.length + 1), columns.length);
@@ -9118,10 +9405,24 @@ async function writeDownloadedTableToSheet(data, writeTarget, singleCompanyInfo)
             // below) makes any of them wide, since a right-aligned number sits far from a
             // left-aligned header/text neighbor in the same wide cell.
             wholeTableRange.format.horizontalAlignment = "Left";
-            wholeTableRange.format.autofitColumns();
+            // Autofit is measured over the header plus at most AUTOFIT_SAMPLE_ROWS data rows, not
+            // the whole table. autofitColumns() makes Excel measure the rendered text width of
+            // every cell in the range it's called on, so its cost scales with the table's HEIGHT —
+            // which is exactly why 50+ row tables felt disproportionately slower than small ones on
+            // Excel for Mac, where that measurement is a synchronous native layout pass. Column
+            // width is set by the header and the typical value anyway, so the extra rows were
+            // paying for a measurement that almost never changed the answer. The tradeoff, stated
+            // plainly: one unusually long value further down a tall table can now sit clipped until
+            // the user widens that column by hand.
+            const AUTOFIT_SAMPLE_ROWS = 25;
+            const autofitRange = rows.length > AUTOFIT_SAMPLE_ROWS
+                ? sheet.getRangeByIndexes(r0, c0, AUTOFIT_SAMPLE_ROWS + 1, columns.length)
+                : wholeTableRange;
+            autofitRange.format.autofitColumns();
         }
+        qdSuspendRepaint(ctx);
         await ctx.sync();
-    });
+    }));
     return sheetName;
 }
 
