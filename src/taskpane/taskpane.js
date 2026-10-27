@@ -5193,6 +5193,15 @@ function applyRibbonView() {
                     if (data.truncated) msg += ` Stopped at this query's ${data.limit.toLocaleString()}-row limit — more rows exist.`;
                     outcome += `\n\nEXECUTION: success — ${data.row_count} row(s) written to ${whereText}${data.truncated ? " (truncated at the row limit)" : ""}.`;
                     showDtStatus("ok", msg);
+                    // The request that just got fulfilled shouldn't still be sitting in the box —
+                    // left there, it reads as still pending and invites either a confused re-click
+                    // (downloading the exact same table again) or the user manually deleting it
+                    // themselves before typing the next one. Only on SUCCESS (this line is never
+                    // reached from the catch block below) — a failed request stays in the box so
+                    // the user can edit and retry it rather than retyping from scratch. Harmless
+                    // no-op when this came from a grid selection instead of typed text: usingGridSelection
+                    // is only ever true when queryInput.value was already empty (see its own check above).
+                    queryInput.value = "";
                     runYourTablesScan(); // the new table just appeared (or changed) — reflect it immediately, fire-and-forget
                 } catch (e) {
                     console.warn("[QueryData] failed:", e);

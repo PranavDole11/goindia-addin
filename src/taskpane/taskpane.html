@@ -1470,6 +1470,16 @@
                        specifically, never drifting outside it or overlapping the tab bar above. */
                     #dtDownloadBody, #dtYourTablesPanel { flex: 1; display: flex; flex-direction: column; min-height: 0; position: relative; }
                     #dtYourTablesBody { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+                    /* .fb-field's base rule (shared with every other form field in this add-in) is
+                       shrink-to-fit by design — it never stretches. #dtYourTablesField is the ONLY
+                       in-flow child of #dtYourTablesBody (the Undo toast is position:absolute, the
+                       tutorial fab/panel are too), so WITHOUT this override the flex:1 chain above
+                       dead-ends here: this div just shrink-wraps to whatever height .dt-yt-list
+                       happens to be, rather than stretching to fill whatever space #dtYourTablesBody
+                       actually has. That's the real cause of the "blank space below the scroller on
+                       a tall window" report — .dt-yt-list's own max-height was a RED HERRING fix
+                       target, since raising it would do nothing until this link in the chain exists. */
+                    #dtYourTablesField { flex: 1; min-height: 0; }
                     /* ── Tutorial (Download Data tab only — see the HTML's own comment on
                        #dtTutorialBtn for why this isn't built on .dz-overlay) ── */
                     .dt-tutorial-fab {
@@ -1666,7 +1676,18 @@
                     .dt-yt-item-header-left { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
                     /* A soft grey backdrop (not the stark white the row cards sit on) shows through
                        the gaps between rows now that each one is its own rounded, bordered card. */
-                    .dt-yt-list { max-height: 320px; overflow-y: auto; background: #eef1f5; padding: 6px; border-radius: 8px; }
+                    /* Was a flat "max-height: 320px" — a fine height on a small/default-sized task
+                       pane window, but a FIXED cap means a larger window (a maximized or popped-out
+                       pane) still only shows 320px of list, clipping the last card mid-way and
+                       leaving the rest of the panel's actual height as dead grey space below the
+                       scroller. flex: 1 + min-height: 0 makes it fill whatever room
+                       #dtYourTablesField actually has (see that rule's own comment for the rest of
+                       the chain this depends on) instead of a number guessed for one window size.
+                       min-height here (not just on the ancestors) is still needed — a flex item's
+                       default min-height is auto (= its content size), which would let this list
+                       keep growing taller than its flex basis instead of clipping into its own
+                       scrollbar the way a fixed max-height always did. */
+                    .dt-yt-list { flex: 1; min-height: 0; overflow-y: auto; background: #eef1f5; padding: 6px; border-radius: 8px; }
                     .dt-yt-list .dt-info { padding: 10px; margin: 0; }
                     /* A flat row with a bottom divider (Excel's own Queries & Connections pane,
                        Gmail/Drive lists) instead of a bordered/shadowed card per table — title and
