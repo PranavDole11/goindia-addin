@@ -3318,6 +3318,52 @@ function applyRibbonView() {
                 const currentFyEndYear = now.getMonth() >= 3 ? now.getFullYear() + 1 : now.getFullYear();
                 return currentFyEndYear - 1;
             };
+            // The Indian fiscal quarter (Apr-Mar, Jun/Sep/Dec/Mar quarter-ends) CONTAINING today —
+            // same {fiscalYear, quarterNo} shape, and the same Jun/Sep/Dec-belongs-to-next-FY, Mar-
+            // belongs-to-same-FY convention, as MONTH_TO_FISCAL_QUARTER further down (kept separate
+            // rather than shared so this stays self-contained ahead of that one's definition). This
+            // quarter is by definition still IN PROGRESS — the only thing it's used for is deriving
+            // lastCompletedFiscalQuarter below, never a boundary of its own.
+            const currentFiscalQuarter = () => {
+                const now = new Date();
+                const y = now.getFullYear();
+                const m = now.getMonth(); // 0=Jan .. 11=Dec
+                if (m <= 2) return { fiscalYear: y, quarterNo: 4 };     // Jan-Mar -> Q4 of the FY ending THIS March
+                if (m <= 5) return { fiscalYear: y + 1, quarterNo: 1 }; // Apr-Jun -> Q1
+                if (m <= 8) return { fiscalYear: y + 1, quarterNo: 2 }; // Jul-Sep -> Q2
+                return { fiscalYear: y + 1, quarterNo: 3 };             // Oct-Dec -> Q3
+            };
+            // The quarter-PRECISE equivalent of lastCompletedFiscalYear() above, for periodFutureGuardExpr
+            // below. That one only bounds the YEAR, which is too coarse for quarterly data: it lets
+            // through the ENTIRE current fiscal year — all 4 quarters — the moment that fiscal year
+            // starts, with no awareness that most of them haven't happened yet. Confirmed live: on
+            // 2026-10-28 (inside Q3 FY2027, which runs Oct-Dec), the year-only guard let Q3 FY2027
+            // (the literal "Dec2026") through as a candidate for a "latest"/"range" ranking, even
+            // though sc_quater_data had nothing in that row but a pre-staged shell — every metric
+            // column null — a guaranteed blank row at the very top of the ranking. One quarter behind
+            // currentFiscalQuarter() always, since the quarter containing today is by definition
+            // still running, never yet reported.
+            const lastCompletedFiscalQuarter = () => {
+                const cur = currentFiscalQuarter();
+                return cur.quarterNo === 1
+                    ? { fiscalYear: cur.fiscalYear - 1, quarterNo: 4 }
+                    : { fiscalYear: cur.fiscalYear, quarterNo: cur.quarterNo - 1 };
+            };
+            // "Never rank a period that hasn't finished yet" — used by both the latest/range
+            // ranking window and the "since" mode's open-ended upper bound in buildDeterministicQuery,
+            // for whichever metric table has no estimate/forecast column of its own to filter on
+            // instead (see each call site's own comment for why the estimate flag alone isn't
+            // always available). Quarter-precise for a quarterly period (see
+            // lastCompletedFiscalQuarter's own comment for the exact bug a plain year-only bound
+            // let through); unchanged — a flat year bound — for an annual one, which has no finer
+            // grain to compare against.
+            const periodFutureGuardExpr = (alias, column, periodInfo) => {
+                const yearExpr = normalizedYearExpr(alias, column, periodInfo);
+                if (periodInfo.format !== PERIOD_FORMAT_MONTH_YEAR_QUARTERLY) return `${yearExpr} <= ${lastCompletedFiscalYear()}`;
+                const { fiscalYear: ly, quarterNo: lq } = lastCompletedFiscalQuarter();
+                const qExpr = quarterNoExpr(alias, column);
+                return `(${yearExpr} < ${ly} OR (${yearExpr} = ${ly} AND ${qExpr} <= ${lq}))`;
+            };
             // Builds the LITERAL stored value for a requested {fiscalYear, quarterNo}, in THIS
             // table's own format — e.g. plain "2025", or "Mar2025", or (quarterly) "Sep2025".
             // Returns null when the request shape doesn't match this table's format (e.g. a
@@ -3646,7 +3692,14 @@ function applyRibbonView() {
             const buildDeterministicQuery = (plan, metaByTable) => {
                 if (!plan || plan.feasible === false) return null;
                 const companies = Array.isArray(plan.companies) ? plan.companies.filter(Boolean) : [];
-                const metrics = Array.isArray(plan.metrics) ? plan.metrics.filter((m) => m && m.table && m.column) : [];
+                // A `{ literalNull: true, display }` entry (see buildGrainAwareQuery) has neither a
+                // table nor a column — it exists purely so a metric with no data at THIS plan's
+                // grain (e.g. a CAGR metric asked for at quarterly grain, where no such figure
+                // exists) still emits its own output column, just as a literal NULL instead of a
+                // real join, which is what keeps two grain-split halves' SELECT lists column-
+                // compatible for a UNION ALL. Kept here rather than filtered out with every other
+                // malformed entry.
+                const metrics = Array.isArray(plan.metrics) ? plan.metrics.filter((m) => m && (m.literalNull || (m.table && m.column))) : [];
                 if (!metrics.length) return null;
                 // A ranking ("top 10 by market cap") legitimately names no company at all — only
                 // bail here when there's NEITHER a named company NOR a ranking to order/limit by,
@@ -3658,7 +3711,11 @@ function applyRibbonView() {
                     ? plan.ranking : null;
                 if (!companies.length && !ranking) return null;
 
-                const metricTables = Array.from(new Set(metrics.map((m) => m.table))).filter((t) => t !== BASIC_INFO_TABLE);
+                // literalNull metrics contribute no table to join against — filtered out here
+                // (never joined/validated) rather than just skipped further down, so a literalNull
+                // entry can't accidentally slip into metaList as `metaByTable.get(undefined)` and
+                // fail the whole query on a required-table check that was never actually required.
+                const metricTables = Array.from(new Set(metrics.filter((m) => !m.literalNull).map((m) => m.table))).filter((t) => t !== BASIC_INFO_TABLE);
                 const metaList = metricTables.map((t) => metaByTable.get(t));
                 if (metaList.some((m) => !m || !m.hasFincode)) return null; // a required table can't join to basic_info at all
                 if (metaList.some((m) => m.periodUnrecognized)) return null; // a required table's period format isn't one we handle
@@ -3679,12 +3736,25 @@ function applyRibbonView() {
                 // fallback. It isn't ambiguous though — it means every quarter OF that year — so
                 // expand it into the four quarters and let the "years" branch below filter them as
                 // a plain IN-list, the same path the skeleton-grid fast path already uses.
+                //
+                // Clamped to quarters that have actually ENDED as of today (never just "<= this
+                // fiscal year", the same imprecision periodFutureGuardExpr exists to fix elsewhere)
+                // — a past fiscal year keeps all 4 unchanged, but the CURRENT one only gets however
+                // many of its quarters have actually finished; asking for "quarterly PAT in FY27"
+                // today (inside Q3 FY27) expands to Q1+Q2 only, never a Q3/Q4 that can't possibly
+                // have been reported yet. If that leaves NOTHING (e.g. the request names a fiscal
+                // year that hasn't even started), period is left untouched — its original "specific"
+                // shape with no quarter — so the ordinary validity check two lines below (via
+                // literalPeriodValue, which refuses a quarterly table with no quarter) falls through
+                // to the freeform-LLM path exactly as it already did before this expansion existed,
+                // rather than this manufacturing an IN-list of zero values.
                 const anchorIsQuarterly = quarterlyFlags.has(true);
                 if (anchorIsQuarterly && period.mode === "specific" && period.fiscal_year && !period.quarter) {
-                    period = {
-                        mode: "years",
-                        values: [1, 2, 3, 4].map((q) => ({ fiscalYear: period.fiscal_year, quarter: q })),
-                    };
+                    const last = lastCompletedFiscalQuarter();
+                    const values = [1, 2, 3, 4]
+                        .filter((q) => period.fiscal_year < last.fiscalYear || (period.fiscal_year === last.fiscalYear && q <= last.quarterNo))
+                        .map((q) => ({ fiscalYear: period.fiscal_year, quarter: q }));
+                    if (values.length) period = { mode: "years", values };
                 }
                 if (period.mode === "specific" && !period.fiscal_year) return null;
                 if (period.mode === "range" && !(period.range_count > 0)) return null;
@@ -3756,9 +3826,10 @@ function applyRibbonView() {
                         } else {
                             // No estimate flag of its own (see the SAME gap in the latest/range
                             // window below) — "since" is open-ended at the top, so without this it
-                            // would happily include a forecast/consensus year too.
-                            extraWhere.push(`${normalizedYearExpr(alias, column, meta.period)} <= `
-                                + `${lastCompletedFiscalYear() + (meta.period.format === PERIOD_FORMAT_MONTH_YEAR_QUARTERLY ? 1 : 0)}`);
+                            // would happily include a forecast/consensus period too, or (for a
+                            // quarterly table) a quarter that simply hasn't ended yet — see
+                            // periodFutureGuardExpr's own comment.
+                            extraWhere.push(periodFutureGuardExpr(alias, column, meta.period));
                         }
                     } else if (meta.period && t === anchorTable) {
                         const { column } = meta.period;
@@ -3775,14 +3846,13 @@ function applyRibbonView() {
                         // loadPeriodJoinMetadata finds no estimate column, estimateFilter comes out
                         // null, and the guard above silently doesn't apply — which is exactly how a
                         // "past 3 years" request came back as FY2029/2028/2027 consensus estimates.
-                        // With no flag to filter on, fall back to the calendar: never rank a fiscal
-                        // year that hasn't finished yet. An annual table caps at the last COMPLETED
-                        // fiscal year; a quarterly one caps a year later, since its already-reported
-                        // quarters WITHIN the current fiscal year are real actuals and must stay.
-                        const futureGuard = estimateFilter
-                            ? null
-                            : `${normalizedYearExpr("", column, meta.period)} <= `
-                                + `${lastCompletedFiscalYear() + (meta.period.format === PERIOD_FORMAT_MONTH_YEAR_QUARTERLY ? 1 : 0)}`;
+                        // With no flag to filter on, fall back to the calendar: never rank a period
+                        // that hasn't finished yet — quarter-precise for a quarterly table (see
+                        // periodFutureGuardExpr/lastCompletedFiscalQuarter), since a year-only bound
+                        // let through a quarter that had merely STARTED, not actually ended — e.g.
+                        // ranking Dec2026 (Q3 FY2027) as "latest" while still inside that same
+                        // quarter, when sc_quater_data had nothing there yet but a null-filled shell.
+                        const futureGuard = estimateFilter ? null : periodFutureGuardExpr("", column, meta.period);
                         const innerConditions = [estimateFilter, futureGuard].filter(Boolean);
                         const innerWhere = innerConditions.length ? ` WHERE ${innerConditions.join(" AND ")}` : "";
                         from = `(SELECT *, ROW_NUMBER() OVER (PARTITION BY ${partitionBy} ORDER BY ${orderExpr}) AS _rn FROM ${t}${innerWhere}) ${alias}`;
@@ -3830,6 +3900,16 @@ function applyRibbonView() {
                 if (anchorTable) selectParts.push(`${colRef(aliasFor.get(anchorTable), metaByTable.get(anchorTable).period.column)} AS [Period]`);
                 const seenColumns = new Set();
                 for (const m of metrics) {
+                    // See buildGrainAwareQuery's own comment — a metric with no data at this plan's
+                    // own grain still gets its column, just as a literal NULL, so both halves of a
+                    // grain-split UNION keep identical SELECT lists. Emitted before the alias lookup
+                    // below (which would otherwise silently `continue` past it, since there is no
+                    // table/alias to resolve for a literal).
+                    if (m.literalNull) {
+                        const outName = m.display || "Value";
+                        selectParts.push(`CAST(NULL AS VARCHAR(50)) AS [${outName}]`);
+                        continue;
+                    }
                     const alias = m.table === BASIC_INFO_TABLE ? "b" : aliasFor.get(m.table);
                     if (!alias) continue; // shouldn't happen — a metric on a table we never resolved metadata for
                     // The heading is the CANONICAL metric name when there is one, so a quarterly
@@ -3887,7 +3967,7 @@ function applyRibbonView() {
                     + `WHERE ${whereParts.join(" AND ")}\n`
                     + orderBy;
 
-                const metricNames = Array.from(new Set(metrics.map((m) => m.column)));
+                const metricNames = Array.from(new Set(metrics.map((m) => m.column || m.display).filter(Boolean)));
                 const describeYearValue = (v) => v.quarter ? `Q${v.quarter} FY${String(v.fiscalYear).slice(-2)}` : `FY${String(v.fiscalYear).slice(-2)}`;
                 const periodDesc = period.mode === "latest" ? "the latest available period per company"
                     : period.mode === "range" ? `the last ${period.range_count} periods per company`
@@ -3949,20 +4029,47 @@ function applyRibbonView() {
                 if (!plan || plan.ranking) return null; // a ranking spanning two grains has no single meaning
                 const grains = [values.filter((v) => !v.quarter), values.filter((v) => v.quarter)].filter((g) => g.length);
                 if (!grains.length) return null;
-                // A fresh metrics array per half — standardizePlanMetrics mutates the plan it's
-                // given, and the two halves must not re-point each other's metrics.
-                const halves = grains.map((grainValues) => standardizePlanMetrics({
-                    ...plan,
-                    metrics: (plan.metrics || []).map((m) => ({ ...m })),
-                    period: { mode: "years", values: grainValues },
-                }));
+                // Deliberately NOT standardizePlanMetrics here, even though every other caller of
+                // the registry uses it — that function's own resolveStandardMetric FALLS BACK to the
+                // other grain's table when a metric has no slot at the one actually being asked for
+                // (the right call for an ordinary single-grain request: show the annual CAGR figure
+                // rather than nothing, say, when asked for it quarterly). Inside a GRAIN-SPLIT half,
+                // that fallback is exactly backwards: it pins an annual-only metric (a CAGR has no
+                // quarterly figure at all) to the annual table even on the QUARTERLY half, giving
+                // that half's own metrics TWO different table grains at once — which trips
+                // buildDeterministicQuery's "every period-having table must share one grain" guard
+                // and fails the metric, not just that one metric column. Confirmed live: adding a
+                // single quarter row to an otherwise-annual table that also had "EBITDA CAGR 1Y" as
+                // a column silently fell through to the LLM rewrite every time, for exactly this
+                // reason.
+                //
+                // So each half resolves its OWN metrics directly against the registry, with NO
+                // cross-grain fallback: a real slot at this grain is used normally; no slot at all
+                // means this metric gets a literalNull placeholder for this half only (see
+                // buildDeterministicQuery's own handling of it) — present in the output as an honest
+                // blank, never silently sourced from the wrong grain's table.
+                const halves = grains.map((grainValues) => {
+                    const quarterly = grainValues.some((v) => v.quarter);
+                    const metrics = (plan.metrics || []).map((m) => {
+                        if (!m || !m.column) return m;
+                        const entry = qdRegistryByKey.get(normalizeMetricKey(m.column));
+                        if (!entry) return { ...m }; // not a registry metric at all — not standardized either way, same table on every grain
+                        const slot = quarterly ? entry.quarterly : entry.annual;
+                        if (slot) return { table: slot.table, column: slot.columns[0], columns: slot.columns, display: entry.name };
+                        return { literalNull: true, display: entry.name };
+                    });
+                    return { ...plan, metrics, period: { mode: "years", values: grainValues } };
+                });
                 const tables = [...new Set(halves.flatMap((h) => (h.metrics || []).map((m) => m && m.table)).filter(Boolean))];
                 const metaByTable = await loadPeriodJoinMetadata(tables);
                 const built = halves.map((h) => buildDeterministicQuery(h, metaByTable));
                 if (built.some((b) => !b || !b.sql)) return null;
                 // One grain only (a pure switch) — nothing to stitch, so this is just the ordinary
-                // single-table result, built against the re-pointed table.
-                if (built.length === 1) return built[0];
+                // single-table result, built against the re-pointed table. `tables` is attached here
+                // too (buildDeterministicQuery's own return shape has no such field) — see the final
+                // return's own comment for why a caller needs this rather than whatever table set it
+                // walked in with.
+                if (built.length === 1) return { ...built[0], tables };
 
                 const bodies = built.map((b) => sqlWithoutTrailingOrderBy(b.sql));
                 if (bodies.some((b) => !b)) return null;
@@ -3990,6 +4097,15 @@ function applyRibbonView() {
                     // Deliberately null: there are two anchors here, one per half, so there is no
                     // single period format a caller could re-derive a literal against.
                     anchorTable: null,
+                    // The UNION of both halves' real tables — not necessarily the same set the
+                    // caller walked in with (a mixed-grain rebuild can bring in a table that wasn't
+                    // joined before, e.g. a table that was previously annual-only now also needing
+                    // the quarterly table for a newly-typed quarter row). A caller that goes on to
+                    // mint a refresh token off whatever table list it's tracking (tables_used) needs
+                    // THIS one, the set the SQL just built actually references — the stale, walked-in
+                    // one would silently miss a table the very next edit (e.g. Add Columns) needs
+                    // metadata for.
+                    tables,
                 };
             };
 
@@ -4979,6 +5095,36 @@ function applyRibbonView() {
                     } catch (e) {
                         console.warn("[QueryData] skeleton-grid deterministic build failed:", e.message);
                     }
+                    // A skeleton laying out BOTH an annual period ("2026") and a quarterly one
+                    // ("q1fy27") as separate rows is exactly the shape buildDeterministicQuery can't
+                    // build directly — annual figures and quarterly ones live on two different
+                    // tables with no per-row correspondence to JOIN on, which is why the plain
+                    // attempt just above always declines for it. resolveGridTermsOrNull also can't
+                    // see this coming: it resolves every metric against ONE global "is this grid
+                    // quarterly at all" hint before the mixed period list is even considered, so a
+                    // mixed grid silently pinned Revenue/EBITDA to whichever ONE table the hint
+                    // happened to pick, and buildDeterministicQuery then failed outright trying to
+                    // filter that table on a period shape (an annual year with no quarter) it
+                    // doesn't understand. buildGrainAwareQuery re-resolves metrics itself, per half,
+                    // directly against the registry — unaffected by which grain resolveGridTermsOrNull
+                    // happened to pin them to — so it's tried here with no dependency on plan.metrics
+                    // already being correct for either grain.
+                    if (!result && period.mode === "years" && Array.isArray(period.values)
+                        && period.values.some((v) => v && v.quarter) && period.values.some((v) => v && !v.quarter)) {
+                        try {
+                            result = await buildGrainAwareQuery(plan, period.values);
+                            if (result) {
+                                console.log("[QueryData] skeleton-grid: built as a mixed annual + quarterly UNION (grain-aware).");
+                                // The ORIGINAL `tables` (from deriveTablesFromPlan on the single
+                                // grain resolveGridTermsOrNull happened to pin everything to) can be
+                                // missing the OTHER grain's table entirely — see buildGrainAwareQuery's
+                                // own `tables` field for why the caller needs its actual union instead.
+                                if (Array.isArray(result.tables)) tables = result.tables;
+                            }
+                        } catch (e) {
+                            console.warn("[QueryData] skeleton-grid grain-aware build failed:", e.message);
+                        }
+                    }
                     if (!result) {
                         const fixedMetrics = tryResolveGranularityConflict(plan.metrics, metaByTable);
                         if (fixedMetrics) {
@@ -5612,6 +5758,11 @@ function applyRibbonView() {
             // the description watcher) detected — shown on the Update bar ("Update table · <this>").
             const describePendingChangeKind = (kind) => ({
                 description: "Description changed",
+                // More than one of the three slots below is set at once — runTableCombinedEdit (or,
+                // with description also pending, runTableRefresh given all three deltas) applies
+                // every one of them together on a single click; see the pendingKind computation
+                // just below for when this is chosen over any one kind's own specific label.
+                combined: "Multiple changes",
                 companyChange: "Company changed",
                 periodChange: "Period changed",
                 mixedChange: "Company & period changed",
@@ -5659,17 +5810,25 @@ function applyRibbonView() {
                 }
                 yourTablesList.innerHTML = visible.map(({ t, i }) => {
                         const pendingClass = pendingDeleteKeys.has(tableWatchKey(t)) ? " dt-yt-item-pending-delete" : "";
-                        // A manual edit to the description cell, OR to the company/period shown in
-                        // the data rows (see pollTableMetaEdits' two watchers), is surfaced here as
-                        // ONE pending change for the whole row — never both at once (the row watcher
-                        // only ever sets one of these two fields; see pollTableMetaEdits). The
-                        // Update bar below is the ONLY way to apply it; a subtle row highlight
-                        // echoes the same state.
+                        // A manual edit to the description cell, to the company/period shown in the
+                        // data rows, and/or to the header row (see pollTableMetaEdits' watchers) is
+                        // surfaced here as ONE pending change for the whole row. Two or even all
+                        // three CAN be set at once — a user who both retypes a header cell and types
+                        // a new period into the blank row below in the same sitting sets both — and
+                        // the Update bar's own click handler applies every one of them together in
+                        // that case (see runTableCombinedEdit); pendingKind below just picks the
+                        // right LABEL for however many are actually pending right now. The Update
+                        // bar below is the ONLY way to apply it; a subtle row highlight echoes the
+                        // same state.
                         const rowState = tableMetaWatchState.get(tableWatchKey(t));
                         const pendingDescChange = rowState?.pendingDescriptionChange;
                         const pendingDataChange = rowState?.pendingDataRowChange;
                         const pendingHeaderChange = rowState?.pendingHeaderChange;
-                        const pendingKind = pendingDescChange ? "description" : pendingDataChange ? pendingDataChange.kind : pendingHeaderChange ? pendingHeaderChange.kind : null;
+                        const pendingSlotCount = [pendingDescChange, pendingDataChange, pendingHeaderChange].filter(Boolean).length;
+                        const pendingKind = pendingSlotCount > 1 ? "combined"
+                            : pendingDescChange ? "description"
+                            : pendingDataChange ? pendingDataChange.kind
+                            : pendingHeaderChange ? pendingHeaderChange.kind : null;
                         const pendingChangeClass = pendingKind ? " dt-yt-item-pending-change" : "";
                         const updateBarHtml = pendingKind
                             ? `<button type="button" class="dt-yt-update-bar dt-yt-update-bar-pending">Update table · ${escapeHtml(describePendingChangeKind(pendingKind))}</button>`
@@ -6850,6 +7009,14 @@ function applyRibbonView() {
                     traceLookup("Decrypt refresh tag", "(server-side decrypt, no SQL sent from here)", `sql: ${prior.sql}\nuser_query: ${prior.user_query}`);
 
                     let updated = null;
+                    // Reassigned below only when a grain-aware period rebuild succeeds (see
+                    // buildGrainAwareQuery's own `tables` field) — a mixed/switched-grain rebuild can
+                    // bring in a table that wasn't joined before (e.g. a previously annual-only table
+                    // now also needing the quarterly table for a newly-typed quarter row), and the
+                    // refresh token minted for the updated table needs to record THAT set, not the
+                    // one it walked in with — otherwise a later edit (Add Columns, another period
+                    // change) would load metadata for only the table(s) this one already knew about.
+                    let allTables = prior.tables_used || [];
                     try {
                         const reconstructed = reconstructMetricsFromSelectList(prior.sql);
                         const metaByTable = reconstructed ? await loadPeriodJoinMetadata(prior.tables_used || []) : null;
@@ -6939,13 +7106,18 @@ function applyRibbonView() {
                                     // grain-aware builder if that declines.
                                     const mixedGrain = values.some((v) => v.quarter) && values.some((v) => !v.quarter);
                                     let rebuilt = mixedGrain ? null : buildDeterministicQuery(plan, metaByTable);
-                                    if (!rebuilt || !rebuilt.sql) rebuilt = await buildGrainAwareQuery(plan, values);
+                                    let wentGrainAware = false;
+                                    if (!rebuilt || !rebuilt.sql) { rebuilt = await buildGrainAwareQuery(plan, values); wentGrainAware = true; }
                                     if (rebuilt && rebuilt.sql) {
                                         traceLookup(
                                             `Data row edit: code-side rebuild (no LLM)${mixedGrain ? " — mixed annual + quarterly periods, stitched with UNION ALL" : ""}`,
                                             "(pure code — re-derives the query via buildDeterministicQuery)",
                                             `Rebuilt:\n${rebuilt.sql}`
                                         );
+                                        // See the grain-aware path's own `tables` field — a rebuild
+                                        // that went through it may reference a table that wasn't
+                                        // joined before.
+                                        if (wentGrainAware && Array.isArray(rebuilt.tables)) allTables = rebuilt.tables;
                                         updated = { sql: rebuilt.sql, title: prior.title, description: describeDataRowChange(prior.description, change), explanation: "" };
                                     } else {
                                         console.warn("[QueryData] data-row edit: rebuild declined for the new period set — falling back to the LLM rewrite.");
@@ -6988,7 +7160,7 @@ function applyRibbonView() {
                     outcome = `SQL generated:\n${updated.sql}\n\nExplanation: ${updated.explanation || "(none given)"}`;
 
                     statusEl.textContent = "Running the updated query…";
-                    const data = await runGeneratedSql(updated.sql, prior.user_query || describe, (updated.title || "Query Result").slice(0, 31), prior.tables_used, updated.title, updated.description);
+                    const data = await runGeneratedSql(updated.sql, prior.user_query || describe, (updated.title || "Query Result").slice(0, 31), allTables, updated.title, updated.description);
                     data.title = updated.title || prior.title || "Query Result";
                     data.description = updated.description || prior.description || "";
 
@@ -7005,6 +7177,213 @@ function applyRibbonView() {
                     statusEl.textContent = e.message && e.message !== "Failed to fetch" ? e.message : "Couldn't update this table — please try again.";
                 } finally {
                     if (currentTrace) saveQueryDataTrace(formatQueryDataTrace(`Data row edit: ${describe}`, currentTrace, outcome), `data-row-${entry.title}`);
+                    hideQueryDataOverlay();
+                    setTableRefreshingFlag(entry, false);
+                    flushQueryDataCost(`Update "${entry.title}": ${describe}`);
+                }
+            };
+
+            // Runs a pending HEADER change (headerAdd/headerRename) and a pending DATA-ROW change
+            // (companyChange/periodChange/mixedChange) TOGETHER, in one rebuild and one write — the
+            // gap this exists to close: the Update bar tracks these on two separate state slots
+            // (pendingHeaderChange, pendingDataRowChange — see pollTableMetaEdits), and a user who
+            // makes both kinds of edit in the same sitting (e.g. types a new period into the blank
+            // row below the table AND a new header past its last column) ends up with BOTH slots
+            // set at once. Before this function existed, the Update-bar click handler applied
+            // priority-ordered — ONE of the two pending changes only, never both — and because
+            // applying either one rewrites the table's WHOLE footprint from scratch (clearTableBlock
+            // + writeDownloadedTableToSheet), the OTHER edit's visible evidence on the sheet was
+            // overwritten back to its old value by that same write. Not merely deferred to a second
+            // click: genuinely lost the instant the first click ran, since the next poll tick would
+            // see the overwritten cell matching its old baseline again and never re-flag it.
+            //
+            // Only a natural-language request already got this right (an LLM asked to apply several
+            // changes at once just does) — this is the matching code-side path for the two SPECIFIC
+            // kinds the Update bar already detects deterministically, reusing the exact same
+            // reconstruct-the-plan-then-rebuild-once approach every single-kind path above already
+            // uses (just applying BOTH modifications to the one reconstructed plan before a single
+            // buildDeterministicQuery call), rather than two separate writes or silently picking one
+            // change over the other. Falls back to ONE LLM rewrite describing both changes together
+            // if anything about either one doesn't fit the deterministic path (a ranking query, a
+            // mixedChange data edit, a metric that didn't resolve cleanly, a granularity conflict) —
+            // the same "never a dead end" pattern every fast path here already has, and exactly what
+            // a user who typed both changes as one sentence would get anyway.
+            //
+            // Deliberately NOT built on the text-splice fast paths runTableAddColumns/
+            // runTableHeaderRename try first (trySpliceNewColumn/trySpliceRenameColumn): those edit
+            // the SELECT list in place as plain text and never touch WHERE/the period window, so
+            // they can't also carry a company/period change — the reconstruct-and-rebuild path below
+            // is the common ground both single-kind paths already fall back to, and the only one
+            // that can express both deltas in a single buildDeterministicQuery call.
+            const runTableCombinedEdit = async (entry, pendingHeader, pendingData, statusEl) => {
+                statusEl = wrapStatusElWithOverlay(statusEl);
+                setTableRefreshingFlag(entry, true);
+                currentTrace = [];
+                let outcome = "(ended before any outcome was recorded)";
+                const headerDescribe = pendingHeader.kind === "headerAdd"
+                    ? `new column(s): ${pendingHeader.newColumnLabels.join(", ")}`
+                    : `renamed column(s): ${pendingHeader.changes.map((c) => `"${c.from}" -> "${c.to}"`).join(", ")}`;
+                const dataDescribe = pendingData.kind === "companyChange" ? `company change: now ${pendingData.companies.join(", ")}`
+                    : pendingData.kind === "periodChange" ? `period change: now ${pendingData.periods.join(", ")}`
+                    : `company and period both changed: companies now ${pendingData.companies.join(", ") || "(unchanged)"}, periods now ${pendingData.periods.join(", ") || "(unchanged)"}`;
+                const describe = `${headerDescribe}; ${dataDescribe}`;
+                try {
+                    statusEl.style.display = "block";
+                    statusEl.textContent = "Reading the original query…";
+                    const prior = await decryptRefreshTokenWithFallback(entry, (step) => { statusEl.textContent = step; });
+                    traceLookup("Decrypt refresh tag", "(server-side decrypt, no SQL sent from here)", `sql: ${prior.sql}\nuser_query: ${prior.user_query}`);
+
+                    let updated = null;
+                    let allTables = prior.tables_used || [];
+                    try {
+                        if (pendingData.kind === "mixedChange") throw new Error("data-row change is itself compound (company+period at once) — too compound to ALSO combine with a header change deterministically");
+                        const reconstructed = reconstructMetricsFromSelectList(prior.sql);
+                        if (!reconstructed) throw new Error("couldn't reconstruct the existing query's shape");
+
+                        // ── Header side first — resolve the label(s) and fold them into the metric
+                        // list, since the data-row side below needs the FINAL metric list to build
+                        // metaByTable against (a header-add may bring in a table that isn't joined yet). ──
+                        let metrics = reconstructed.metrics;
+                        if (pendingHeader.kind === "headerAdd") {
+                            const classification = classifyGridCells([pendingHeader.newColumnLabels]);
+                            const resolution = await resolveGridTermsOrNull(classification);
+                            const uniqueLabels = new Set(pendingHeader.newColumnLabels);
+                            if (!resolution || resolution.companies.length || resolution.periodValues.length || resolution.metrics.length !== uniqueLabels.size) {
+                                throw new Error("new header label(s) didn't resolve cleanly as metrics");
+                            }
+                            allTables = Array.from(new Set([...allTables, ...resolution.metrics.map((m) => m.table)]));
+                            metrics = [...metrics, ...resolution.metrics];
+                        } else { // headerRename
+                            const toLabels = pendingHeader.changes.map((c) => c.to);
+                            const classification = classifyGridCells([toLabels]);
+                            const resolution = await resolveGridTermsOrNull(classification);
+                            const uniqueLabels = new Set(toLabels);
+                            if (!resolution || resolution.companies.length || resolution.periodValues.length || resolution.metrics.length !== uniqueLabels.size) {
+                                throw new Error("renamed header label(s) didn't resolve cleanly as metrics");
+                            }
+                            const metricByColumn = new Map();
+                            for (const m of resolution.metrics) {
+                                if (m.display) metricByColumn.set(m.display, m);
+                                if (!metricByColumn.has(m.column)) metricByColumn.set(m.column, m);
+                            }
+                            // Positional substitution, matched by the reconstructed entry's OWN
+                            // display/column against change.from — reconstructed.metrics is in the
+                            // same left-to-right SELECT-list order trySpliceRenameColumn targets by
+                            // label, so this is the same matching, just applied to the parsed list
+                            // instead of the raw SQL text.
+                            const matchedFrom = new Set();
+                            metrics = reconstructed.metrics.map((m) => {
+                                const change = pendingHeader.changes.find((c) => c.from === (m.display || m.column));
+                                if (!change) return m;
+                                const metric = metricByColumn.get(change.to);
+                                if (!metric) throw new Error(`no resolved metric for "${change.to}"`);
+                                matchedFrom.add(change.from);
+                                return metric;
+                            });
+                            // trySpliceRenameColumn (the single-kind path) bails to the LLM when a
+                            // "from" label isn't found exactly once in the SELECT list rather than
+                            // silently no-op'ing it — matched here too, so a rename that doesn't
+                            // match anything (e.g. the user renamed a cell that isn't where the
+                            // detected header shape expects it) isn't quietly dropped.
+                            if (matchedFrom.size !== pendingHeader.changes.length) throw new Error("one or more renamed column(s) weren't found in the existing SELECT list");
+                        }
+
+                        const metaByTable = await loadPeriodJoinMetadata(allTables);
+
+                        // ── Data-row side — companies and/or period, same logic each single-kind
+                        // path above already applies, just landing in a shared `plan` instead of its
+                        // own immediate buildDeterministicQuery call. ──
+                        let companies, period, cleanSwap = null;
+                        if (pendingData.kind === "companyChange") {
+                            const periodResult = reconstructPeriodFromSql(prior.sql, reconstructed.aliasToTable, reconstructed.periodMarker, metaByTable);
+                            if (!periodResult) throw new Error("couldn't reconstruct the existing period");
+                            period = periodResult.period || { mode: "latest" };
+                            let newCompanies = pendingData.companies;
+                            const oldCompanies = reconstructCompaniesFromWhere(prior.sql);
+                            if (oldCompanies) {
+                                const removed = oldCompanies.filter((c) => !pendingData.companies.includes(c));
+                                const added = pendingData.companies.filter((c) => !oldCompanies.includes(c));
+                                if (removed.length === 1 && added.length === 1) {
+                                    newCompanies = oldCompanies.map((c) => (c === removed[0] ? added[0] : c));
+                                    cleanSwap = { oldCompanies, newCompanies };
+                                }
+                            }
+                            companies = newCompanies;
+                        } else { // periodChange
+                            companies = reconstructCompaniesFromWhere(prior.sql);
+                            const anchorTable = reconstructed.periodMarker && reconstructed.aliasToTable.get(reconstructed.periodMarker.alias);
+                            const periodMeta = anchorTable && metaByTable.get(anchorTable) && metaByTable.get(anchorTable).period;
+                            if (!companies || !periodMeta) throw new Error("couldn't reconstruct the existing companies, or this table has no reconstructable period column");
+                            const parsed = pendingData.periods.map((shown) => {
+                                const asStored = parseLiteralPeriodValue(periodMeta, shown);
+                                if (asStored) return asStored;
+                                const asTyped = parsePeriodToken(shown);
+                                if (asTyped && Number.isFinite(asTyped.fiscalYear)) return { fiscalYear: asTyped.fiscalYear, quarterNo: asTyped.quarter || null };
+                                return parseExcelSerialPeriod(shown);
+                            });
+                            if (parsed.some((p) => !p)) throw new Error("couldn't read one of the displayed period values");
+                            period = { mode: "years", values: parsed.map((p) => ({ fiscalYear: p.fiscalYear, quarter: p.quarterNo || undefined })) };
+                        }
+
+                        // A quarterly value typed against an annual table's own period column (or
+                        // vice versa) isn't something a single buildDeterministicQuery call can
+                        // express — same mixed-grain gap runTableDataRowEdit's own periodChange
+                        // branch has (see buildGrainAwareQuery there); left unhandled here rather
+                        // than duplicated, since combining THAT with a header change on top is rare
+                        // enough to just take the LLM fallback below instead.
+                        const plan = { feasible: true, companies, metrics, period };
+                        const rebuilt = buildDeterministicQuery(plan, metaByTable);
+                        if (!rebuilt || !rebuilt.sql) throw new Error("combined rebuild declined (e.g. a ranking query, or a granularity conflict)");
+
+                        traceLookup("Combined update: code-side rebuild (no LLM)", "(pure code — re-derives the query via buildDeterministicQuery)", `Rebuilt:\n${rebuilt.sql}`);
+                        let description = prior.description || "";
+                        if (pendingHeader.kind === "headerAdd") {
+                            description = description ? `${description}, plus ${pendingHeader.newColumnLabels.join(", ")}` : "";
+                        } else {
+                            pendingHeader.changes.forEach((c) => { description = description.split(c.from).join(c.to); }); // best-effort, harmless if it doesn't appear
+                        }
+                        updated = { sql: rebuilt.sql, title: prior.title, description: describeDataRowChange(description, pendingData, cleanSwap) || description, explanation: "" };
+                    } catch (e) {
+                        console.warn("[QueryData] combined update fast path failed, falling back to the LLM rewrite:", e.message);
+                    }
+
+                    if (!updated) {
+                        const sampleText = await readSampleRows(entry);
+                        traceLookup("Read sample rows", "(reads the sheet directly, no SQL)", sampleText ? `${sampleText.split("\n").length} row(s) sampled` : "no data rows to sample");
+                        statusEl.textContent = "Asking the model to update the query…";
+                        const headerInstr = pendingHeader.kind === "headerAdd"
+                            ? `added ${pendingHeader.newColumnLabels.length > 1 ? "these new columns" : "this new column"} past the table's last column: ${pendingHeader.newColumnLabels.join(", ")}`
+                            : `renamed ${pendingHeader.changes.length > 1 ? "these columns" : "this column"}: ${pendingHeader.changes.map((c) => `"${c.from}" -> "${c.to}"`).join(", ")}`;
+                        const dataInstr = pendingData.kind === "companyChange" ? `the company/companies shown are now: ${pendingData.companies.join(", ")}`
+                            : pendingData.kind === "periodChange" ? `the period(s) shown are now: ${pendingData.periods.join(", ")}`
+                            : `both company and period changed at once — companies now ${pendingData.companies.join(", ") || "(unchanged)"}, periods now ${pendingData.periods.join(", ") || "(unchanged)"}`;
+                        const instruction = `The user made TWO different kinds of direct-sheet edit at once: they ${headerInstr}, AND ${dataInstr}. Update the query to reflect BOTH changes together, keeping every other column/company/period exactly the same.`;
+                        updated = await refreshSqlFromPrevious(prior.sql, prior.user_query, prior.description, instruction, sampleText);
+                    }
+                    if (!updated.sql) {
+                        outcome = `DECLINED — no SQL generated.\nExplanation: ${updated.explanation || "(none given)"}`;
+                        statusEl.textContent = updated.explanation || "Couldn't update this table with those changes.";
+                        return;
+                    }
+                    outcome = `SQL generated:\n${updated.sql}\n\nExplanation: ${updated.explanation || "(none given)"}`;
+
+                    statusEl.textContent = "Running the updated query…";
+                    const data = await runGeneratedSql(updated.sql, prior.user_query || describe, (updated.title || "Query Result").slice(0, 31), allTables, updated.title, updated.description);
+                    data.title = updated.title || prior.title || "Query Result";
+                    data.description = updated.description || prior.description || "";
+
+                    // Both ignore flags on: the new header label past the table's old width AND
+                    // whatever new row now sits just below its old footprint are BOTH the user's own
+                    // known edits that triggered this very update, never someone else's content —
+                    // see runTableAddColumns'/runTableDataRowEdit's own identical comments on each
+                    // flag individually.
+                    outcome += await writeRefreshedTable(entry, data, statusEl, true, true);
+                } catch (e) {
+                    console.warn("[QueryData] combined update failed:", e);
+                    outcome = `ERROR: ${e.message}`;
+                    statusEl.textContent = e.message && e.message !== "Failed to fetch" ? e.message : "Couldn't update this table — please try again.";
+                } finally {
+                    if (currentTrace) saveQueryDataTrace(formatQueryDataTrace(`Combined update: ${describe}`, currentTrace, outcome), `combined-${entry.title}`);
                     hideQueryDataOverlay();
                     setTableRefreshingFlag(entry, false);
                     flushQueryDataCost(`Update "${entry.title}": ${describe}`);
@@ -8570,6 +8949,33 @@ function applyRibbonView() {
                         if (pendingLayout) {
                             if (state) { state.pendingDataRowChange = null; state.pendingHeaderChange = null; }
                             run = runTableRefresh(entry, `The user directly edited ${pendingLayout.where} in the sheet. This table is NOT laid out in the usual one-row-per-company shape — read the sample rows below to see its actual orientation (for example companies across the header row with metrics down the first column) before deciding what changed. Rebuild the query so the table matches what the sheet now shows, keeping that same orientation and overall shape.`, statusEl);
+                        } else if (pendingHeader && pendingData) {
+                            // Two DIFFERENT kinds of direct-sheet edit pending at once — e.g. a new
+                            // period typed below the table AND a new header typed past its last
+                            // column. Clearing BOTH slots here (not just one) is what makes this a
+                            // single click rather than "apply one now, the other survives for a
+                            // second click" — see runTableCombinedEdit's own comment for why a
+                            // second click would be too late anyway (the first write already erases
+                            // the other edit's visible evidence on the sheet).
+                            if (state) { state.pendingDataRowChange = null; state.pendingHeaderChange = null; }
+                            if (pendingDesc) {
+                                // A THIRD kind (description) pending at the very same time — rather
+                                // than a dedicated 3-way deterministic path, fold all three deltas
+                                // into one instruction for the same general LLM-driven rewrite the
+                                // layoutEdit/description-only cases above already use; this is the
+                                // "describe it in one sentence" treatment every combination already
+                                // gets once it leaves the deterministic fast paths.
+                                if (state) state.pendingDescriptionChange = null;
+                                const headerPart = pendingHeader.kind === "headerAdd"
+                                    ? `added new column(s): ${pendingHeader.newColumnLabels.join(", ")}`
+                                    : `renamed column(s): ${pendingHeader.changes.map((c) => `"${c.from}" -> "${c.to}"`).join(", ")}`;
+                                const dataPart = pendingData.kind === "companyChange" ? `changed the company/companies shown to: ${pendingData.companies.join(", ")}`
+                                    : pendingData.kind === "periodChange" ? `changed the period(s) shown to: ${pendingData.periods.join(", ")}`
+                                    : `changed both company (now ${pendingData.companies.join(", ") || "unchanged"}) and period (now ${pendingData.periods.join(", ") || "unchanged"})`;
+                                run = runTableRefresh(entry, `${pendingDesc.instruction} The user ALSO made direct-sheet edits at the same time: they ${headerPart}, and ${dataPart}. Apply every one of these changes together.`, statusEl);
+                            } else {
+                                run = runTableCombinedEdit(entry, pendingHeader, pendingData, statusEl);
+                            }
                         } else if (pendingDesc) {
                             run = runTableRefresh(entry, pendingDesc.instruction, statusEl).then(() => { if (state) state.pendingDescriptionChange = null; });
                         } else if (pendingData) {
