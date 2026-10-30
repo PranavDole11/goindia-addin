@@ -584,10 +584,19 @@
    "unit": "Rs",
    "growth": false,
    "annual": {
-    "prefer": "basic_info",
+    "prefer": "sc_year_data",
     "columns": [
      "Close Price",
+     "Annual Closing Price",
      "Close_Price"
+    ]
+   },
+   "quarterly": {
+    "prefer": "sc_quater_data",
+    "columns": [
+     "Close Price (Q)",
+     "Quarterly closing Price (Q) (Q)",
+     "Quarterly closing Price (Q)"
     ]
    }
   },

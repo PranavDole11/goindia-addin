@@ -1023,6 +1023,18 @@ const QD_SINGLE_COMPANY_PREFIX = "Single Company: ";
 // Table feature's backend already used, so writeDownloadedTableToSheet further down needed no
 // changes to handle it.
 //
+// That row-capping wrap is exactly "SELECT TOP N * FROM (<generated sql>) AS t" — which means a
+// WITH statement, despite being accepted by the statement-type check above, can never actually
+// run: T-SQL does not allow a CTE to appear nested inside another statement's derived table like
+// that (it must START the batch). Confirmed live 2026-10-28: a refresh asked to pivot companies
+// into columns, the model reached for "WITH base AS (...) SELECT ... FROM base ...", and execution
+// failed outright with a generic "isn't valid SQL" error — the identical pivot shape built as a
+// plain nested derived table instead ("SELECT ... FROM (SELECT ...) AS base ...") has no such
+// problem, since that's just an ordinary single SELECT regardless of how deep the nesting goes.
+// Every SQL-generating system prompt below (generateSqlFromSchemas, refreshSqlFromPrevious,
+// addColumnsToTable, rewriteSqlForLatestPeriod) now explicitly forbids CTEs for exactly this
+// reason, pointing the model at the nested-derived-table equivalent instead.
+//
 // A handful of tables don't have fixed columns at all — sc_year_data, sc_quater_data,
 // sc_cagr_data and sc_cagr_quater each store one column PER financial metric, with their own
 // schema docs describing the real column names only as a DERIVATION from another lookup table
@@ -2101,6 +2113,8 @@ function applyRibbonView() {
         const generateBtn = document.getElementById("dtDownload");
         const yourTablesList = document.getElementById("dtYourTablesList");
         const queryHint = document.getElementById("dtQueryHint");
+        const queryHintPreview = document.getElementById("dtQueryHintPreview");
+        const queryHintPreviewImg = document.getElementById("dtQueryHintPreviewImg");
         const loadingOverlay = document.getElementById("dtLoadingOverlay");
         const loadingText = document.getElementById("dtLoadingText");
         const yourTablesToast = document.getElementById("dtYourTablesToast");
@@ -2116,8 +2130,110 @@ function applyRibbonView() {
             && loadingOverlay && loadingText
             && yourTablesList
             && yourTablesToast && yourTablesToastMessage && yourTablesToastUndo
-            && queryHint
+            && queryHint && queryHintPreview && queryHintPreviewImg
             && dtTabDownloadBtn && dtTabYourTablesBtn && dtDownloadBodyEl && dtYourTablesPanelEl && dtYtTabCountEl) {
+            // ── "Or select headers in your sheet" hover/click preview ──
+            // Hovering OR clicking the hint expands a small popover beneath it playing a GIF of
+            // what that hint actually means (a hand-built skeleton selection, then Download) — see
+            // the HTML's own comment on #dtQueryHintPreview for why it's position:fixed.
+            //
+            // Hover and click are two DIFFERENT persistence models, not the same trigger twice:
+            //   - hover opens it for as long as the pointer stays over the hint OR the popover
+            //     itself, closing again the moment it leaves both (with a short debounce below —
+            //     moving the mouse from the hint straight down INTO the popover crosses real screen
+            //     space outside either element for a frame or two, which would otherwise fire a
+            //     premature close-then-reopen flicker).
+            //   - a CLICK pins it open regardless of hover, for a user who wants to glance back at
+            //     the sheet while it keeps playing — closed again only by clicking the hint again or
+            //     clicking anywhere else.
+            let queryHintPinned = false;
+            let queryHintCloseTimer = null;
+            let queryHintSrcLoaded = false; // the clip is ~14MB — fetched once, the first time this actually opens, never eagerly on page load
+            // The img's own height when there's genuinely room for it below the hint — NOT a
+            // fixed size, since the hint sits near the bottom of the Download Data card, close to
+            // the bottom of the window itself. A flat 420px looked right the moment there happened
+            // to be ≥420px of room below the hint, and clipped against the actual browser/task-pane
+            // edge the moment there wasn't — this is exactly that bug. Recomputed on every open (and
+            // on resize, see below) against whatever room is ACTUALLY there right now, rather than
+            // assuming a size that only ever fit once.
+            const QD_HINT_PREVIEW_IDEAL_IMG_HEIGHT = 420;
+            const QD_HINT_PREVIEW_BOTTOM_MARGIN = 10; // breathing room kept clear above the very bottom of the window
+            const positionQueryHintPreview = () => {
+                const r = queryHint.getBoundingClientRect();
+                const availableBelow = window.innerHeight - r.bottom - QD_HINT_PREVIEW_BOTTOM_MARGIN;
+                // Never below 80px (still a usable, if modest, preview) even on a very short window
+                // — better than refusing to show anything at all.
+                const imgHeight = Math.max(80, Math.min(QD_HINT_PREVIEW_IDEAL_IMG_HEIGHT, availableBelow));
+                queryHintPreviewImg.style.height = `${imgHeight}px`;
+                // +14px over the image's own height, same small buffer the fixed CSS value used
+                // before — set here instead of in CSS now that the target height itself is dynamic.
+                // Inline style overrides the open-state class's own max-height, but the transition
+                // still animates correctly: it's one value change per open(), from whatever the
+                // previously-rendered max-height was (0, when closed) to this new target, exactly
+                // the same way a class-driven change would animate.
+                queryHintPreview.style.maxHeight = `${imgHeight + 14}px`;
+                queryHintPreview.style.top = `${r.bottom}px`;
+                // Clamped so a hint sitting near the right edge of a narrow task pane never pushes
+                // the (fixed-width) popover itself off-screen to the right.
+                const width = queryHintPreview.offsetWidth || 747; // the img's width at its IDEAL height — only used if offsetWidth isn't measurable yet
+                queryHintPreview.style.left = `${Math.max(4, Math.min(r.left, window.innerWidth - width - 4))}px`;
+            };
+            const openQueryHintPreview = () => {
+                if (queryHintCloseTimer) { clearTimeout(queryHintCloseTimer); queryHintCloseTimer = null; }
+                if (!queryHintSrcLoaded) { queryHintPreviewImg.src = "assets/table-builder-tutorial.mp4"; queryHintSrcLoaded = true; }
+                positionQueryHintPreview();
+                queryHintPreview.classList.add("dt-query-hint-preview-open");
+                queryHint.setAttribute("aria-expanded", "true");
+                // Restart from the beginning on every open (a GIF would've looped the whole time it
+                // was open, however briefly) — rewind before play() rather than relying on autoplay,
+                // which only ever fires once on initial load. play() returns a promise that can
+                // reject (e.g. the popover closes again before the browser finishes starting
+                // playback) — swallow that, it's not an error worth surfacing.
+                try { queryHintPreviewImg.currentTime = 0; } catch { /* not seekable yet on first load */ }
+                queryHintPreviewImg.play().catch(() => {});
+            };
+            const closeQueryHintPreviewNow = () => {
+                queryHintPreview.classList.remove("dt-query-hint-preview-open");
+                // An INLINE style always beats a class-based rule, including the base (closed)
+                // class's own "max-height: 0" — so now that positionQueryHintPreview sets max-height
+                // inline on every open, removing the -open class alone would no longer collapse
+                // anything; it would just stay at whatever height was last set. Explicitly back to
+                // "0" here (not removeProperty) so the close transition still animates smoothly
+                // from the current open height down to 0, exactly as the class-only version did.
+                queryHintPreview.style.maxHeight = "0";
+                queryHint.setAttribute("aria-expanded", "false");
+                queryHintPinned = false;
+                queryHintPreviewImg.pause(); // stop decoding/playing while hidden — it was free with a GIF, it isn't with video
+            };
+            // Debounced so hovering OUT of the hint and immediately INTO the popover below it (the
+            // normal way of actually watching the GIF) doesn't flash closed first — cancelled by
+            // openQueryHintPreview the instant the pointer re-enters either element.
+            const scheduleQueryHintClose = () => {
+                if (queryHintPinned) return;
+                if (queryHintCloseTimer) clearTimeout(queryHintCloseTimer);
+                queryHintCloseTimer = setTimeout(closeQueryHintPreviewNow, 150);
+            };
+            queryHint.addEventListener("mouseenter", openQueryHintPreview);
+            queryHint.addEventListener("mouseleave", scheduleQueryHintClose);
+            queryHintPreview.addEventListener("mouseenter", openQueryHintPreview);
+            queryHintPreview.addEventListener("mouseleave", scheduleQueryHintClose);
+            queryHint.addEventListener("click", () => {
+                if (queryHintPinned) { closeQueryHintPreviewNow(); return; }
+                queryHintPinned = true;
+                openQueryHintPreview();
+            });
+            // Keyboard equivalent of a click — #dtQueryHint is a plain div given role="button"
+            // tabindex="0" in the HTML precisely so this has something focusable to act on.
+            queryHint.addEventListener("keydown", (ev) => {
+                if (ev.key !== "Enter" && ev.key !== " ") return;
+                ev.preventDefault();
+                queryHint.click();
+            });
+            document.addEventListener("click", (ev) => {
+                if (queryHintPinned && !queryHint.contains(ev.target) && !queryHintPreview.contains(ev.target)) closeQueryHintPreviewNow();
+            });
+            window.addEventListener("resize", () => { if (queryHintPreview.classList.contains("dt-query-hint-preview-open")) positionQueryHintPreview(); });
+
             const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
             const OPENROUTER_KEY = process.env.OPENROUTER_KEY; // injected at build time from .env — see webpack.config.js
 
@@ -2907,6 +3023,11 @@ function applyRibbonView() {
                     + "Only one statement is ever executed, as-is: never use DECLARE, SET, dynamic SQL, or "
                     + "EXEC/sp_executesql. A table with no REAL COLUMNS block (0 columns found) has no real "
                     + "backing SQL object — don't guess a column.\n\n"
+                    + "Never use a CTE (a \"WITH x AS (...)\" clause) — the query you write is executed inside an "
+                    + "outer row-capping wrapper, and a leading WITH is not valid there. Whenever you'd otherwise "
+                    + "reach for a CTE (computing something once to reuse it, or pivoting rows into columns), nest "
+                    + "that same logic as a derived table in the FROM clause instead (\"SELECT ... FROM (SELECT "
+                    + "...) AS alias\"), which works identically and is always safe to nest.\n\n"
                     + "Join tables via their shared identifier columns (usually fincode). If the request can't "
                     + "actually be answered from these columns, say so — don't guess.\n\n"
                     + "When filtering by a company's (or any entity's) NAME, match it with LIKE '%name%', never a "
@@ -3011,15 +3132,20 @@ function applyRibbonView() {
                     + "the refresh request explicitly asks for forecast/consensus estimates or a future fiscal "
                     + "year.\n\n"
                     + "You will ONLY ever submit ONE statement, which is executed as-is: NEVER use DECLARE, SET, "
-                    + "dynamic SQL, or EXEC/sp_executesql — those are rejected outright before execution. If you "
-                    + "touch a numeric comparison, ORDER BY, or cast (adjusting a TOP N count or a date/period "
-                    + "filter often does), keep using TRY_CAST/TRY_CONVERT, never a plain CAST/CONVERT — many "
-                    + "numeric-looking columns here are stored as text with a non-numeric placeholder (e.g. \"-\") "
-                    + "for missing data, and a plain CAST throws a hard error on that row instead of just treating "
-                    + "it as NULL. If the adjustment touches \"the latest/most recent period\" for a multi-entity "
-                    + "table (e.g. each company), remember that's usually a PER-ENTITY notion, not one shared "
-                    + "across every row — different companies report on their own schedules — so that lookup "
-                    + "should stay scoped to the SAME entity the surrounding row is about, never a single "
+                    + "dynamic SQL, or EXEC/sp_executesql — those are rejected outright before execution. NEVER "
+                    + "use a CTE (a \"WITH x AS (...)\" clause) either — the query is executed inside an outer "
+                    + "row-capping wrapper, and a leading WITH is not valid there. This matters most exactly when "
+                    + "a refresh request asks to reshape the table (e.g. \"move period into columns\", \"pivot "
+                    + "companies into columns\") — reach for a derived table in the FROM clause instead (\"SELECT "
+                    + "... FROM (SELECT ...) AS alias\"), which gives the identical result and is always safe to "
+                    + "nest. If you touch a numeric comparison, ORDER BY, or cast (adjusting a TOP N count or a "
+                    + "date/period filter often does), keep using TRY_CAST/TRY_CONVERT, never a plain CAST/CONVERT "
+                    + "— many numeric-looking columns here are stored as text with a non-numeric placeholder (e.g. "
+                    + "\"-\") for missing data, and a plain CAST throws a hard error on that row instead of just "
+                    + "treating it as NULL. If the adjustment touches \"the latest/most recent period\" for a "
+                    + "multi-entity table (e.g. each company), remember that's usually a PER-ENTITY notion, not "
+                    + "one shared across every row — different companies report on their own schedules — so that "
+                    + "lookup should stay scoped to the SAME entity the surrounding row is about, never a single "
                     + "ungrouped aggregate applied uniformly to everyone.\n\n"
                     + "Also update the title and the one-sentence description to reflect the refreshed scope — same "
                     + "conventions as before: the description reads naturally and covers both which company/companies "
@@ -3081,7 +3207,10 @@ function applyRibbonView() {
                     + "they're actually displayed in the sheet right now) may be given below — use it to ground "
                     + "what the existing columns/values actually look like.\n\n"
                     + "You will ONLY ever submit ONE statement, which is executed as-is: NEVER use DECLARE, SET, "
-                    + "dynamic SQL, or EXEC/sp_executesql. Many numeric-looking columns here are stored as text "
+                    + "dynamic SQL, or EXEC/sp_executesql. NEVER use a CTE (a \"WITH x AS (...)\" clause) either "
+                    + "— the query is executed inside an outer row-capping wrapper, and a leading WITH is not "
+                    + "valid there; nest a derived table in the FROM clause instead (\"SELECT ... FROM (SELECT "
+                    + "...) AS alias\") for the same effect. Many numeric-looking columns here are stored as text "
                     + "with a non-numeric placeholder (e.g. \"-\") for missing data — use TRY_CAST/TRY_CONVERT for "
                     + "any numeric comparison or cast you add, never a plain CAST/CONVERT, which throws a hard "
                     + "error on that row instead of just treating it as NULL. If the new column's \"latest period\" "
@@ -3185,7 +3314,10 @@ function applyRibbonView() {
                     + "than the current fiscal year — that's exactly why this must be resolved per-entity against "
                     + "real data in SQL, never asserted as a specific year here.\n\n"
                     + "You will ONLY ever submit ONE statement, which is executed as-is: NEVER use DECLARE, SET, "
-                    + "dynamic SQL, or EXEC/sp_executesql. Keep using TRY_CAST/TRY_CONVERT (never a plain "
+                    + "dynamic SQL, or EXEC/sp_executesql. NEVER use a CTE (a \"WITH x AS (...)\" clause) either "
+                    + "— the query is executed inside an outer row-capping wrapper, and a leading WITH is not "
+                    + "valid there; nest a derived table in the FROM clause instead (\"SELECT ... FROM (SELECT "
+                    + "...) AS alias\") if you need one. Keep using TRY_CAST/TRY_CONVERT (never a plain "
                     + "CAST/CONVERT) anywhere you touch a numeric comparison — many numeric-looking columns here "
                     + "are stored as text with a non-numeric placeholder for missing data.\n\n"
                     + "A plain refresh doesn't change what a table is ABOUT, but it can easily make the "
@@ -3506,6 +3638,44 @@ function applyRibbonView() {
                     // just proceeds through Download exactly as it always has.
                     console.warn("[QueryData] intent triage failed, proceeding as a download:", e.message);
                     return "download";
+                }
+            };
+
+            // Same triage idea as classifyQueryDataIntent above, for the OTHER free-text entry
+            // point — the per-table Edit box ("Apply change") — but with the opposite framing. That
+            // one asks "does this belong here at all, or does it actually need DataGPT's broader
+            // reach" for a box that can only ever build something NEW. This one's box does the
+            // opposite: it can only ever REWRITE the one table it's already attached to (companies/
+            // metrics/periods/columns), via refreshSqlFromPrevious's own live SQL+sample-rows
+            // context — so "modify something that already exists" is exactly the NORMAL case here,
+            // not a mismatch. What doesn't belong is an instruction about something ELSE in the
+            // workbook (a different table, a cell, a formula, a chart, a model) or a general
+            // question unrelated to this table's own query — refreshSqlFromPrevious has no way to
+            // act on any of that and would otherwise either decline outright or (worse) try to force
+            // it into a SQL rewrite that doesn't actually answer what was asked.
+            const classifyTableEditIntent = async (instruction) => {
+                const systemPrompt = "This box can ONLY rewrite the query behind ONE already-existing result "
+                    + "table — which companies/metrics/periods it shows, its columns (add/rename/remove). It "
+                    + "cannot touch anything ELSE in the workbook (a different table, a cell, a formula, a "
+                    + "chart, a model) and cannot answer a general question — DataGPT is the assistant for "
+                    + "that, since it can see and edit the whole sheet.\n\n"
+                    + "Classify the instruction into exactly one of:\n"
+                    + "- \"edit\": a change to THIS table's own data — its companies, metrics, periods, or "
+                    + "columns (add/rename/remove one). The normal case — assume this unless the instruction "
+                    + "clearly names something else.\n"
+                    + "- \"other\": about something ELSE in the workbook (a different table, a cell, a "
+                    + "formula, a chart, a model) — OR a general question/request with no real connection to "
+                    + "changing this table's own companies/metrics/periods/columns.\n\n"
+                    + "Return STRICT JSON, nothing else, no markdown fences: {\"intent\": \"edit\"|\"other\"}";
+                try {
+                    const result = await callQueryDataLLM("Table-edit intent triage", systemPrompt, instruction, 30, QD_INTENT_CLASSIFIER_MODEL, "minimal");
+                    return result && result.intent === "other" ? "other" : "edit";
+                } catch (e) {
+                    // Same rule as classifyQueryDataIntent's own catch — a classifier hiccup must
+                    // never block the real feature, so an unclassified instruction just proceeds
+                    // through the ordinary table-edit path exactly as it always has.
+                    console.warn("[QueryData] table-edit intent triage failed, proceeding as an edit:", e.message);
+                    return "edit";
                 }
             };
 
@@ -4338,19 +4508,15 @@ function applyRibbonView() {
             // Triggers a browser download of the trace — the only way a web page can "create a
             // local file" at all, same mechanism DataGPT's own /log auto-save already uses
             // (saveDebugText there). One file per question, named from the question itself.
+            // Download disabled for production — this used to auto-download a
+            // "querydata-<question>-<timestamp>.txt" file on every single Query Data operation
+            // (generate, refresh, add columns, combined edit, …). That was a dev-only debugging aid
+            // (used throughout this session to diagnose live SQL-generation bugs from the exact
+            // trace it captured) never meant to ship — a real user has no reason to have debug files
+            // silently landing in their Downloads folder. Still logged to the console (never written
+            // to disk) so a trace remains recoverable via devtools if a live issue ever needs one.
             const saveQueryDataTrace = (text, userQuery) => {
-                try {
-                    const url = URL.createObjectURL(new Blob([text], { type: "text/plain;charset=utf-8" }));
-                    const a = document.createElement("a");
-                    a.href = url;
-                    const slug = userQuery.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 50) || "question";
-                    a.download = `querydata-${slug}-${new Date().toISOString().replace(/[:.]/g, "-")}.txt`;
-                    document.body.appendChild(a); a.click(); a.remove();
-                    setTimeout(() => URL.revokeObjectURL(url), 5000);
-                } catch (e) {
-                    console.warn("[QueryData] trace download blocked, printing instead:", e);
-                    console.log(text);
-                }
+                console.log(`[QueryData trace] ${userQuery}\n${text}`);
             };
 
             // Escapes text pulled from the query result (column names) before it goes into any
@@ -4369,23 +4535,13 @@ function applyRibbonView() {
             let gridSelectionPollTimer = null;
             let gridQueryModeActive = false; // true while the textarea is swapped for the selection preview
             let cachedGridQueryText = null; // the synthesized request text generateBtn uses when active
-            let cachedGridSelectionAnchor = null; // {sheetName, row, col} of the detected selection's top-left — frozen into gridAnchor at Download-click time
+            let cachedGridSelectionAnchor = null; // {sheetName, row, col, rows, cols} — the detected selection's top-left + full extent — frozen into gridAnchor at Download-click time
             let cachedGridTextRows = null; // the raw 2D cell text — what the code-side skeleton resolver (below) classifies, cell by cell
             let lastSeenGridSelectionAddress = undefined; // undefined = never checked yet; "" counts as a real "no address" result
             let gridQueryUserOverride = false; // true after "Type a request instead", until the selection actually changes again
             const GRID_SELECTION_MAX_CELLS = 500;
             const GRID_SELECTION_MAX_ROWS = 20;
             const GRID_SELECTION_MAX_COLS = 10;
-            // The Download Data tutorial's own demo skeleton (see dtTutorialSteps further down)
-            // writes a few sample cells onto a blank spot it finds and selects them — the ALREADY-
-            // RUNNING poll above (checkGridSelectionOnce) picks that selection up on its own, no
-            // different from a real one. Tracked here, not scoped inside the tutorial block itself,
-            // because generateBtn's own click handler needs to null it out the instant a REAL
-            // download consumes that same spot (see its own comment there) — otherwise closing the
-            // tutorial afterward would clear cells that are no longer the demo, they're the user's
-            // actual result.
-            let dtTutorialDemoLocation = null; // {sheetName, row, col, rows, cols} | null
-
             const exitGridQueryMode = () => {
                 gridQueryModeActive = false;
                 cachedGridQueryText = null;
@@ -4535,13 +4691,19 @@ function applyRibbonView() {
                     // long as the user hasn't actually picked a different selection.
                     const gridText = textRows.map((row) => row.join(" | ")).join("\n");
                     cachedGridQueryText = describeGridSelectionAsQuery(address, gridText);
-                    cachedGridSelectionAnchor = { sheetName, row: rowIndex + 1, col: colIndex + 1 };
+                    // rows/cols (the FULL selected skeleton's own extent) ride along here too — not
+                    // just its top-left — so the write path below can clear the whole thing before
+                    // writing the real result into it, rather than only whatever cells the actual
+                    // (possibly narrower/shorter) result happens to overwrite. See the comment where
+                    // this is used, at generateBtn's own click handler.
+                    cachedGridSelectionAnchor = { sheetName, row: rowIndex + 1, col: colIndex + 1, rows: rowCount, cols: columnCount };
                     cachedGridTextRows = textRows;
                     gridQueryModeActive = true;
                     renderGridSelectionPreview(address, rowIndex, colIndex, textRows);
                     selectionField.style.display = "flex";
                     queryField.style.display = "none";
                     queryHint.style.display = "none";
+                    closeQueryHintPreviewNow(); // no dangling-open popover once its own trigger is hidden
                 } catch (e) {
                     console.warn("[QueryData] couldn't read the current selection for grid-query detection:", e.message);
                 } finally {
@@ -4568,11 +4730,16 @@ function applyRibbonView() {
             // (neither pauses when its own tab isn't the active one — see switchDtTab), a separate
             // dedicated poll rather than overloading checkGridSelectionOnce (which is purpose-built
             // for the Download composer's build-a-query-from-a-selection feature and carries a lot
-            // of logic irrelevant here). Gives the matching table a focus-ring highlight + eyebrow
-            // label AND floats it to the top of the list (see renderYourTablesList) — so it's the
-            // first thing visible the moment the user switches to the Your Tables tab, with no
-            // scrolling needed. The highlight is left as-is once the selection moves to a cell
-            // outside any known table, only moving again once a DIFFERENT table's cell is selected.
+            // of logic irrelevant here). Selecting ANY cell inside a known table auto-switches to
+            // the Your Tables tab if Download Data is the one currently showing — same "don't make
+            // the user go find it" reasoning notifyPendingChangeDetected already applies for a
+            // detected EDIT, just triggered by selection instead. Also gives the matching table a
+            // focus-ring highlight + eyebrow label AND floats it to the top of the list (see
+            // renderYourTablesList) — so it's the first thing visible, with no scrolling needed.
+            // That highlight part is left as-is once the selection moves to a cell outside any known
+            // table, only moving again once a DIFFERENT table's cell is selected — but the tab
+            // switch itself re-fires any time a table cell is selected while NOT already on that
+            // tab, even re-selecting the same table after manually switching back to Download Data.
             let ytSelectionPollTimer = null;
             let lastSeenYtSelectionKey = undefined; // undefined = never checked yet
             let ytSelectionPollInFlight = false;
@@ -4608,14 +4775,22 @@ function applyRibbonView() {
                     const found = lastScannedTables.find((t) =>
                         t.sheetName === sheetName && row >= t.titleRow && row < t.titleRow + t.metaRows + t.tableRows
                         && col >= t.titleCol && col < t.titleCol + Math.max(1, t.tableCols));
-                    if (found && tableWatchKey(found) !== highlightedTableKey) {
-                        highlightedTableKey = tableWatchKey(found);
-                        await renderYourTablesList(lastScannedTables);
-                        // The newly-selected card is now the FIRST row (see renderYourTablesList) —
-                        // scroll the list itself back to the top rather than scrollIntoView on the
-                        // card, since that card's own position already guarantees it's there; this
-                        // only matters if the user had scrolled further down before selecting it.
-                        yourTablesList.scrollTop = 0;
+                    if (found) {
+                        // Selecting a cell that belongs to a table is as much a reason to see Your
+                        // Tables as an actual edit already is (see notifyPendingChangeDetected's own
+                        // switchDtTab call) — not gated on tableWatchKey below, since re-selecting the
+                        // SAME table after having switched back to Download Data in the meantime
+                        // should still switch over again.
+                        if (activeDtTab !== "yourtables") switchDtTab("yourtables");
+                        if (tableWatchKey(found) !== highlightedTableKey) {
+                            highlightedTableKey = tableWatchKey(found);
+                            await renderYourTablesList(lastScannedTables);
+                            // The newly-selected card is now the FIRST row (see renderYourTablesList) —
+                            // scroll the list itself back to the top rather than scrollIntoView on the
+                            // card, since that card's own position already guarantees it's there; this
+                            // only matters if the user had scrolled further down before selecting it.
+                            yourTablesList.scrollTop = 0;
+                        }
                     }
                 } catch (e) {
                     console.warn("[QueryData] couldn't read the current selection for the Your Tables highlight:", e.message);
@@ -5322,18 +5497,26 @@ function applyRibbonView() {
                         // the usual "must be blank" requirement is deliberately skipped here.
                         writeTarget = gridAnchor;
                         overwriteNote = " (overwrote the table you selected)";
+                        // Clear the user's FULL original skeleton rectangle first — not just
+                        // whatever cells the real result happens to need. Confirmed live
+                        // 2026-10-28: a skeleton drawn wider than the table that actually got
+                        // generated (e.g. its header row listed more period columns than the query
+                        // ended up using) left its own unused header cells behind, never cleared,
+                        // sitting right next to the real table. A LATER refresh that legitimately
+                        // needed to grow back into that same space then saw that leftover text as
+                        // real content and shifted the whole table away to avoid it — surprising,
+                        // since nothing the user actually cared about was ever really in the way.
+                        // gridAnchor.rows/cols (the selection's own full extent) only exist for a
+                        // grid-selection anchor, never a plain cell/blank-block one, so this can't
+                        // run for those.
+                        if (gridAnchor.rows && gridAnchor.cols) {
+                            await clearTableBlock(gridAnchor.sheetName, gridAnchor.row - 1, gridAnchor.col - 1, gridAnchor.rows, gridAnchor.cols);
+                        }
                     } else {
                         const block = (await getSelectedCellAnchor(neededRows, neededCols)) || (await findFirstBlankBlock(neededRows, neededCols));
                         writeTarget = { sheetName: block.sheetName, row: block.row, col: block.col };
                     }
                     const sheetName = await writeDownloadedTableToSheet(data, writeTarget, singleCompanyInfo);
-                    // A real result just got written — if this was the tutorial's own demo
-                    // skeleton (its anchor cell IS gridAnchor when usingGridSelection is true), that
-                    // area is no longer a disposable demo, it's the user's actual table. Drop the
-                    // tracking unconditionally (harmless even when it wasn't the demo at all) so
-                    // closing the tutorial afterward never clears real data — see
-                    // dtTutorialDemoLocation's own comment.
-                    dtTutorialDemoLocation = null;
                     const whereText = `"${sheetName}" at ${blockAddress(writeTarget.row, writeTarget.col, neededRows, neededCols)}${overwriteNote}`;
                     let msg = `Downloaded ${data.row_count.toLocaleString()} row${data.row_count === 1 ? "" : "s"} to ${whereText}.`;
                     if (data.truncated) msg += ` Stopped at this query's ${data.limit.toLocaleString()}-row limit — more rows exist.`;
@@ -5363,202 +5546,6 @@ function applyRibbonView() {
                     flushQueryDataCost(userQuery);
                 }
             });
-
-            // ── Download Data tutorial ──
-            // A floating, non-blocking walkthrough (see #dtTutorialPanel's own CSS/HTML comments
-            // for why it's deliberately NOT one of this file's .dz-overlay modals) — Download Data
-            // only, for now; Your Tables has its own separate one below. Covers the skeleton-table
-            // method only — typing a question into the textarea is left out on purpose (it's
-            // intuitive enough not to need a walkthrough). Steps are plain Next/Previous, but one
-            // of them actually DOES the thing it's describing rather than just talking about it:
-            // writing+selecting a tiny real skeleton table on the sheet so the ALREADY-RUNNING
-            // grid-selection poll (checkGridSelectionOnce, started above) picks it up and shows the
-            // live preview on its own — no special-casing needed in that code path, a
-            // tutorial-driven selection is indistinguishable from a real one.
-            {
-                const tutorialBtn = document.getElementById("dtTutorialBtn");
-                const tutorialPanel = document.getElementById("dtTutorialPanel");
-                const tutorialStepLabel = document.getElementById("dtTutorialStepLabel");
-                const tutorialX = document.getElementById("dtTutorialX");
-                const tutorialBody = document.getElementById("dtTutorialBody");
-                const tutorialPrev = document.getElementById("dtTutorialPrev");
-                const tutorialNext = document.getElementById("dtTutorialNext");
-                const tutorialFooterEl = document.getElementById("dtDownloadFooter");
-                const tutorialBodyContainer = document.getElementById("dtDownloadBody");
-                if (tutorialBtn && tutorialPanel && tutorialStepLabel && tutorialX && tutorialBody
-                    && tutorialPrev && tutorialNext) {
-                    const DT_TUTORIAL_DEMO_COMPANY = "Reliance Industries Ltd.";
-                    const DT_TUTORIAL_DEMO_METRICS = ["Revenue", "EBITDA"];
-                    const DT_TUTORIAL_DEMO_PERIOD = "2025";
-
-                    let tutorialStepIndex = 0;
-                    let tutorialTransitioning = false;
-
-                    // Writes a tiny real skeleton — company name, metric names as headers, a period,
-                    // blank cells where results would go — then selects it. Location is remembered
-                    // on dtTutorialDemoLocation so closing the tutorial can clear exactly those cells
-                    // and nothing else — see that variable's own comment for why a real download in
-                    // the meantime makes this a no-op instead.
-                    //
-                    // Deliberately NOT findFirstBlankBlock (what a real download uses) — that does a
-                    // full values scan for the first internal gap, which costs a 2nd context.sync()
-                    // round trip (~0.8s in Excel for the web) on top of the one the write itself
-                    // already needs, and a 3rd round trip just to watch a throwaway demo render was
-                    // the "very very slow" the tutorial was flagged for. Appending one blank row below
-                    // everything already on the sheet needs only rowCount, not the actual cell
-                    // values, so this gets the same "never overwrites real content" guarantee in one
-                    // fewer round trip — and it's arguably clearer for the user besides, landing right
-                    // under whatever they already have rather than in some gap mid-sheet.
-                    const tutorialWriteDemoSkeleton = async () => {
-                        const neededCols = 1 + DT_TUTORIAL_DEMO_METRICS.length;
-                        const values = [
-                            [DT_TUTORIAL_DEMO_COMPANY, ...DT_TUTORIAL_DEMO_METRICS],
-                            [DT_TUTORIAL_DEMO_PERIOD, ...DT_TUTORIAL_DEMO_METRICS.map(() => "")],
-                        ];
-                        await Excel.run(async (context) => {
-                            const sheet = context.workbook.worksheets.getActiveWorksheet();
-                            sheet.load("name");
-                            const usedRange = sheet.getUsedRangeOrNullObject();
-                            usedRange.load("rowCount,isNullObject");
-                            await context.sync();
-
-                            const row = usedRange.isNullObject ? 0 : usedRange.rowCount + 1; // +1 blank row gap below existing content
-                            const range = sheet.getRangeByIndexes(row, 0, 2, neededCols);
-                            range.values = values;
-                            range.select();
-                            await context.sync();
-                            dtTutorialDemoLocation = { sheetName: sheet.name, row: row + 1, col: 1, rows: 2, cols: neededCols };
-                        });
-                    };
-                    // Best-effort — a sheet renamed/deleted mid-tutorial, or any other failure here,
-                    // just leaves those cells behind rather than blocking the tutorial from closing.
-                    const tutorialCleanupDemo = async () => {
-                        if (!dtTutorialDemoLocation) return;
-                        const loc = dtTutorialDemoLocation;
-                        dtTutorialDemoLocation = null;
-                        try {
-                            await Excel.run(async (context) => {
-                                const sheet = context.workbook.worksheets.getItemOrNullObject(loc.sheetName);
-                                sheet.load("isNullObject");
-                                await context.sync();
-                                if (sheet.isNullObject) return;
-                                sheet.getRangeByIndexes(loc.row - 1, loc.col - 1, loc.rows, loc.cols).clear(Excel.ClearApplyTo.contents);
-                                await context.sync();
-                            });
-                        } catch (e) {
-                            console.warn("[QueryData] tutorial: couldn't clear the demo skeleton cells:", e.message);
-                        }
-                        if (gridQueryModeActive) exitGridQueryMode();
-                    };
-                    // Common starting point every step's onEnter below builds on — drops any demo-
-                    // driven selection-preview mode back to plain text input and un-highlights the
-                    // Download button, so stepping BACKWARD never leaves a later step's UI state
-                    // sitting behind an earlier step's own instructions.
-                    const tutorialResetUiState = () => {
-                        if (gridQueryModeActive) exitGridQueryMode();
-                        generateBtn.classList.remove("dt-tutorial-spotlight");
-                        document.getElementById("dtTabYourTables")?.classList.remove("dt-tutorial-spotlight");
-                    };
-
-                    // The panel is anchored bottom-right (see .dt-tutorial-panel's own CSS — "bottom:
-                    // 12px", kept in sync with PANEL_BOTTOM_OFFSET below) so it visibly grows out of
-                    // the Tutorial button. That's fine when the window is tall, but in a shorter task
-                    // pane the panel's own content can need more height than there's room for between
-                    // its bottom anchor and the real Download button sitting near the top of this same
-                    // compact composer — overlapping the very button a later step spotlights. Rather
-                    // than guess a fixed height that works for one window size, this measures the
-                    // ACTUAL gap (the footer's real position vs. the container's) every time a step
-                    // renders and clamps the panel to fit inside it, scrolling its body internally
-                    // (.dt-tutorial-body's own overflow-y: auto) instead of growing past the footer.
-                    const PANEL_BOTTOM_OFFSET = 12;
-                    const tutorialClampPanelHeight = () => {
-                        if (!tutorialFooterEl || !tutorialBodyContainer) return;
-                        const footerRect = tutorialFooterEl.getBoundingClientRect();
-                        const containerRect = tutorialBodyContainer.getBoundingClientRect();
-                        const gap = 10;
-                        const available = containerRect.bottom - PANEL_BOTTOM_OFFSET - (footerRect.bottom + gap);
-                        tutorialPanel.style.maxHeight = `${Math.max(120, available)}px`;
-                    };
-
-                    const tutorialSteps = [
-                        {
-                            html: "<p>Download Data can also read a small skeleton you lay out right in the sheet — a company name, metric names as headers, and a period below it.</p>"
-                                + "<p>Writing one for you now — watch the sheet:</p>",
-                            onEnter: async () => { tutorialResetUiState(); await tutorialWriteDemoSkeleton(); },
-                        },
-                        {
-                            html: "<p>That preview is GoIndia reading your selection live. Click <b>Download</b> to pull the real data — the same button works for any selection laid out this way.</p>",
-                            onEnter: () => {
-                                // Clears the NEXT step's own spotlight, not this one's — needed when
-                                // stepping BACKWARD from it, since this step doesn't otherwise call
-                                // tutorialResetUiState (deliberately, so it keeps showing exactly
-                                // what step 1 just set up on the sheet).
-                                document.getElementById("dtTabYourTables")?.classList.remove("dt-tutorial-spotlight");
-                                generateBtn.classList.add("dt-tutorial-spotlight");
-                            },
-                        },
-                        {
-                            html: "<p>That's Download Data. Now that your tables are ready, head over to <b>Your Tables</b> to manage them — refresh, edit, or update any table you've created, any time.</p>",
-                            onEnter: () => {
-                                generateBtn.classList.remove("dt-tutorial-spotlight");
-                                const yourTablesTabBtn = document.getElementById("dtTabYourTables");
-                                if (yourTablesTabBtn) yourTablesTabBtn.classList.add("dt-tutorial-spotlight");
-                            },
-                        },
-                    ];
-
-                    const tutorialRenderStep = async () => {
-                        const step = tutorialSteps[tutorialStepIndex];
-                        tutorialStepLabel.textContent = `Step ${tutorialStepIndex + 1} of ${tutorialSteps.length}`;
-                        tutorialBody.innerHTML = step.html;
-                        tutorialPrev.disabled = tutorialStepIndex === 0;
-                        tutorialNext.querySelector("span").textContent = tutorialStepIndex === tutorialSteps.length - 1 ? "Finish" : "Next";
-                        tutorialClampPanelHeight();
-                        if (step.onEnter) await step.onEnter();
-                    };
-                    const tutorialGoToStep = async (newIndex) => {
-                        if (tutorialTransitioning || newIndex < 0 || newIndex >= tutorialSteps.length) return;
-                        tutorialTransitioning = true;
-                        tutorialPrev.disabled = true; tutorialNext.disabled = true;
-                        try {
-                            tutorialStepIndex = newIndex;
-                            await tutorialRenderStep();
-                        } finally {
-                            tutorialTransitioning = false;
-                            tutorialPrev.disabled = tutorialStepIndex === 0;
-                            tutorialNext.disabled = false;
-                        }
-                    };
-                    const tutorialClose = async () => {
-                        tutorialPanel.classList.remove("dt-tutorial-panel-open");
-                        // Matches the CSS transition's own duration (.16s) — waits for the
-                        // shrink-back-into-the-button animation to actually finish before removing
-                        // the panel from flow, rather than cutting it off mid-transition.
-                        setTimeout(() => { tutorialPanel.style.display = "none"; }, 170);
-                        tutorialBtn.style.display = "";
-                        generateBtn.classList.remove("dt-tutorial-spotlight");
-                        document.getElementById("dtTabYourTables")?.classList.remove("dt-tutorial-spotlight");
-                        await tutorialCleanupDemo();
-                    };
-
-                    tutorialBtn.addEventListener("click", async () => {
-                        tutorialBtn.style.display = "none";
-                        tutorialPanel.style.display = "flex";
-                        // Two-step open (display first, the transition-triggering class one frame
-                        // later) — same reason .dt-yt-refresh-form-open/-visible needs it elsewhere
-                        // in this file: display itself can't be transitioned.
-                        requestAnimationFrame(() => tutorialPanel.classList.add("dt-tutorial-panel-open"));
-                        tutorialStepIndex = 0;
-                        await tutorialRenderStep();
-                    });
-                    tutorialNext.addEventListener("click", async () => {
-                        if (tutorialStepIndex === tutorialSteps.length - 1) { await tutorialClose(); return; }
-                        await tutorialGoToStep(tutorialStepIndex + 1);
-                    });
-                    tutorialPrev.addEventListener("click", () => tutorialGoToStep(tutorialStepIndex - 1));
-                    tutorialX.addEventListener("click", () => tutorialClose());
-                }
-            }
 
             // ── "Your Tables" — on-demand workbook scan ──
             // Walks every worksheet's comments looking for one containing
@@ -6164,7 +6151,21 @@ function applyRibbonView() {
                     }
 
                     statusEl.textContent = "Writing the refreshed table…";
-                    await clearTableBlock(entry.sheetName, entry.titleRow, entry.titleCol, entry.metaRows + entry.tableRows, entry.tableCols);
+                    // Clears AT LEAST as far as wouldRefreshOverwriteOtherContent's own
+                    // ignoreHeaderRow/ignoreDataRowsBelow exemption already promises is safe — the
+                    // user's own just-typed header label or new period row, past the OLD footprint
+                    // this would otherwise stop at. Previously relied entirely on the write below
+                    // happening to reach that far on its own, which fails exactly when it doesn't:
+                    // confirmed live 2026-10-29 — a combined edit (new column AND a new period row,
+                    // both typed directly into the sheet at once) resolved correctly, but the new
+                    // period (2024) turned out to have no actual data for this company, so the
+                    // query came back with the SAME row count as before (2) — the new write never
+                    // extended down into the row the user had typed "2024" into, leaving that text
+                    // sitting there uncleared, below the real (correctly refreshed) table, looking
+                    // exactly like a genuine third row that silently failed to populate.
+                    const clearRows = entry.metaRows + entry.tableRows + (ignoreDataRowsBelow ? QD_DATA_ROW_WATCH_EXTRA_ROWS : 0);
+                    const clearCols = entry.tableCols + (ignoreHeaderRow ? QD_HEADER_WATCH_EXTRA_COLS : 0);
+                    await clearTableBlock(entry.sheetName, entry.titleRow, entry.titleCol, clearRows, clearCols);
                     const sheetName = await writeDownloadedTableToSheet(data, writeTarget, singleCompanyInfo);
                     const rangeAddr = blockAddress(writeTarget.row, writeTarget.col, newTotalRows, newTotalCols);
                     const whereText = `"${sheetName}" at ${rangeAddr}`;
@@ -7415,15 +7416,34 @@ function applyRibbonView() {
             // all it risks is the pending label flickering through an intermediate value while
             // someone is still actively typing, which is harmless.
             //
+            // Was 1200ms, lowered to 700ms then 400ms — confirmed live 2026-10-29: the header-row
+            // watcher and the data-row watcher each track their OWN pendingXSince timestamp
+            // independently (see pollTableMetaEdits below), starting the countdown the moment THAT
+            // one cell stabilizes. Typing a new header, then a few seconds later typing a new period
+            // into the row below it (two edits, same sitting, same intent), lets the header's
+            // debounce finish well before the period's — the Update bar correctly shows "New column
+            // added" alone for however long that gap lasts, since the second edit genuinely hasn't
+            // stabilized yet, and a click landing in that window applies the header-only change,
+            // never getting a chance to also pick up the still-debouncing period. A shorter debounce
+            // narrows that gap without weakening anything (per the comment above, a short debounce
+            // was already established as safe) — it can't close the gap to zero against an inherently
+            // sequential edit (nothing can know about a change before it's been typed), but it
+            // meaningfully shrinks the window a user who types both edits in quick succession can
+            // click through. 400ms is close to the floor worth chasing on THIS knob alone — once it's
+            // below the poll interval below, the interval (not the debounce) is what actually bounds
+            // how soon an already-stable change gets noticed; see that constant's own comment for why
+            // IT can't safely come down too.
+            //
             // The poll interval, however, was 250ms, on the reasoning that
             // pollTableMetaEditsInFlight already prevents two ticks overlapping so a short interval
             // "just no-ops" — which was true but missed the real cost: it meant this poll ran
             // essentially BACK-TO-BACK, permanently occupying Office.js's single request channel
             // with one ~0.8s round trip after another for as long as any table existed. Everything
             // else the user did then had to take its turn behind it. 900ms still surfaces a pending
-            // change well inside the 1200ms debounce window it's feeding (the debounce, not this
-            // interval, is what decides when a change appears), at roughly a third of the traffic.
-            const QD_META_EDIT_DEBOUNCE_MS = 1200;
+            // change well inside the debounce window it's feeding (the debounce, not this interval,
+            // is what decides when a change appears), at roughly a third of the traffic — left
+            // unchanged by both debounce reductions above for exactly that reason.
+            const QD_META_EDIT_DEBOUNCE_MS = 400;
             const QD_META_EDIT_POLL_MS = 900;
             // How many blank cells past the table's current last column also get watched, so typing
             // a brand-new header (not just editing an existing one) is caught too. Columns beyond
@@ -9024,7 +9044,21 @@ function applyRibbonView() {
                         const instruction = input.value.trim();
                         if (!instruction) { input.focus(); return; }
                         btn.disabled = true;
-                        runTableRefresh(entry, instruction, statusEl).finally(() => { btn.disabled = false; });
+                        statusEl.style.display = "block";
+                        statusEl.textContent = "Checking the best way to handle this…";
+                        // Same intent-triage pattern the Download box's typed request already runs
+                        // (see classifyQueryDataIntent) — classifyTableEditIntent's own comment has
+                        // the reasoning for why this one's "normal case" is flipped. Wrapped in its
+                        // own async IIFE since this click handler itself isn't async.
+                        (async () => {
+                            const intent = await classifyTableEditIntent(instruction);
+                            if (intent === "other") {
+                                closeEditPanel(item, entry);
+                                await delegateToDataGpt(instruction);
+                                return; // the page is about to navigate to the "datagpt" view
+                            }
+                            await runTableRefresh(entry, instruction, statusEl);
+                        })().finally(() => { btn.disabled = false; });
                     } else if (btn.classList.contains("dt-yt-desc-toggle-btn")) {
                         const descEl = item.querySelector(".dt-yt-item-desc-clamped");
                         const expanded = descEl.classList.toggle("dt-yt-item-desc-expanded");
@@ -9070,243 +9104,77 @@ function applyRibbonView() {
             });
 
             // ── Your Tables tutorial ──
-            // Same floating, non-blocking shell as the Download Data tutorial (see its own HTML/CSS
-            // comments for why — no dark backdrop, the sheet/list stay fully usable throughout).
-            // This one walks through editing an EXISTING table, so it needs one to work with —
-            // rather than touch a real table of the user's own, it creates a disposable sample on
-            // its OWN temporary sheet (clearly labeled as a sample in its own title/description) the
-            // moment it opens, and deletes that whole sheet the moment it closes. Every action
-            // against it — clicking the pencil, typing a header, clicking Update/Refresh — goes
-            // through the EXACT same real code this file already has (dispatching real .click()s on
-            // the real buttons, writing real cells the real poll below already watches); nothing
-            // here is a separate mocked-up code path.
+            // Same floating, non-blocking shell as the Download Data tutorial used (see its own old
+            // HTML/CSS comments, now removed, for why — no dark backdrop, the sheet/list stay fully
+            // usable throughout). Used to walk through editing an EXISTING table live, via a
+            // disposable sample it created on its own temporary sheet and deleted on close — every
+            // step dispatched real .click()s/wrote real cells the real poll already watches, nothing
+            // mocked up. Replaced with a recorded walkthrough (#dtYtTutorialVideo) instead: the real
+            // live-demo mechanism (create/locate/clean up a sample sheet, write a header/period cell,
+            // poll pollTableMetaEdits' own watch state for it to be detected, spotlight the right
+            // button) added real Excel round trips and genuine wait time just to show something a
+            // short video already demonstrates instantly, with no workbook side effects at all.
             {
                 const ytTutorialBtn = document.getElementById("dtYtTutorialBtn");
                 const ytTutorialPanel = document.getElementById("dtYtTutorialPanel");
                 const ytTutorialStepLabel = document.getElementById("dtYtTutorialStepLabel");
                 const ytTutorialX = document.getElementById("dtYtTutorialX");
+                const ytTutorialVideo = document.getElementById("dtYtTutorialVideo");
                 const ytTutorialBody = document.getElementById("dtYtTutorialBody");
                 const ytTutorialPrev = document.getElementById("dtYtTutorialPrev");
                 const ytTutorialNext = document.getElementById("dtYtTutorialNext");
-                if (ytTutorialBtn && ytTutorialPanel && ytTutorialStepLabel && ytTutorialX && ytTutorialBody
+                if (ytTutorialBtn && ytTutorialPanel && ytTutorialStepLabel && ytTutorialX && ytTutorialVideo && ytTutorialBody
                     && ytTutorialPrev && ytTutorialNext) {
-                    // A plain sheet name, not run through the real Download flow's own LLM/SQL
-                    // pipeline — there's no wallet cost or network round trip in standing this demo
-                    // table up at all. Its refresh_token is a harmless sentinel that can't actually
-                    // decrypt to anything: Refresh/the Update bar/Apply-change all still LOOK and
-                    // behave exactly as real (the detection side of every one of them needs nothing
-                    // but the sheet itself), this tutorial just never clicks past the point where
-                    // one of them would need that token to be real — see each step's own text for
-                    // how it's honest with the user about that.
-                    const DT_YT_TUTORIAL_SHEET_NAME = "Tutorial Sample";
-                    const dtYtTutorialDemoData = {
-                        title: "Revenue, EBITDA — Reliance Industries Ltd. (Tutorial Sample)",
-                        description: "A sample table for this tutorial — safe to ignore, and removed automatically when you close it.",
-                        display_name: DT_YT_TUTORIAL_SHEET_NAME,
-                        refresh_token: "TUTORIAL_DEMO_TOKEN",
-                        columns: [{ name: "CompName" }, { name: "Period" }, { name: "Revenue" }, { name: "EBITDA" }],
-                        rows: [
-                            ["Reliance Industries Ltd.", "2025", 964693, 165444],
-                            ["Reliance Industries Ltd.", "2026", 1057219, 178949],
-                        ],
-                    };
-
-                    let ytTutorialSheetName = null; // the actual final sheet name writeDownloadedTableToSheet picked (auto-uniquified if "Tutorial Sample" was already taken)
                     let ytTutorialStepIndex = 0;
-                    let ytTutorialTransitioning = false;
-                    let ytTutorialSpotlightEl = null;
+                    let ytTutorialVideoSrcLoaded = false; // the clip is ~11MB — fetched once, the first time this tutorial actually opens, never eagerly on page load
 
-                    // The sample table's row/col never move during this tutorial, so it's always at
-                    // (0,0) on its own dedicated sheet — matched by sheet name AND position together
-                    // anyway, rather than assuming that, so a stale/renamed sheet just fails this
-                    // lookup cleanly instead of grabbing the wrong entry.
-                    const ytTutorialFindEntry = () => lastScannedTables.find((t) =>
-                        t.sheetName === ytTutorialSheetName && t.titleRow === 0 && t.titleCol === 0);
-                    const ytTutorialFindCard = () => {
-                        const idx = lastScannedTables.findIndex((t) =>
-                            t.sheetName === ytTutorialSheetName && t.titleRow === 0 && t.titleCol === 0);
-                        if (idx < 0) return null;
-                        const item = yourTablesList.querySelector(`.dt-yt-item[data-idx="${idx}"]`);
-                        return item ? { item, entry: lastScannedTables[idx] } : null;
-                    };
-
-                    const ytTutorialSetSpotlight = (el) => {
-                        if (ytTutorialSpotlightEl && ytTutorialSpotlightEl !== el) ytTutorialSpotlightEl.classList.remove("dt-tutorial-spotlight");
-                        ytTutorialSpotlightEl = el || null;
-                        if (ytTutorialSpotlightEl) ytTutorialSpotlightEl.classList.add("dt-tutorial-spotlight");
-                    };
-
-                    // Typing a header/period value directly into a cell is exactly what a real user
-                    // does to trigger this — see pollTableMetaEdits — so these just write the one
-                    // cell a real edit would land on, same offsets that function's own comments
-                    // already document (headerRow = titleRow+metaRows, the next blank column is
-                    // titleCol+tableCols; the next blank data row is titleRow+metaRows+tableRows).
-                    const ytTutorialWriteHeaderCell = async () => {
-                        const entry = ytTutorialFindEntry();
-                        if (!entry) return;
-                        const row = entry.titleRow + entry.metaRows;
-                        const col = entry.titleCol + entry.tableCols;
-                        await Excel.run(async (context) => {
-                            const sheet = context.workbook.worksheets.getItem(entry.sheetName);
-                            sheet.getRangeByIndexes(row, col, 1, 1).values = [["PAT"]];
-                            await context.sync();
-                        });
-                    };
-                    const ytTutorialWritePeriodCell = async () => {
-                        const entry = ytTutorialFindEntry();
-                        if (!entry) return;
-                        const periodCol = entry.titleCol + (entry.companyName ? 0 : 1); // single-company: col0; multi-company: col1 (see classifyDataRowChange)
-                        const row = entry.titleRow + entry.metaRows + entry.tableRows;
-                        await Excel.run(async (context) => {
-                            const sheet = context.workbook.worksheets.getItem(entry.sheetName);
-                            sheet.getRangeByIndexes(row, periodCol, 1, 1).values = [["2027"]];
-                            await context.sync();
-                        });
-                    };
-                    // Polls the SAME watch state pollTableMetaEdits itself maintains — this is
-                    // genuinely waiting for that real background poll to notice the cell this just
-                    // wrote, not a fixed/faked delay. Gives up (returning false) after timeoutMs
-                    // rather than hanging forever if something about the sheet ever stops this from
-                    // being detected.
-                    const ytTutorialWaitForPendingChange = async (kind, timeoutMs = 5000) => {
-                        const start = Date.now();
-                        while (Date.now() - start < timeoutMs) {
-                            const entry = ytTutorialFindEntry();
-                            if (entry) {
-                                const state = tableMetaWatchState.get(tableWatchKey(entry));
-                                if (state && (kind === "header" ? state.pendingHeaderChange : state.pendingDataRowChange)) return true;
-                            }
-                            await new Promise((resolve) => setTimeout(resolve, 200));
-                        }
-                        return false;
-                    };
-
-                    // Creates the disposable sample — a plain local write (writeDownloadedTableToSheet
-                    // never makes a network call itself), on its own brand-new sheet so cleanup is
-                    // just deleting that one sheet outright rather than tracking/clearing a footprint
-                    // that could have grown (steps below type directly into cells past the table's
-                    // original edges). Passing no writeTarget reuses that function's own existing
-                    // "create a new sheet named from display_name, auto-uniquified if taken" logic —
-                    // the same path a real Download without a selected destination already takes —
-                    // rather than duplicating that name-collision handling here.
-                    const ytTutorialCreateDemo = async () => {
-                        const singleCompanyInfo = detectSingleCompanyColumn(dtYtTutorialDemoData);
-                        ytTutorialSheetName = await writeDownloadedTableToSheet(dtYtTutorialDemoData, null, singleCompanyInfo);
-                        await runYourTablesScan();
-                        const entry = ytTutorialFindEntry();
-                        if (entry) { try { await navigateToTable(entry); } catch (e) { /* non-fatal — the tutorial still works, it just doesn't jump the view there */ } }
-                    };
-                    // Best-effort — any failure here just leaves the sample sheet behind rather than
-                    // blocking the tutorial from closing; deleting the WHOLE sheet (rather than
-                    // clearing a tracked footprint) means every header/period cell typed during the
-                    // walkthrough is removed too, with no separate bookkeeping needed for how far
-                    // that footprint grew.
-                    const ytTutorialCleanupDemo = async () => {
-                        if (!ytTutorialSheetName) return;
-                        const name = ytTutorialSheetName;
-                        ytTutorialSheetName = null;
-                        try {
-                            await Excel.run(async (context) => {
-                                const sheet = context.workbook.worksheets.getItemOrNullObject(name);
-                                sheet.load("isNullObject");
-                                await context.sync();
-                                if (sheet.isNullObject) return;
-                                sheet.delete();
-                                await context.sync();
-                            });
-                        } catch (e) {
-                            console.warn("[QueryData] tutorial: couldn't remove the sample sheet:", e.message);
-                        }
-                        await runYourTablesScan();
-                    };
-
+                    // Narrates the SAME points the old live demo made (a new header past the table's
+                    // last column, a new period/company typed into the row below, Refresh) — now
+                    // pointing at what the video above shows rather than an onEnter that performed
+                    // the action live. The video itself is a single persistent element that keeps
+                    // playing/looping across every step (see ytTutorialRenderStep) rather than being
+                    // re-created per step, so stepping Next/Previous never interrupts or restarts it.
+                    // Condensed to 2 steps (was 5) — the video itself carries the demonstration now,
+                    // so the text only needs to point at what it shows, not narrate every beat of it
+                    // as its own separate step.
                     const ytTutorialSteps = [
-                        {
-                            html: "<p>Your Tables lists every table this feature has created in this workbook.</p>"
-                                + "<p>We've added a sample table below so you can see the Update button in action — we'll remove it the moment you close this tutorial.</p>",
-                            onEnter: () => { ytTutorialSetSpotlight(null); },
-                        },
-                        {
-                            html: "<p>Typing a new column header just past a table's last column — like <b>PAT</b> here — gets picked up automatically.</p>"
-                                + "<p>Watch the <b>Update</b> bar below the table light up once it's detected (give it a second or two). Clicking it would rebuild the column for real — we'll leave this sample as-is.</p>",
-                            onEnter: async () => {
-                                await ytTutorialWriteHeaderCell();
-                                await ytTutorialWaitForPendingChange("header");
-                                ytTutorialSetSpotlight(ytTutorialFindCard()?.item.querySelector(".dt-yt-update-bar"));
-                            },
-                        },
-                        {
-                            html: "<p>The same Update bar also catches a <b>new period</b> typed into the row right below a table, or a <b>company name</b> changed in an existing row — same detection, same button.</p>"
-                                + "<p>Watch it update again:</p>",
-                            onEnter: async () => {
-                                await ytTutorialWritePeriodCell();
-                                await ytTutorialWaitForPendingChange("data");
-                                ytTutorialSetSpotlight(ytTutorialFindCard()?.item.querySelector(".dt-yt-update-bar"));
-                            },
-                        },
-                        {
-                            html: "<p><b>Refresh</b> re-fetches the latest period for a table, any time — no pending change needed.</p>",
-                            onEnter: () => {
-                                ytTutorialSetSpotlight(ytTutorialFindCard()?.item.querySelector(".dt-yt-refresh-btn"));
-                            },
-                        },
-                        {
-                            html: "<p>That's Your Tables. Closing this tutorial removes the sample table — reopen it any time from this same button.</p>",
-                            onEnter: () => { ytTutorialSetSpotlight(null); },
-                        },
+                        "<p><b>Update tutorial:</b> type a new column header just past a table's last column — like <b>EBITDA</b> in the video — or a new period into the row right below it.</p>"
+                            + "<p>The update button becomes enabled and clicking the button will update your table with the new data.</p>",
+                        "<p><b>Refresh</b> re-fetches the latest period for a table, any time — no pending change needed.</p>"
+                            + "<p><b>Edit</b> allows you to type the change you want in the table in natural language.</p>",
                     ];
 
-                    const ytTutorialRenderStep = async () => {
-                        const step = ytTutorialSteps[ytTutorialStepIndex];
+                    const ytTutorialRenderStep = () => {
                         ytTutorialStepLabel.textContent = `Step ${ytTutorialStepIndex + 1} of ${ytTutorialSteps.length}`;
-                        ytTutorialBody.innerHTML = step.html;
+                        ytTutorialBody.innerHTML = ytTutorialSteps[ytTutorialStepIndex];
                         ytTutorialPrev.disabled = ytTutorialStepIndex === 0;
                         ytTutorialNext.querySelector("span").textContent = ytTutorialStepIndex === ytTutorialSteps.length - 1 ? "Finish" : "Next";
-                        if (step.onEnter) await step.onEnter();
                     };
-                    const ytTutorialGoToStep = async (newIndex) => {
-                        if (ytTutorialTransitioning || newIndex < 0 || newIndex >= ytTutorialSteps.length) return;
-                        ytTutorialTransitioning = true;
-                        ytTutorialPrev.disabled = true; ytTutorialNext.disabled = true;
-                        try {
-                            ytTutorialStepIndex = newIndex;
-                            await ytTutorialRenderStep();
-                        } finally {
-                            ytTutorialTransitioning = false;
-                            ytTutorialPrev.disabled = ytTutorialStepIndex === 0;
-                            ytTutorialNext.disabled = false;
-                        }
+                    const ytTutorialGoToStep = (newIndex) => {
+                        if (newIndex < 0 || newIndex >= ytTutorialSteps.length) return;
+                        ytTutorialStepIndex = newIndex;
+                        ytTutorialRenderStep();
                     };
-                    const ytTutorialClose = async () => {
+                    const ytTutorialClose = () => {
                         ytTutorialPanel.classList.remove("dt-tutorial-panel-open");
                         setTimeout(() => { ytTutorialPanel.style.display = "none"; }, 170);
                         ytTutorialBtn.style.display = "";
-                        ytTutorialSetSpotlight(null);
-                        await ytTutorialCleanupDemo();
+                        ytTutorialVideo.pause(); // stop decoding/playing while the panel is hidden
                     };
 
-                    ytTutorialBtn.addEventListener("click", async () => {
+                    ytTutorialBtn.addEventListener("click", () => {
                         ytTutorialBtn.style.display = "none";
                         ytTutorialPanel.style.display = "flex";
                         requestAnimationFrame(() => ytTutorialPanel.classList.add("dt-tutorial-panel-open"));
-                        ytTutorialStepLabel.textContent = `Step 1 of ${ytTutorialSteps.length}`;
-                        ytTutorialBody.innerHTML = "<p>Setting up a sample table…</p>";
-                        ytTutorialPrev.disabled = true; ytTutorialNext.disabled = true;
-                        try {
-                            await ytTutorialCreateDemo();
-                            ytTutorialStepIndex = 0;
-                            await ytTutorialRenderStep();
-                        } catch (e) {
-                            console.warn("[QueryData] tutorial: couldn't set up the sample table:", e.message);
-                            ytTutorialBody.innerHTML = "<p>Couldn't set up the sample table — please try again.</p>";
-                        } finally {
-                            ytTutorialNext.disabled = false;
-                            ytTutorialPrev.disabled = ytTutorialStepIndex === 0;
-                        }
+                        if (!ytTutorialVideoSrcLoaded) { ytTutorialVideo.src = "assets/table-update-tutorial.mp4"; ytTutorialVideoSrcLoaded = true; }
+                        ytTutorialVideo.currentTime = 0; // restart from the beginning on every open, same reasoning as #dtQueryHintPreview's own video
+                        ytTutorialVideo.play().catch(() => {});
+                        ytTutorialStepIndex = 0;
+                        ytTutorialRenderStep();
                     });
-                    ytTutorialNext.addEventListener("click", async () => {
-                        if (ytTutorialStepIndex === ytTutorialSteps.length - 1) { await ytTutorialClose(); return; }
-                        await ytTutorialGoToStep(ytTutorialStepIndex + 1);
+                    ytTutorialNext.addEventListener("click", () => {
+                        if (ytTutorialStepIndex === ytTutorialSteps.length - 1) { ytTutorialClose(); return; }
+                        ytTutorialGoToStep(ytTutorialStepIndex + 1);
                     });
                     ytTutorialPrev.addEventListener("click", () => ytTutorialGoToStep(ytTutorialStepIndex - 1));
                     ytTutorialX.addEventListener("click", () => ytTutorialClose());
@@ -15384,18 +15252,29 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
     const fab = byId("chatFab"), panel = byId("chatPanel"), stream = byId("chatStream"),
         input = byId("chatInput"), sendBtn = byId("chatSend");
     const compareInput = byId("chatCompareInput"), compareList = byId("chatCompareList"), compareClear = byId("chatCompareClear");
+    const selectionIndicator = byId("chatSelectionIndicator"), selectionIndicatorText = byId("chatSelectionIndicatorText");
+    const threadBtn = byId("chatThreadBtn"), threadNewBtn = byId("chatThreadNewBtn"),
+        threadMenu = byId("chatThreadMenu"), threadList = byId("chatThreadList");
     if (!fab || !panel) return;
 
     // Whether workbook edits are applied immediately or held for a per-write confirmation.
-    // Defaults to OFF (ask first) — matches the "confirm before destructive edits" guardrail.
+    // Defaults to ON (write automatically) for anyone who hasn't chosen yet — only an EXPLICIT
+    // prior "ask first" choice (stored as "0") keeps that behavior; unset (a fresh user) and "1"
+    // both land on auto-apply. Still a real per-user choice, not a forced setting — the mode-picker
+    // below lets anyone switch to "Ask before writing" whenever they want the confirmation step
+    // back, same as before.
     // Presented as a compact mode-picker (button + popup with a tick by the active mode), the
     // same pattern Claude Code itself uses for its own mode switcher.
     const AUTO_APPLY_KEY = "goia_chatAutoApplyEdits";
-    let autoApplyEdits = localStorage.getItem(AUTO_APPLY_KEY) === "1";
+    let autoApplyEdits = localStorage.getItem(AUTO_APPLY_KEY) !== "0";
     const modeBtn = byId("chatModeBtn"), modeMenu = byId("chatModeMenu"),
         modeBtnLabel = byId("chatModeBtnLabel"), modeIcon = byId("chatModeIcon");
     const renderMode = () => {
-        if (modeBtnLabel) modeBtnLabel.textContent = autoApplyEdits ? "Write automatically" : "Ask before writing";
+        // "Auto"/"Manual" on the button itself — same short-name-on-the-button, full-description-
+        // in-the-dropdown convention Claude Code's own mode switcher uses (see each
+        // .chat-mode-item's <small> for the actual description, shown only once the dropdown is
+        // open). This button shares its row with the selection indicator, so it stays compact too.
+        if (modeBtnLabel) modeBtnLabel.textContent = autoApplyEdits ? "Auto" : "Manual";
         if (modeIcon) modeIcon.textContent = autoApplyEdits ? "⚡" : "✋";
         if (modeMenu) {
             modeMenu.querySelectorAll(".chat-mode-tick").forEach(t => {
@@ -15424,11 +15303,16 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
         });
     }
 
-    // Chat history survives taskpane reloads (window close, Excel restart) via localStorage.
-    // The chat panel is re-rendered from it, so up to 40 messages are kept for DISPLAY; the models
-    // only ever see the last RAW_WINDOW_TURNS turns (rawWindow) plus the compact turn notes below,
-    // so nothing older is needed for context. Each stored copy is clipped: 40 replies that each
-    // carry a table could otherwise fill localStorage on their own.
+    // Chat history survives taskpane reloads (window close, Excel restart) via localStorage — one
+    // record per CONVERSATION THREAD (see the thread-store machinery further down, right after the
+    // memory functions it depends on). The chat panel is re-rendered from the ACTIVE thread's
+    // history, so up to 40 messages are kept for DISPLAY; the models only ever see the last
+    // RAW_WINDOW_TURNS turns (rawWindow) plus that thread's own compacted turn notes below, so
+    // nothing older is needed for context. Each stored copy is clipped: 40 replies that each carry
+    // a table could otherwise fill localStorage on their own.
+    // Pre-threads storage key — no longer written to going forward, only ever READ once by
+    // migrateLegacyChatIntoThread (see below) to fold an existing single conversation into that
+    // user's very first thread instead of silently discarding it the moment this feature ships.
     const CHAT_HISTORY_KEY = "goia_chatHistory";
     const MAX_HISTORY = 40;
     // How much RAW conversation the models see before falling back to compacted turn notes. A turn
@@ -15440,17 +15324,18 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
         const c = String(m && m.content != null ? m.content : "");
         return { ...m, content: c.length > MAX_STORED_MESSAGE_CHARS ? c.slice(0, MAX_STORED_MESSAGE_CHARS) + "…" : c };
     };
+    // Bare declarations only — their REAL values come from activateThread() once the thread store
+    // loads, a little further down. Every line below that reads or writes these two identifiers
+    // directly (every single one that already treated "the chat's history" as one global thing)
+    // keeps working completely unchanged: it now reads "the ACTIVE thread's history" instead,
+    // without needing to touch any of those call sites individually.
     let history = [];                          // {role, content, turn?}
-    try {
-        const saved = JSON.parse(localStorage.getItem(CHAT_HISTORY_KEY) || "[]");
-        if (Array.isArray(saved)) history = saved.filter(m => m && typeof m.role === "string").slice(-MAX_HISTORY).map(clipStored);
-    } catch (e) { /* ignore corrupt data */ }
-    const persistHistory = () => {
-        try { localStorage.setItem(CHAT_HISTORY_KEY, JSON.stringify(history.slice(-MAX_HISTORY).map(clipStored))); } catch (e) { /* storage full/unavailable */ }
-    };
-    // Every question gets a turn number, stamped on both its messages and its memory note, so the
-    // notes for turns that are still inside the raw window are not fed a second time.
-    let nextTurn = 1 + history.reduce((mx, m) => Math.max(mx, Number(m.turn) || 0), 0);
+    let nextTurn = 1;                           // every question gets a turn number, stamped on both its messages and its memory note
+    // Bare declaration for the same reason as the two above — its real value also comes from
+    // activateThread(). Declared here (not left to its own first assignment further down) because a
+    // plain assignment with no declaration anywhere in scope throws a ReferenceError in strict-mode
+    // module code; this was the actual bug behind "memStore is not defined" at startup.
+    let memStore;
     // What the models are given: role and content only (a stray `turn` field could be rejected by a provider).
     const rawWindow = (n = RAW_WINDOW_MESSAGES) => history.slice(-n).map(({ role, content }) => ({ role, content }));
 
@@ -15537,20 +15422,22 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
         else b.records.push(record);
         return memPrune(store, now);
     }
-    function memLoad(now = Date.now()) {
-        try {
-            const raw = localStorage.getItem(MEM_KEY);
-            return raw ? memPrune(memSanitize(JSON.parse(raw)), now) : memEmptyStore();
-        } catch (e) { return memEmptyStore(); }
-    }
-    // A quota error is answered with a smaller cap, not an exception; the last resort is to drop the store.
+    // memLoad is gone — a thread's memory is sanitized straight out of its own saved record now
+    // (see sanitizeThread below), not read from a separate top-level key. MEM_KEY lives on only as
+    // what migrateLegacyChatIntoThread reads ONCE to recover a pre-threads user's existing memory.
+    //
+    // memSave no longer owns its own localStorage write either — a thread's memory is just one
+    // field of its own larger saved record now (see persistActiveThread), which has its own
+    // quota-safe retry for the WHOLE record. Still worth pruning the memory sub-store to its own
+    // byte budget first, independently of that — so one pathologically large memory can't alone
+    // force the thread-level save to start shedding entries from OTHER fields (or other threads) to
+    // compensate. memPrune already loops until the result fits maxBytes (or runs out of books to
+    // shed), so a single call is enough — no retry-with-a-smaller-cap loop needed here like the old
+    // direct-write version had, since that loop existed to answer the WRITE throwing, not to make
+    // memPrune try harder.
     function memSave(store) {
-        for (const cap of [MEM_MAX_BYTES, MEM_MAX_BYTES / 2, MEM_MAX_BYTES / 4]) {
-            try { memPrune(store, Date.now(), cap); localStorage.setItem(MEM_KEY, JSON.stringify(store)); return true; }
-            catch (e) { /* prune harder and retry */ }
-        }
-        try { localStorage.removeItem(MEM_KEY); } catch (e) { /* nothing more to do */ }
-        return false;
+        memStore = memPrune(store, Date.now(), MEM_MAX_BYTES);
+        persistActiveThread();
     }
     const memRenderRecord = (r) =>
         `T${r.turn}: ${r.intent || "(no intent recorded)"}` +
@@ -15631,7 +15518,126 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
         }
         return acc || memClip(sentences[0], maxChars);
     }
-    let memStore = memLoad();
+    // ── Conversation threads ──
+    // Each thread is a fully separate conversation: its own message history, its own turn counter,
+    // and its own session-memory store (the "notes" system just above) — nothing from one thread
+    // ever leaks into another's context, which is the whole point of having more than one. Before
+    // this, everything above (history/nextTurn/memStore) was ONE single global conversation; a
+    // thread is now just "a saved copy of those three things plus a title," and switching threads
+    // is "swap which saved copy those three live variables point at" (see activateThread) — every
+    // other line in this file that reads history/nextTurn/memStore keeps working unmodified, since
+    // it was never aware those identifiers belonged to any one conversation in the first place.
+    const CHAT_THREADS_KEY = "goia_chatThreads";
+    const MAX_THREADS = 30; // each thread already self-bounds its own size (40 clipped messages, memory capped at MEM_MAX_BYTES) — this caps how many of THOSE can accumulate
+    const CHAT_THREADS_MAX_BYTES = 1500000; // generous relative to one thread's own ~100-150KB ceiling; only ever binds if someone genuinely accumulates dozens of heavily-used threads
+    const newThreadId = () => `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+    const emptyThread = () => ({
+        id: newThreadId(), title: "New chat", titleGenerated: false,
+        createdAt: Date.now(), updatedAt: Date.now(),
+        history: [], nextTurn: 1, memory: memEmptyStore(),
+    });
+    // Repairs whatever came out of localStorage; never trusts its shape, same discipline memSanitize
+    // already holds itself to for the memory sub-object every thread now carries.
+    function sanitizeThread(raw) {
+        if (!raw || typeof raw !== "object") return null;
+        const t = emptyThread();
+        if (typeof raw.id === "string" && raw.id) t.id = raw.id;
+        t.title = memClip(raw.title, 80) || "New chat";
+        t.titleGenerated = !!raw.titleGenerated;
+        if (Number.isFinite(raw.createdAt)) t.createdAt = raw.createdAt;
+        if (Number.isFinite(raw.updatedAt)) t.updatedAt = raw.updatedAt;
+        if (Array.isArray(raw.history)) t.history = raw.history.filter(m => m && typeof m.role === "string").slice(-MAX_HISTORY).map(clipStored);
+        t.nextTurn = Number.isFinite(raw.nextTurn) ? raw.nextTurn : (1 + t.history.reduce((mx, m) => Math.max(mx, Number(m.turn) || 0), 0));
+        t.memory = memSanitize(raw.memory);
+        return t;
+    }
+    // One-time recovery for a user who already has chat history under the OLD pre-threads keys
+    // (CHAT_HISTORY_KEY/MEM_KEY) — folded into their very first thread instead of silently
+    // discarding it the moment this feature ships. Only ever runs when NO threads exist yet (a
+    // brand-new thread store); the old keys are removed immediately after reading them, so this
+    // never runs a second time even if the legacy keys' own values would otherwise still parse.
+    function migrateLegacyChatIntoThread() {
+        let legacyHistory = [];
+        let legacyMemory = null;
+        try {
+            const raw = JSON.parse(localStorage.getItem(CHAT_HISTORY_KEY) || "[]");
+            if (Array.isArray(raw)) legacyHistory = raw.filter(m => m && typeof m.role === "string").slice(-MAX_HISTORY).map(clipStored);
+        } catch (e) { /* ignore corrupt data */ }
+        try {
+            const raw = localStorage.getItem(MEM_KEY);
+            if (raw) legacyMemory = memSanitize(JSON.parse(raw));
+        } catch (e) { /* ignore corrupt data */ }
+        try { localStorage.removeItem(CHAT_HISTORY_KEY); localStorage.removeItem(MEM_KEY); } catch (e) { /* best-effort */ }
+        if (!legacyHistory.length && !legacyMemory) return null; // a genuinely new user — nothing to migrate
+        const t = emptyThread();
+        t.title = "Earlier conversation";
+        t.titleGenerated = true; // never auto-name this one — it has no clean single "first message" left to summarize
+        t.history = legacyHistory;
+        t.nextTurn = 1 + legacyHistory.reduce((mx, m) => Math.max(mx, Number(m.turn) || 0), 0);
+        t.memory = legacyMemory || memEmptyStore();
+        return t;
+    }
+    function loadThreadsStore() {
+        let threads = [];
+        let activeThreadId = null;
+        try {
+            const raw = JSON.parse(localStorage.getItem(CHAT_THREADS_KEY) || "null");
+            if (raw && Array.isArray(raw.threads)) {
+                threads = raw.threads.map(sanitizeThread).filter(Boolean);
+                if (typeof raw.activeThreadId === "string") activeThreadId = raw.activeThreadId;
+            }
+        } catch (e) { /* corrupt — start fresh, same as every other piece of saved state in this file */ }
+        if (!threads.length) {
+            const migrated = migrateLegacyChatIntoThread();
+            threads = migrated ? [migrated] : [emptyThread()];
+        }
+        // threads[0], not the last — saveThreadsStore always sorts newest-updated-first before
+        // writing, so on a normal load this never even triggers; it's only the fallback for a
+        // missing/invalid activeThreadId, and the most RECENTLY used thread is clearly the right
+        // one to land on, not whichever happens to be least recently touched.
+        if (!activeThreadId || !threads.some(t => t.id === activeThreadId)) activeThreadId = threads[0].id;
+        return { threads, activeThreadId };
+    }
+    // Quota-safe the same way every other store in this file is: prune harder and retry rather than
+    // throw. Oldest-UPDATED thread sheds first on both axes (count and bytes) — least recently
+    // touched, not least recently created, so an old-but-still-active thread is never the one lost.
+    function saveThreadsStore(store) {
+        store.threads.sort((a, b) => b.updatedAt - a.updatedAt);
+        if (store.threads.length > MAX_THREADS) store.threads = store.threads.slice(0, MAX_THREADS);
+        for (const bytes of [CHAT_THREADS_MAX_BYTES, CHAT_THREADS_MAX_BYTES / 2, CHAT_THREADS_MAX_BYTES / 4]) {
+            while (JSON.stringify(store).length > bytes && store.threads.length > 1) store.threads.pop();
+            try { localStorage.setItem(CHAT_THREADS_KEY, JSON.stringify(store)); return; } catch (e) { /* prune harder and retry */ }
+        }
+        try { localStorage.removeItem(CHAT_THREADS_KEY); } catch (e) { /* nothing more to do */ }
+    }
+    let threadsStore = loadThreadsStore();
+    const getActiveThread = () => threadsStore.threads.find(t => t.id === threadsStore.activeThreadId) || threadsStore.threads[0];
+    // Swaps which saved thread the live history/nextTurn/memStore variables point at — see this
+    // section's own opening comment for why that's the whole mechanism. Does NOT touch the DOM;
+    // callers that need the chat panel re-rendered after switching (anything other than the
+    // one-time initial load, which the existing startup code below already renders from `history`
+    // once this has run) do that themselves — see switchToThread further down, near the thread-list UI.
+    function activateThread(thread) {
+        threadsStore.activeThreadId = thread.id;
+        history = thread.history;
+        nextTurn = thread.nextTurn;
+        memStore = thread.memory;
+    }
+    activateThread(getActiveThread());
+    // Call after anything that mutates history/nextTurn/memStore in place (which is everywhere
+    // those are already mutated throughout this file) — writes them back onto the active thread's
+    // own saved record and persists the whole store. history is clipped for STORAGE the same way
+    // persistHistory always has, WITHOUT touching the live array itself, so this session's own
+    // scrollback can still grow past 40 messages even though only the last 40 survive a reload.
+    function persistActiveThread() {
+        const t = getActiveThread();
+        t.history = history.slice(-MAX_HISTORY).map(clipStored);
+        t.nextTurn = nextTurn;
+        t.memory = memStore;
+        t.updatedAt = Date.now();
+        saveThreadsStore(threadsStore);
+    }
+    const persistHistory = () => persistActiveThread();
 
     let busy = false;
     // The in-flight turn's AbortController, so the send button can cancel it.
@@ -15650,6 +15656,16 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
             sendBtn.title = "Send";
             sendBtn.classList.remove("stop");
         }
+        // Switching (or starting a new) thread reassigns the live history/nextTurn/memStore
+        // bindings an IN-FLIGHT turn is still reading and writing via its own closures — doing that
+        // mid-turn would let that turn's result land on whatever thread happens to be active by the
+        // time it finishes, not the one it was actually asked on. Simplest correct fix: the thread
+        // controls are just unavailable while busy, same as the textarea already effectively is
+        // (Enter re-sends to the SAME in-flight turn's own thread, never anywhere else) — switchToThread/
+        // createNewThread also check `busy` themselves as a backstop, in case this gets bypassed
+        // some other way (e.g. a stray keyboard path).
+        if (threadBtn) threadBtn.disabled = busy;
+        if (threadNewBtn) threadNewBtn.disabled = busy;
     };
     const setBusy = (v) => { busy = v; chatBusy = v; renderSendBtn(); };
     const stopCurrentTurn = () => {
@@ -17405,6 +17421,59 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
         }
     }
 
+    // Snapshot of whatever cell(s) the user currently has selected, read fresh at the moment each
+    // question is asked — the same role an editor's "currently selected lines" context plays for a
+    // coding assistant: it tells the model WHAT the user is pointing at without them having to type
+    // a cell address themselves ("what does this number mean" names nothing on its own). Included
+    // in the main loop's system prompt (see send(), near workbookSnapshot) — never the clarifier,
+    // which only ever needs to resolve a company name, nothing about cell contents.
+    //
+    // Safe by construction, same race-a-timeout-against-a-real-failure shape as
+    // getWorkbookSummarySafe just above: getSelectedRange() THROWS outright for a multi-area
+    // selection (several disjoint blocks picked with Ctrl+click) — same as every other
+    // getSelectedRange() call in this file already has to account for — and a selection that's
+    // gone stale, or any other failure, is handled the same way: the turn just runs without it,
+    // never a blocked question over something this inherently best-effort.
+    const CHAT_SELECTION_MAX_CELLS = 500; // generous for "the few rows/cols the user is actually looking at"; small enough to never meaningfully bloat the prompt
+    async function getCurrentSelectionContextSafe(timeoutMs = 3000) {
+        const read = async () => {
+            let out = null;
+            await Excel.run(async (ctx) => {
+                const range = ctx.workbook.getSelectedRange();
+                range.load("address,values,rowCount,columnCount");
+                const sheet = range.worksheet;
+                sheet.load("name");
+                await ctx.sync();
+                // A single blank cell is just the default resting state of a selection, not
+                // something the user pointed at on purpose the way a populated cell or any
+                // multi-cell range is — including it would add noise to every single turn asked
+                // with nothing deliberately selected, which is most of them.
+                const isBlankSingleCell = range.rowCount === 1 && range.columnCount === 1
+                    && (range.values[0][0] === "" || range.values[0][0] == null);
+                if (isBlankSingleCell) return;
+                const address = chatQualifiedAddress(sheet.name, range.address);
+                if (range.rowCount * range.columnCount > CHAT_SELECTION_MAX_CELLS) {
+                    // Still worth naming WHERE and how big it is even when too large to dump in
+                    // full — "a 2000-cell block starting at Sheet1!A1" is itself useful context,
+                    // and the model can always call read_range on it for the actual values.
+                    out = { address, rows: range.rowCount, cols: range.columnCount, text: null };
+                    return;
+                }
+                const text = range.values.map((row) => row.map((v) => (v === "" || v == null ? "-" : v)).join("\t")).join("\n");
+                out = { address, rows: range.rowCount, cols: range.columnCount, text };
+            });
+            return out;
+        };
+        try {
+            return await Promise.race([
+                read(),
+                new Promise((_, reject) => setTimeout(() => reject(new Error("timed out")), timeoutMs)),
+            ]);
+        } catch (e) {
+            return null;
+        }
+    }
+
     // Safety net for what the summary might not show (a big sheet cut to fit, a label in an
     // unexpected place): scan EVERY text cell of EVERY sheet, hidden ones included, for the terms the
     // planner named. Each hit says where it is and which periods that row has values for.
@@ -18890,6 +18959,24 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
         currentDebugTurn = turn; // every debugAppend from here on belongs to this turn (see saveTurnLog)
         history.push({ role: "user", content: q, turn });
         persistHistory();
+        // Auto-names a brand-new thread off its first message — fire-and-forget (never awaited) so
+        // naming never delays the actual turn; the title just appears in the header/thread list a
+        // moment later once it resolves. Captures the THREAD OBJECT itself (not just reading
+        // getActiveThread() again inside .then()) so the result still lands on the right thread
+        // even if the user switches to a different one while this is still in flight. Retries on
+        // every message until it actually succeeds — titleGenerated only flips true once it does —
+        // rather than giving up after one failed attempt and leaving a thread stuck as "New chat"
+        // forever over a single dropped request.
+        if (!getActiveThread().titleGenerated) {
+            const threadForTitle = getActiveThread();
+            generateThreadTitle(q).then((title) => {
+                if (!title) return;
+                threadForTitle.title = title;
+                threadForTitle.titleGenerated = true;
+                saveThreadsStore(threadsStore);
+                renderThreadList();
+            });
+        }
         debugAppend({ kind: "question", question: q });
         newStepGroup();
         showThinking();
@@ -18971,6 +19058,11 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
         // first. If the clarifier ends up asking a question, the build still isn't wasted: should it
         // instead say ask:false, this SAME turn's main loop below reuses this very same wbPromise.
         const wbPromise = getWorkbookSummarySafe();
+        // Fired here too, alongside the workbook index, so it costs nothing extra: by the time the
+        // main loop below is ready to build its system prompt, this has almost certainly already
+        // resolved. Never handed to the clarifier — that one only ever needs to resolve a company
+        // name, nothing about what's selected.
+        const selectionPromise = getCurrentSelectionContextSafe();
         const clarifierPromise = skipClarifierOnce ? null : runClarifier(wbPromise);
 
         if (clarifierPromise) {
@@ -19036,6 +19128,19 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
             const workbookSnapshot = workbookSummary
                 ? `\n\n=== OPEN WORKBOOK — snapshot taken when this question was asked; your own edits this turn are not reflected in it ===\n${workbookSummary}\n=== END SNAPSHOT ===`
                 : "";
+            // What the user has selected RIGHT NOW — see getCurrentSelectionContextSafe's own
+            // comment for why this matters: a question like "what does this number mean" or
+            // "explain this" names nothing on its own without it. null covers every "nothing worth
+            // mentioning" case at once — no selection worth noting, a multi-area selection
+            // getSelectedRange() can't even read, or the read simply failed — so there is
+            // deliberately no separate branch for each; they're all equally "say nothing" here.
+            const selection = await selectionPromise;
+            const selectionBlock = selection
+                ? (selection.text
+                    ? `\n\n=== CURRENT SELECTION — the cell(s) the user has selected in the sheet right now, as of when this question was asked. If the question doesn't name a specific cell/range itself ("what does this mean", "explain this", "why is this red"), assume it's about this selection. ===\n${selection.address} (${selection.rows} row${selection.rows === 1 ? "" : "s"} x ${selection.cols} column${selection.cols === 1 ? "" : "s"}):\n${selection.text}\n=== END SELECTION ===`
+                    : `\n\n=== CURRENT SELECTION — ${selection.address}, ${selection.rows} row(s) x ${selection.cols} column(s) selected right now, too large to include its values here directly. If the question doesn't name a specific cell/range itself, assume it's about this selection — call read_range on it for the actual values. ===`)
+                : "";
+            console.log(selection ? `[Chat] 🖱 current selection: ${selection.address} (${selection.rows}x${selection.cols})${selection.text ? "" : " — too large to include values"}` : "[Chat] 🖱 current selection: (none worth noting)");
 
             const system =
                 `You are GoIndiaStocks' intelligent Financial+Excel AI chat assistant inside Excel. You help the user look up company data\n` +
@@ -19127,7 +19232,7 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
                 `- If the workbook and the website disagree, trust the website — it's\n` +
                 `  fresher — and say so in your answer.\n\n` +
                 `${fiscalContextNote}` +
-                workbookSnapshot + notesBlock;
+                workbookSnapshot + selectionBlock + notesBlock;
 
             // ── The single gather -> act loop ──
             // One continuous convo/tool-calling loop per question, replacing the old planner
@@ -19449,11 +19554,249 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
     const greet = () => addMsg("bot",
         "Hi — I'm connected to your GoIndia data and this workbook. Ask me about the selected company, or to write something into a sheet. (Experimental)");
 
-    // Re-render whatever chat history survived from the last session.
+    // Renders the ACTIVE thread's saved history into the stream — the initial page-load render
+    // below, and also what switchToThread/createNewThread call after swapping which thread is
+    // active, so a thread switch shows that thread's own messages rather than leaving whatever the
+    // previous thread had on screen.
+    const renderStreamFromHistory = () => {
+        stream.innerHTML = "";
+        if (history.length) history.forEach(m => addMsg(m.role === "assistant" ? "bot" : "user", m.content));
+        else greet();
+    };
+    // Re-render whatever chat history survived from the last session (the ACTIVE thread's, as
+    // loaded by activateThread above).
     history.forEach(m => addMsg(m.role === "assistant" ? "bot" : "user", m.content));
 
-    const openPanel = () => { panel.style.display = "flex"; fab.style.display = "none"; if (!stream.childElementCount) greet(); input.focus(); };
-    const closePanel = () => { panel.style.display = "none"; fab.style.display = ""; if (modeMenu) modeMenu.classList.remove("open"); };
+    // ── Thread picker UI (switch / new / delete / auto-name) ──
+    const chatThreadRelativeTime = (ts) => {
+        const diffMs = Date.now() - ts;
+        const mins = Math.round(diffMs / 60000);
+        if (mins < 1) return "just now";
+        if (mins < 60) return `${mins}m ago`;
+        const hours = Math.round(mins / 60);
+        if (hours < 24) return `${hours}h ago`;
+        const days = Math.round(hours / 24);
+        if (days < 7) return `${days}d ago`;
+        return new Date(ts).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+    };
+    // Rebuilds the full-panel overlay's thread list (#chatThreadList — the shell around it, its
+    // mini-header/New chat/close, is static markup, never touched here). The active thread is
+    // only ever shown via its own highlighted row in this list now (no separate header label —
+    // see the HTML's own comment on the hamburger-only header button). Threads are listed
+    // newest-ACTIVITY first (same ordering saveThreadsStore itself sorts by), not creation order,
+    // so the thread you were just using is always at the top.
+    function renderThreadList() {
+        const active = getActiveThread();
+        if (!threadList) return;
+        const sorted = threadsStore.threads.slice().sort((a, b) => b.updatedAt - a.updatedAt);
+        threadList.innerHTML = sorted.map(t => `
+            <div class="chat-thread-item${t.id === active.id ? " active" : ""}" data-thread-id="${escapeHtml(t.id)}">
+                <div class="chat-thread-item-main">
+                    <div class="chat-thread-item-title">${escapeHtml(t.title || "New chat")}</div>
+                    <div class="chat-thread-item-meta">${chatThreadRelativeTime(t.updatedAt)}</div>
+                </div>
+                ${sorted.length > 1 ? `<span class="chat-thread-item-delete" data-delete-thread-id="${escapeHtml(t.id)}" title="Delete this conversation">✕</span>` : ""}
+            </div>
+        `).join("");
+    }
+    // Swaps the active thread AND re-renders the panel to match — activateThread alone (see its own
+    // comment) only rebinds history/nextTurn/memStore, it never touches the DOM; this is the one
+    // call site that does both together for an explicit user-driven switch.
+    function switchToThread(id) {
+        // Backstop for renderSendBtn's own disabling of the thread controls while busy — see its
+        // comment for why reassigning history/nextTurn/memStore mid-turn is unsafe, not just
+        // visually premature.
+        if (busy) return;
+        if (id === threadsStore.activeThreadId) return;
+        const thread = threadsStore.threads.find(t => t.id === id);
+        if (!thread) return;
+        activateThread(thread);
+        saveThreadsStore(threadsStore); // persists the new activeThreadId so a reload reopens on the same thread
+        renderStreamFromHistory();
+        renderThreadList();
+    }
+    function createNewThread() {
+        if (busy) return; // see switchToThread's own comment
+        const t = emptyThread();
+        threadsStore.threads.push(t);
+        activateThread(t);
+        saveThreadsStore(threadsStore);
+        renderStreamFromHistory();
+        renderThreadList();
+    }
+    // One narrowly-scoped, cheap-model call — same CLARIFIER_MODEL already used for the "is this
+    // question clear enough" check above, since naming a thread needs no more judgment than that
+    // does. Fired after the FIRST message of a brand-new thread (see send(), near where turn 1 gets
+    // pushed), never re-run again once a thread has a title (titleGenerated) — a thread's topic is
+    // set by what it was ABOUT originally, not re-summarized every time it's added to. Best-effort:
+    // any failure just leaves the thread titled "New chat", same as if this had never run at all.
+    async function generateThreadTitle(firstMessage) {
+        try {
+            const res = await fetch(OPENROUTER_URL, {
+                method: "POST",
+                headers: { "Content-Type": "application/json", "Authorization": `Bearer ${OPENROUTER_KEY}` },
+                body: JSON.stringify({
+                    model: CLARIFIER_MODEL,
+                    messages: [
+                        { role: "system", content: "Give this conversation a short title: 3-6 words, plain text, no quotes, no trailing punctuation, no markdown. Reply with ONLY the title." },
+                        { role: "user", content: String(firstMessage || "").slice(0, 800) },
+                    ],
+                    max_tokens: 20,
+                    temperature: 0.3,
+                }),
+            });
+            if (!res.ok) return null;
+            const data = await res.json();
+            const title = data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
+            if (!title) return null;
+            return title.trim().replace(/^["'\s]+|["'.\s]+$/g, "").slice(0, 60) || null;
+        } catch (e) {
+            return null; // best-effort, per this function's own comment
+        }
+    }
+    // Same hamburger SVG markup the HTML ships inline for #chatThreadBtn's closed state — kept
+    // here as the "closed" half of the toggle so setThreadMenuOpen can swap back to it, rather
+    // than needing a cached copy of the HTML's own original innerHTML.
+    const THREAD_BTN_ICON_CLOSED = '<svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="6" x2="20" y2="6"></line><line x1="4" y1="12" x2="20" y2="12"></line><line x1="4" y1="18" x2="20" y2="18"></line></svg>';
+    const THREAD_BTN_ICON_OPEN = '<svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>';
+    // The drawer spans #chatPanel's FULL height, starting at the same y=0 the real header above
+    // it also occupies (see the HTML's own comment on why nothing of the drawer's own can live in
+    // that strip) — .chat-thread-panel's own padding-top keeps its SCROLLABLE content clear of it,
+    // sized to the header's ACTUAL rendered height rather than a hand-computed guess. A hardcoded
+    // 48px (10px top/bottom padding + the 26px-tall hamburger button + its 2px border, by the
+    // CSS's own box model) turned out wrong in practice — confirmed live 2026-10-29: thread rows
+    // still rendered clipped behind the real header on an actual task pane, where the header's
+    // true rendered height came out taller than that hand-computed figure. Measuring it directly
+    // (the same dynamic-positioning approach positionQueryHintPreview already uses elsewhere in
+    // this file, for the identical reason) is correct regardless of whatever's actually driving
+    // the real height — font metrics, a line-height this file doesn't control, OS/zoom
+    // differences — none of which a hardcoded number can account for.
+    const chatHeaderEl = panel.querySelector(".chat-header");
+    const threadPanelEl = threadMenu ? threadMenu.querySelector(".chat-thread-panel") : null;
+    const syncThreadPanelOffset = () => {
+        if (!chatHeaderEl || !threadPanelEl) return;
+        threadPanelEl.style.paddingTop = `${chatHeaderEl.getBoundingClientRect().height}px`;
+    };
+    syncThreadPanelOffset();
+    window.addEventListener("resize", syncThreadPanelOffset);
+    // The one place that opens/closes the thread menu — keeps the backdrop's own .open class, the
+    // hamburger's aria-expanded, AND its icon (☰ closed / ✕ open — see the HTML's own comment on
+    // why the real header stays visible/clickable the whole time this is open) all in lockstep,
+    // rather than three separate call sites each remembering to touch all three themselves.
+    const setThreadMenuOpen = (open) => {
+        if (!threadMenu || !threadBtn) return;
+        if (open) syncThreadPanelOffset(); // re-measure on every open — cheap, and covers a header whose height genuinely changed since the last open
+        threadMenu.classList.toggle("open", open);
+        threadBtn.setAttribute("aria-expanded", open ? "true" : "false");
+        threadBtn.innerHTML = open ? THREAD_BTN_ICON_OPEN : THREAD_BTN_ICON_CLOSED;
+    };
+    if (threadBtn && threadMenu) {
+        threadBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            const open = !threadMenu.classList.contains("open");
+            setThreadMenuOpen(open);
+            if (open) renderThreadList(); // relative times ("3m ago") go stale while the menu sits closed
+        });
+        // Clicking the dim backdrop itself (NOT the white panel sitting on top of it — see the
+        // e.target check) closes the menu, the same as clicking the header's hamburger/cross does.
+        threadMenu.addEventListener("click", (e) => {
+            if (e.target === threadMenu) setThreadMenuOpen(false);
+        });
+        threadMenu.addEventListener("click", (e) => {
+            const delBtn = e.target.closest("[data-delete-thread-id]");
+            if (delBtn) {
+                e.stopPropagation();
+                const id = delBtn.dataset.deleteThreadId;
+                if (threadsStore.threads.length <= 1) return; // the "always at least one thread" invariant — nothing to delete down to
+                // Deleting a DIFFERENT thread is harmless mid-turn (it never touches history/
+                // nextTurn/memStore); only deleting the ACTIVE one — which forces a switch — hits
+                // the same unsafe-mid-turn reassignment switchToThread's own comment describes. The
+                // button-level disabling in renderSendBtn is the normal guard; this covers the menu
+                // having been left open from before the turn started.
+                if (id === threadsStore.activeThreadId && busy) return;
+                threadsStore.threads = threadsStore.threads.filter(t => t.id !== id);
+                if (id === threadsStore.activeThreadId) {
+                    // Deleted the one you were on — land on whatever's now most recently active.
+                    const next = threadsStore.threads.slice().sort((a, b) => b.updatedAt - a.updatedAt)[0];
+                    activateThread(next);
+                    renderStreamFromHistory();
+                }
+                saveThreadsStore(threadsStore);
+                renderThreadList();
+                return;
+            }
+            const item = e.target.closest("[data-thread-id]");
+            if (item) {
+                switchToThread(item.dataset.threadId);
+                setThreadMenuOpen(false);
+            }
+        });
+        document.addEventListener("click", (e) => {
+            if (threadMenu.classList.contains("open") && !threadMenu.contains(e.target) && e.target !== threadBtn && !threadBtn.contains(e.target)) {
+                setThreadMenuOpen(false);
+            }
+        });
+    }
+    if (threadNewBtn) threadNewBtn.addEventListener("click", () => { createNewThread(); setThreadMenuOpen(false); });
+    renderThreadList();
+
+    // ── Live "what's selected right now" readout above the composer ──
+    // Makes getCurrentSelectionContextSafe's own context VISIBLE rather than just trusting it
+    // silently — the user can see exactly what DataGPT is aware of before they even ask a
+    // question. Deliberately a SEPARATE, lighter read from that one: no values, just the address
+    // and shape, since this only ever needs to render a one-line label, not feed a prompt — and it
+    // runs on every poll tick, where getCurrentSelectionContextSafe only runs once per question.
+    let chatSelectionPollTimer = null;
+    let chatSelectionPollInFlight = false;
+    const renderChatSelectionIndicator = (text) => {
+        if (!selectionIndicator || !selectionIndicatorText) return;
+        if (text) {
+            selectionIndicatorText.textContent = text;
+            selectionIndicator.style.display = "flex";
+        } else {
+            selectionIndicator.style.display = "none";
+        }
+    };
+    const checkChatSelectionOnce = async () => {
+        // qdExcelBusy (Query Data's own contention gate — see its definition) is a shared,
+        // module-level counter: skipping a tick while it's held means this cheap, purely cosmetic
+        // poll never competes with an actual Query Data operation the user is waiting on for the
+        // one Office.js request channel.
+        if (chatSelectionPollInFlight || (typeof qdExcelBusy === "number" && qdExcelBusy > 0)) return;
+        chatSelectionPollInFlight = true;
+        try {
+            let text = null;
+            await Excel.run(async (ctx) => {
+                const range = ctx.workbook.getSelectedRange();
+                range.load("address,rowCount,columnCount");
+                await ctx.sync();
+                const cellPart = range.address.includes("!") ? range.address.slice(range.address.indexOf("!") + 1) : range.address;
+                text = (range.rowCount === 1 && range.columnCount === 1)
+                    ? `Cell ${cellPart} selected`
+                    : `Cell range ${cellPart} selected`;
+            });
+            renderChatSelectionIndicator(text);
+        } catch (e) {
+            // getSelectedRange() throws outright for a multi-area (Ctrl+click) selection — nothing
+            // valid to show in that case, so the indicator just hides rather than showing something
+            // wrong or stale.
+            renderChatSelectionIndicator(null);
+        } finally {
+            chatSelectionPollInFlight = false;
+        }
+    };
+    const CHAT_SELECTION_POLL_MS = 1200;
+    const startChatSelectionPolling = () => {
+        checkChatSelectionOnce();
+        if (!chatSelectionPollTimer) chatSelectionPollTimer = setInterval(checkChatSelectionOnce, CHAT_SELECTION_POLL_MS);
+    };
+    const stopChatSelectionPolling = () => {
+        if (chatSelectionPollTimer) { clearInterval(chatSelectionPollTimer); chatSelectionPollTimer = null; }
+        renderChatSelectionIndicator(null);
+    };
+
+    const openPanel = () => { panel.style.display = "flex"; fab.style.display = "none"; if (!stream.childElementCount) greet(); input.focus(); startChatSelectionPolling(); };
+    const closePanel = () => { panel.style.display = "none"; fab.style.display = ""; if (modeMenu) modeMenu.classList.remove("open"); stopChatSelectionPolling(); };
     fab.addEventListener("click", openPanel);
 
     // Ribbon handshake: the "Ask DataGPT" button's ShowTaskpane action points at
@@ -19463,7 +19806,20 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
     // on it here was a real race that left the panel closed behind the fab.
     let initialView = "main";
     try { initialView = new URLSearchParams(location.search).get("view") || "main"; } catch (e) { /* malformed query string */ }
-    if (initialView === "datagpt") openPanel();
+    // Every ribbon click into DataGPT starts a fresh conversation, rather than silently resuming
+    // whatever thread happened to be active last time — createNewThread (defined above, in the
+    // thread-picker section) already does exactly that: pushes a brand-new empty thread, activates
+    // it, persists it, and re-renders the stream (which falls back to greet() on its own for an
+    // empty thread, so openPanel's own greet-if-empty check below is a no-op here, never a double
+    // greeting). Skipped only when the thread that was ALREADY active (restored by activateThread
+    // during this same setup, above) is itself already empty — e.g. the user opened DataGPT,
+    // never sent anything, and closed the ribbon pane — since creating a second empty thread on
+    // top of an unused first one would just be visually identical clutter, silently eating into
+    // MAX_THREADS over a session of casually clicking the ribbon button in and out.
+    if (initialView === "datagpt") {
+        if (history.length) createNewThread();
+        openPanel();
+    }
     // A question Query Data's own intent triage decided belongs here instead (see
     // classifyQueryDataIntent/delegateToDataGpt) — read once and cleared immediately, so switching
     // to this view again later (the ribbon button, not another delegation) never re-fills a stale
@@ -19477,21 +19833,10 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
             input.focus();
         }
     } catch (e) { /* storage unavailable — the view still opens, just without the prefilled question */ }
-    // (No close button any more — see the chat header in taskpane.html.)
-    const chatClear = byId("chatClear");
-    if (chatClear) {
-        chatClear.addEventListener("click", async () => {
-            const ok = await addConfirmCard("Clear all chat history?", { approveLabel: "Clear", rejectLabel: "Cancel" });
-            if (!ok) return;
-            history = [];
-            persistHistory();
-            // The turn notes go with it: they describe conversations the user just asked to forget.
-            memStore = memEmptyStore();
-            try { localStorage.removeItem(MEM_KEY); } catch (e) { /* nothing to remove */ }
-            stream.innerHTML = "";
-            greet();
-        });
-    }
+    // (No close button any more — see the chat header in taskpane.html.) Clear Chat (which used to
+    // live here, next to the mode button) was removed outright — it only ever reset the CURRENT
+    // thread's history in place, which the thread picker's own per-thread delete (chatThreadMenu's
+    // "✕") plus "New chat" already cover between them, with no separate control needed.
     input.addEventListener("input", () => { input.style.height = "auto"; input.style.height = Math.min(96, input.scrollHeight) + "px"; });
     input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
     sendBtn.addEventListener("click", () => { if (busy) stopCurrentTurn(); else send(); });

@@ -1041,9 +1041,30 @@
                             <!-- Always visible, in both input modes (unlike the hint below it) — the
                                  one shared submit action for a typed request OR a selected skeleton. -->
                             <div class="fb-footer dt-download-footer" id="dtDownloadFooter">
-                                <div class="dt-query-hint" id="dtQueryHint">
+                                <div class="dt-query-hint" id="dtQueryHint" role="button" tabindex="0" aria-expanded="false" aria-describedby="dtQueryHintPreview">
                                     <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"></rect><rect x="14" y="3" width="7" height="7" rx="1"></rect><rect x="3" y="14" width="7" height="7" rx="1"></rect><rect x="14" y="14" width="7" height="7" rx="1"></rect></svg>
                                     <span>Or select headers in your sheet</span>
+                                </div>
+                                <!-- Hover OR click preview of what "select headers in your sheet" means
+                                     — see hooking it up in taskpane.js (search "dtQueryHintPreview").
+                                     position:fixed (not absolute) deliberately: #dtQueryHint sits at the
+                                     very bottom of .fb-box, which clips overflow, and this needs to
+                                     visibly grow DOWNWARD past that edge the way a dropdown/popover
+                                     would — the same escape-the-clipped-card technique #dtLoadingOverlay
+                                     already uses, just without covering the whole window. Its
+                                     top/left are set in JS from dtQueryHint's own live position rather
+                                     than fixed in CSS, so it still lines up correctly if the window is
+                                     resized between opens. The <video> starts with no "src" — the clip
+                                     is ~14MB, fetched only the first time this is actually opened, never
+                                     eagerly on page load. autoplay+loop+muted+playsinline makes it
+                                     behave like the GIF it replaces (plays immediately, loops forever,
+                                     no controls UI); muted is required for autoplay to be allowed at
+                                     all. play()/pause() are driven from JS on open/close instead of
+                                     relying on autoplay alone, so it actually restarts from the
+                                     beginning each time it's reopened rather than continuing a loop
+                                     that kept running invisibly in the background. -->
+                                <div class="dt-query-hint-preview" id="dtQueryHintPreview" role="tooltip">
+                                    <video id="dtQueryHintPreviewImg" aria-label="Selecting a hand-built table skeleton directly in the sheet, then pressing Download" muted loop playsinline preload="none"></video>
                                 </div>
                                 <button type="button" class="fb-submit dt-download-btn" id="dtDownload">
                                     <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
@@ -1051,33 +1072,6 @@
                                 </button>
                             </div>
 
-                            <!-- ── Tutorial — Download Data tab only, for now (Your Tables doesn't
-                                 have one yet) — see the tutorial step engine in taskpane.js (search
-                                 "dtTutorialSteps") for the step content and what each step actually
-                                 automates. Deliberately NOT built on .dz-overlay (that family of
-                                 modal always dims the whole window behind it, position:fixed;
-                                 inset:0) — this "expands" from the button's own bottom-right corner
-                                 instead (transform-origin, see .dt-tutorial-panel below) and leaves
-                                 everything else fully visible/usable, since a couple of its steps
-                                 specifically want the user watching the composer/sheet update live
-                                 while it plays. #dtDownloadBody is this pair's own positioned
-                                 ancestor (position:relative, see its CSS) rather than the whole
-                                 .fb-box, so it never overlaps the tab bar above. -->
-                            <button type="button" id="dtTutorialBtn" class="dt-tutorial-fab" title="Tutorial: how to use Download Data">
-                                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M9.5 9a2.5 2.5 0 0 1 5 0c0 1.4-1.25 1.8-1.75 2.75-.2.4-.25.75-.25 1.25"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
-                                <span>Tutorial</span>
-                            </button>
-                            <div id="dtTutorialPanel" class="dt-tutorial-panel" style="display:none;">
-                                <button type="button" id="dtTutorialX" class="dt-icon-btn dt-tutorial-x-btn" title="Close tutorial" aria-label="Close tutorial">
-                                    <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-                                </button>
-                                <div class="dt-tutorial-body" id="dtTutorialBody"></div>
-                                <div class="dt-tutorial-footer">
-                                    <button type="button" id="dtTutorialPrev" class="dt-tutorial-nav-btn" disabled>Previous</button>
-                                    <span id="dtTutorialStepLabel" class="dt-tutorial-step-label">Step 1 of 3</span>
-                                    <button type="button" id="dtTutorialNext" class="fb-submit dt-tutorial-next-btn"><span>Next</span></button>
-                                </div>
-                            </div>
                         </div>
 
                         <!-- "Your Tables" — every table in THIS workbook that this feature created,
@@ -1112,17 +1106,22 @@
                                 </div>
                             </div>
 
-                            <!-- ── Tutorial — Your Tables ── Same shell/CSS as the Download Data
-                                 tutorial (#dtTutorialBtn/#dtTutorialPanel — see its own comment for
-                                 why this isn't a .dz-overlay) under a separate id prefix, so both
-                                 can exist independently. This one walks through editing an EXISTING
-                                 table rather than creating one — a disposable sample table (clearly
-                                 labeled as such in its own title/description) is created on its own
-                                 temporary sheet when the tutorial opens and that whole sheet is
-                                 deleted when it closes, specifically so nothing here ever touches a
-                                 real table of the user's own — see "dtYtTutorialSteps" in
-                                 taskpane.js. #dtYourTablesPanel is this pair's own positioned
-                                 ancestor (position:relative, same rule #dtDownloadBody shares). -->
+                            <!-- ── Tutorial — Your Tables ── The only step-by-step tutorial left in
+                                 this feature (Download Data's own equivalent was removed in favor of
+                                 its hover/click video preview — see #dtQueryHintPreview above).
+                                 Deliberately NOT built on .dz-overlay (that family of modal always
+                                 dims the whole window behind it, position:fixed; inset:0) — this
+                                 "expands" from the button's own bottom-right corner instead
+                                 (transform-origin, see .dt-tutorial-panel below) and leaves
+                                 everything else fully visible/usable. Used to demonstrate the Update/
+                                 Refresh flow with a disposable sample table it created on its own
+                                 temporary sheet and deleted on close — replaced with
+                                 #dtYtTutorialVideo (Table Update Tutorial2.mp4) instead, so nothing
+                                 here touches the workbook at all any more; see "ytTutorialSteps" in
+                                 taskpane.js. #dtYtTutorialVideo starts with no "src" — the clip is
+                                 ~11MB, fetched only the first time this tutorial is actually opened.
+                                 #dtYourTablesPanel is this pair's own positioned ancestor
+                                 (position:relative, same rule #dtDownloadBody shares). -->
                             <button type="button" id="dtYtTutorialBtn" class="dt-tutorial-fab" title="Tutorial: how to use Your Tables">
                                 <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M9.5 9a2.5 2.5 0 0 1 5 0c0 1.4-1.25 1.8-1.75 2.75-.2.4-.25.75-.25 1.25"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
                                 <span>Tutorial</span>
@@ -1131,10 +1130,11 @@
                                 <button type="button" id="dtYtTutorialX" class="dt-icon-btn dt-tutorial-x-btn" title="Close tutorial" aria-label="Close tutorial">
                                     <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
                                 </button>
+                                <video id="dtYtTutorialVideo" class="dt-tutorial-video" muted loop controls playsinline preload="none"></video>
                                 <div class="dt-tutorial-body" id="dtYtTutorialBody"></div>
                                 <div class="dt-tutorial-footer">
                                     <button type="button" id="dtYtTutorialPrev" class="dt-tutorial-nav-btn" disabled>Previous</button>
-                                    <span id="dtYtTutorialStepLabel" class="dt-tutorial-step-label">Step 1 of 5</span>
+                                    <span id="dtYtTutorialStepLabel" class="dt-tutorial-step-label">Step 1 of 2</span>
                                     <button type="button" id="dtYtTutorialNext" class="fb-submit dt-tutorial-next-btn"><span>Next</span></button>
                                 </div>
                             </div>
@@ -1480,8 +1480,8 @@
                        a tall window" report — .dt-yt-list's own max-height was a RED HERRING fix
                        target, since raising it would do nothing until this link in the chain exists. */
                     #dtYourTablesField { flex: 1; min-height: 0; }
-                    /* ── Tutorial (Download Data tab only — see the HTML's own comment on
-                       #dtTutorialBtn for why this isn't built on .dz-overlay) ── */
+                    /* ── Tutorial (Your Tables tab only now — see the HTML's own comment on
+                       #dtYtTutorialBtn for why this isn't built on .dz-overlay) ── */
                     .dt-tutorial-fab {
                         position: absolute; right: 12px; bottom: 12px; z-index: 40;
                         display: inline-flex; align-items: center; gap: 6px;
@@ -1522,11 +1522,21 @@
                     /* Floated into the panel's own top-right corner (.dt-tutorial-panel is already
                        position:absolute, so it's this button's containing block too) rather than
                        sitting in a dedicated header row — a whole row was a lot of vertical space to
-                       spend on one small icon. .dt-tutorial-body's top padding below is sized to clear
-                       it, so the close button reads as floating over the corner of the text, not
-                       colliding with it. */
+                       spend on one small icon. #dtYtTutorialVideo's own top margin below is sized to
+                       clear it, so the close button reads as floating over the corner of the video,
+                       not colliding with it. */
                     .dt-tutorial-x-btn { position: absolute; top: 6px; right: 6px; z-index: 1; }
-                    .dt-tutorial-body { padding: 32px 16px 14px; font-size: 12.5px; line-height: 1.55; color: #2c3744; overflow-y: auto; min-height: 0; }
+                    /* width:100%/height:auto (not a fixed height) so this adapts to the clip's own
+                       real aspect ratio rather than letterboxing or cropping it — the panel's WIDTH
+                       is fixed (340px, see .dt-tutorial-panel) regardless of viewport, so unlike
+                       #dtQueryHintPreview's video (which has to fit whatever vertical room happens to
+                       be left below a hint sitting at an unpredictable Y position) there's nothing to
+                       compute here: a 16:9 clip comes out to a very modest ~170px tall. margin-top
+                       clears the close button floating over this corner (see its own comment);
+                       border-radius only on the top corners, since the body/footer below sit flush
+                       against it with no gap. */
+                    .dt-tutorial-video { display: block; width: 100%; height: auto; margin-top: 28px; border-radius: 12px 12px 0 0; background: #000; }
+                    .dt-tutorial-body { padding: 10px 16px 14px; font-size: 12.5px; line-height: 1.55; color: #2c3744; overflow-y: auto; min-height: 0; }
                     .dt-tutorial-body p { margin: 0 0 8px; }
                     .dt-tutorial-body p:last-child { margin-bottom: 0; }
                     .dt-tutorial-body b { color: #173760; }
@@ -1545,23 +1555,6 @@
                     .dt-tutorial-nav-btn:hover { background: #f0f5ff; border-color: #b9cff0; }
                     .dt-tutorial-nav-btn:disabled { opacity: 0.45; cursor: default; }
                     .dt-tutorial-next-btn { width: auto; margin: 0; padding: 6px 14px; font-size: 11.5px; }
-                    /* A generic "look here" ring — shared by every tutorial (Download Data's own
-                       Download button, and Your Tables' pencil/location-row/textarea/Update-bar/
-                       Refresh-button, see its own step engine further down in taskpane.js), applied
-                       via plain classList.add/remove on whichever element a step is currently
-                       pointing at. Same navy the rest of this view already uses for "this matters
-                       right now" emphasis (the selected-table focus ring, the pending-update
-                       highlight). border-radius is harmless on an element that already has its own
-                       rounder/squarer corners — the ring itself still reads clearly either way. */
-                    .dt-tutorial-spotlight {
-                        box-shadow: 0 0 0 3px rgba(23,55,96,0.28) !important; border-radius: 6px;
-                        animation: dtTutorialPulse 1.4s ease-in-out infinite;
-                    }
-                    @keyframes dtTutorialPulse {
-                        0%, 100% { box-shadow: 0 0 0 3px rgba(23,55,96,0.28); }
-                        50% { box-shadow: 0 0 0 6px rgba(23,55,96,0.12); }
-                    }
-                    @media (prefers-reduced-motion: reduce) { .dt-tutorial-spotlight { animation: none; } }
                     /* Composer kept deliberately compact — no "Get data" header/subtitle any more,
                        tighter padding/gap than this view's own Download Data/Feedback neighbors use,
                        and a shorter textarea/footer/button (see dt-query-textarea/dt-download-footer/
@@ -1580,8 +1573,60 @@
                        actually being used as the query). Tighter padding than the shared .fb-footer
                        default, again to keep this whole section compact. */
                     .dt-download-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 16px; }
-                    .dt-query-hint { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: #6b7686; min-width: 0; }
+                    /* A visible chip/pill at REST (not just a hover tint) — background matches
+                       .fb-box's own white, with a border to actually read as a distinct, clickable
+                       shape against it (plain white-on-white would be invisible), same convention
+                       .dt-tutorial-fab already uses for its own pill button. min-width:0 (unchanged
+                       from before) is still what lets this shrink/wrap on a narrow window rather
+                       than pushing the Download button out of the footer. */
+                    .dt-query-hint {
+                        display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: #6b7686; min-width: 0;
+                        cursor: pointer; background: #fff; border: 1.5px solid #e6eaf0; border-radius: 20px;
+                        padding: 6px 12px;
+                        transition: background-color .12s ease, color .12s ease, border-color .12s ease;
+                    }
+                    .dt-query-hint:hover, .dt-query-hint:focus-visible { background: #eef3fb; border-color: #b9cff0; color: #173760; outline: none; }
                     .dt-query-hint svg { flex-shrink: 0; }
+                    /* Grows DOWNWARD from dtQueryHint's own bottom-left corner — see the HTML's own
+                       comment on #dtQueryHintPreview for why position:fixed, not absolute. Closed by
+                       default: zero height, so it takes no layout space and can't intercept hover/
+                       click meant for whatever's visually underneath it until actually opened. */
+                    /* 560px wide — bigger than the GIF's own native 400x225 (it now upscales a
+                       little rather than rendering 1:1; a soft edge on a screen-recording GIF is a
+                       fair trade for it actually being readable). Height is 560 * 225/400 = 315,
+                       kept at that same 16:9 ratio so the image stretches rather than letterboxing.
+                       max-width still clamps to the viewport for a genuinely narrow/undocked pane —
+                       width: min(...) is what actually shrinks it there, since a plain "width"
+                       wouldn't. max-height open adds the usual small buffer over the computed 315px,
+                       not an exact match — a hair of slack is harmless, being short enough to clip
+                       the bottom row of frames is not. */
+                    /* The actual bug behind "height keeps not increasing": the img was
+                       "width:100%; height:auto" — its SIZE was driven entirely by the box's width,
+                       so raising the box's own max-height only ever added blank padding around a GIF
+                       that never got any bigger. Flipped here: the img now has an explicit HEIGHT
+                       (the real size control) and "width:auto", so it computes its OWN width from
+                       its native 400:225 aspect ratio — the box is "width:fit-content" so it hugs
+                       whatever that comes out to, clamped by max-width only as a narrow-pane safety
+                       net (img's own max-width:100% then keeps both dimensions shrinking together
+                       if that clamp ever binds, never stretching/distorting). Raising the img's own
+                       height is now what actually makes the visible GIF bigger. */
+                    .dt-query-hint-preview {
+                        position: fixed; z-index: 60; width: fit-content; max-width: calc(100vw - 24px);
+                        display: flex; align-items: center; justify-content: center;
+                        background: #fff; border: 1px solid #e6eaf0; border-radius: 10px;
+                        box-shadow: 0 10px 28px rgba(23,55,96,0.22);
+                        overflow: hidden; max-height: 0; opacity: 0; pointer-events: none;
+                        transition: max-height .2s ease, opacity .15s ease;
+                    }
+                    /* max-height here is only a FALLBACK default (if positionQueryHintPreview's own
+                       inline style somehow never runs) — the real, viewport-aware target is set in
+                       JS on every open, since a flat number here clipped against the window's own
+                       bottom edge the moment the hint's position left less room than this assumed.
+                       Same story for the img's height just below: no fixed value in CSS any more,
+                       JS sets it per-open to whatever actually fits. */
+                    .dt-query-hint-preview.dt-query-hint-preview-open { max-height: 434px; opacity: 1; pointer-events: auto; }
+                    .dt-query-hint-preview video { display: block; width: auto; max-width: 100%; }
+                    @media (prefers-reduced-motion: reduce) { .dt-query-hint-preview { transition: none; } }
                     /* Slightly smaller than the shared .fb-submit default (10px/14px padding, 13px
                        font) — not drastically, just enough to match the rest of this now-compact
                        section instead of looming over it. */
@@ -2181,20 +2226,99 @@
                         border-radius: 0; border: none; box-shadow: none;
                     }
                     .chat-header {
-                        display: flex; align-items: center; justify-content: space-between;
+                        position: relative; z-index: 1301; display: flex; align-items: center; justify-content: space-between;
                         background: linear-gradient(135deg, #2f6fd0, #173760); color: #fff;
                         border-bottom: 2px solid #d80404; padding: 10px 14px; font-weight: 700; font-size: 13px;
                     }
-                    .chat-header-actions { display: flex; align-items: center; gap: 12px; }
-                    .chat-ctx { padding: 7px 14px 9px; background: #f0f5ff; border-bottom: 1px solid #d6e5f5; font-size: 11px; color: #55606e; display: flex; flex-direction: column; gap: 6px; }
-                    .chat-clear {
-                        display: flex; align-items: center; justify-content: center;
-                        flex-shrink: 0; width: auto; box-sizing: border-box; margin: 0;
-                        cursor: pointer; font-size: 10.5px; font-weight: 700; color: #173760;
-                        background: #fff; border: 1px solid #d6e5f5; border-radius: 7px;
-                        padding: 4px 9px; font-family: inherit; box-shadow: none;
+                    .chat-header-actions { display: flex; align-items: center; gap: 6px; }
+                    /* Icon-only hamburger — swaps to a cross (✕) while open (see setThreadMenuOpen in
+                       taskpane.js, which swaps this button's own inner SVG) since it's also what
+                       closes the panel; stays visible/clickable the whole time the panel is open —
+                       see .chat-header's own z-index comment for why. Per-thread delete lives inside
+                       the drawer itself (only reachable once it's open — see .chat-thread-item-delete
+                       below); "New chat" sits right next to this button instead, in the real header
+                       — see .chat-thread-new-btn's own comment for why it can't live inside the
+                       drawer's own area the way an earlier version tried. */
+                    .chat-thread-btn {
+                        display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; padding: 0;
+                        background: rgba(255,255,255,0.16); border: 1px solid rgba(255,255,255,0.32); border-radius: 7px;
+                        color: #fff; cursor: pointer;
                     }
-                    .chat-clear:hover { background: #eaf1ff; border-color: #b9cff0; }
+                    .chat-thread-btn:hover { background: rgba(255,255,255,0.26); }
+                    /* Disabled while a turn is in flight — see renderSendBtn's own comment on why
+                       switching threads mid-turn isn't just visually premature but unsafe. */
+                    .chat-thread-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+                    .chat-thread-btn:disabled:hover { background: rgba(255,255,255,0.16); }
+                    /* The dark backdrop — covers the whole chat panel (header included; see
+                       .chat-header's own z-index comment for why the header still shows through
+                       opaque on top of it) rather than just the area below the header, so the
+                       dimming reads as "the WHOLE window behind this is dimmed", not a patch of it.
+                       .chat-thread-panel inside (the actual white sliding list) is a right-anchored
+                       side drawer — ~80% width, full height — leaving a ~20%-wide strip on the left
+                       showing nothing but this dim tint over the real chat stream/composer. Clicking
+                       that dim strip (the backdrop itself, not the panel — see the click listener's
+                       own e.target check) closes the menu, the same as clicking the header's
+                       hamburger-turned-cross does. Kept in the DOM at all times rather than
+                       display:none'd — opacity/pointer-events on this, and a translateX transform on
+                       the panel, are both toggled by .open instead, since animating the panel
+                       sliding in needs a real "before" state to transition FROM, which display:none
+                       has no frame to render. */
+                    .chat-thread-menu {
+                        position: absolute; inset: 0; z-index: 1300;
+                        display: flex; flex-direction: row; justify-content: flex-end;
+                        background: rgba(15,23,35,0.55);
+                        opacity: 0; pointer-events: none; transition: opacity .18s ease;
+                    }
+                    .chat-thread-menu.open { opacity: 1; pointer-events: auto; }
+                    .chat-thread-panel {
+                        flex: 0 0 80%; min-width: 0; height: 100%; display: flex; flex-direction: column;
+                        background: #fff; box-shadow: -14px 0 32px rgba(0,0,0,0.3); overflow: hidden;
+                        transform: translateX(100%); transition: transform .22s ease;
+                        /* Clears the real .chat-header's own rendered height — this drawer spans
+                           the FULL height of #chatPanel, starting at the same y=0 the real header
+                           itself occupies, and that header's higher z-index paints over anything
+                           placed under it (see its own comment), so the scrollable list below needs
+                           to start clear of that strip rather than trying to put anything
+                           interactive there. 48px here is only a FALLBACK default (if
+                           syncThreadPanelOffset in taskpane.js somehow never runs) — the real value
+                           is the header's ACTUAL measured height, set inline on this element every
+                           time the drawer opens (a hand-computed guess here turned out wrong on a
+                           real task pane — see that function's own comment for why). */
+                        padding-top: 48px;
+                    }
+                    .chat-thread-menu.open .chat-thread-panel { transform: translateX(0); }
+                    @media (prefers-reduced-motion: reduce) {
+                        .chat-thread-menu, .chat-thread-panel { transition: none; }
+                    }
+                    /* Lives in the REAL .chat-header now (next to the hamburger/cross — see its own
+                       comment for why), not inside the drawer — same translucent-white-chip family
+                       as .chat-thread-btn so the two read as a matched pair. */
+                    .chat-thread-new-btn {
+                        display: inline-flex; align-items: center; gap: 4px;
+                        background: rgba(255,255,255,0.16); border: 1px solid rgba(255,255,255,0.32); border-radius: 7px;
+                        padding: 4px 9px; color: #fff; font-size: 11px; font-weight: 600; font-family: inherit; cursor: pointer;
+                    }
+                    .chat-thread-new-btn:hover { background: rgba(255,255,255,0.26); }
+                    .chat-thread-new-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+                    .chat-thread-new-btn:disabled:hover { background: rgba(255,255,255,0.16); }
+                    .chat-thread-list { flex: 1; overflow-y: auto; min-height: 0; }
+                    .chat-thread-item {
+                        display: flex; align-items: center; gap: 8px; padding: 11px 14px; cursor: pointer;
+                        border-bottom: 1px solid #f0f3f8; color: #2c3744;
+                    }
+                    .chat-thread-item:last-child { border-bottom: none; }
+                    .chat-thread-item:hover { background: #f5f8ff; }
+                    .chat-thread-item.active { background: #eaf1ff; }
+                    .chat-thread-item-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+                    .chat-thread-item-title { font-size: 13px; font-weight: 600; color: #173760; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+                    .chat-thread-item-meta { font-size: 11px; color: #8a94a3; }
+                    /* Only shown on hover — a permanently-visible delete icon on every row (there can
+                       be up to MAX_THREADS=30 of them) is visual noise most of the time; it only
+                       needs to be reachable at the moment someone's actually looking to delete one. */
+                    .chat-thread-item-delete { flex-shrink: 0; opacity: 0; color: #b0372f; font-size: 12px; padding: 4px 6px; border-radius: 5px; }
+                    .chat-thread-item:hover .chat-thread-item-delete { opacity: 1; }
+                    .chat-thread-item-delete:hover { background: #fdecea; }
+                    .chat-ctx { padding: 7px 14px 9px; background: #f0f5ff; border-bottom: 1px solid #d6e5f5; font-size: 11px; color: #55606e; display: flex; flex-direction: column; gap: 6px; }
                     .chat-ctx b { color: #173760; }
                     .chat-ctx-field { display: flex; align-items: center; gap: 6px; }
                     .chat-ctx-label { flex-shrink: 0; width: 72px; color: #55606e; }
@@ -2333,7 +2457,13 @@
                         .chat-card.run { animation: none; opacity: 0.75; }
                     }
                     .chat-mode-wrap { position: relative; padding: 6px 10px; flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-                    .chat-mode-btn { display: inline-flex; align-items: center; gap: 6px; background: #f5f7fa; border: 1px solid #e6eaf0; border-radius: 8px; padding: 5px 10px; margin: 0; font-size: 11.5px; font-weight: 600; color: #2c3744; cursor: pointer; font-family: inherit; }
+                    /* Shrunk a bit (was 5px 10px / 11.5px) now that this shares its row with the
+                       selection indicator — every px here is row space that no longer has to fight
+                       the mode button for. "Auto"/"Manual" (see renderMode in taskpane.js) is the
+                       short, Claude-Code-style mode name BY DESIGN, not a truncation — the dropdown
+                       item below carries the same name plus its own full description, shown only
+                       once that menu is actually open. */
+                    .chat-mode-btn { display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; background: #f5f7fa; border: 1px solid #e6eaf0; border-radius: 7px; padding: 4px 8px; margin: 0; font-size: 11px; font-weight: 600; color: #2c3744; cursor: pointer; font-family: inherit; }
                     .chat-mode-btn:hover { background: #eef1f5; }
                     .chat-mode-caret { font-size: 9px; opacity: .6; margin-left: 1px; }
                     .chat-mode-menu { display: none; position: absolute; bottom: calc(100% + 4px); left: 10px; min-width: 240px; background: #fff; border: 1px solid #d6e5f5; border-radius: 10px; box-shadow: 0 10px 28px rgba(0,0,0,0.18); overflow: hidden; z-index: 1300; }
@@ -2390,6 +2520,23 @@
                     .chat-composer button.stop:hover { background: #9a0000; }
                     .chat-composer button:disabled { background: #c3ccd8; cursor: not-allowed; }
                     .chat-balance-notice { display: none; margin-bottom: 6px; padding: 6px 8px; border-radius: 8px; background: #fdecec; border: 1px solid #f5c2c2; color: #a12626; font-size: 11px; line-height: 1.35; }
+                    /* A small, quiet chip — confirms what DataGPT will treat as "the selection"
+                       without competing with the composer for attention. monospace + ellipsis
+                       since a real address ("Sheet2!B3:AZ120") can run long. Sits in #chatModeWrap's
+                       row now, pinned to the RIGHT of it (that wrap's own justify-content:space-
+                       between is what does the pinning, against the mode button on the left) rather
+                       than stretching to fill the whole row — sized to its own content up to
+                       max-width, so it sits flush against the right edge for a short address and
+                       still ellipsizes instead of overflowing for a long one. min-width:0 is what
+                       lets a flex item shrink/ellipsize at all; without it a long, unbreakable
+                       (white-space:nowrap) address would just keep the box growing to fit instead. */
+                    .chat-selection-indicator {
+                        display: flex; align-items: center; gap: 5px; flex: 0 1 auto; min-width: 0; max-width: 65%; padding: 4px 8px;
+                        border-radius: 7px; background: #eef3fb; color: #45587a; font-size: 10.5px;
+                        overflow: hidden; white-space: nowrap;
+                    }
+                    .chat-selection-indicator svg { flex-shrink: 0; }
+                    .chat-selection-indicator span { overflow: hidden; text-overflow: ellipsis; min-width: 0; font-family: "SFMono-Regular", Consolas, monospace; }
                     .chat-composer button { position: absolute; right: 4px; bottom: 4px; margin: 0; width: 28px; height: 28px; padding: 0; border-radius: 8px; border: none; background: linear-gradient(135deg, #2f6fd0, #173760); color: #fff; font-size: 13px; line-height: 1; cursor: pointer; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; box-shadow: none; }
                 </style>
                 <div id="chatFeature">
@@ -2399,15 +2546,55 @@
                             <span>✦ Ask DataGPT</span>
                             <!-- Close control removed. The panel fills the ribbon task pane
                                  (view=datagpt), so there is nothing to close back to — it just left
-                                 the user on a blank pane. The empty actions span stays as the
-                                 header's right-hand flex slot so the title keeps its position. -->
-                            <span class="chat-header-actions"></span>
+                                 the user on a blank pane. The actions span now holds the thread
+                                 picker (see renderThreadList/switchToThread/createNewThread in
+                                 taskpane.js) instead of staying empty. New chat lives HERE, in the
+                                 real header, rather than inside the drawer's own area below — see
+                                 #chatThreadMenu's own comment for why nothing placed there can sit
+                                 in this same vertical strip. -->
+                            <span class="chat-header-actions">
+                                <button type="button" class="chat-thread-new-btn" id="chatThreadNewBtn" title="Start a new conversation">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                                    <span>New chat</span>
+                                </button>
+                                <button type="button" class="chat-thread-btn" id="chatThreadBtn" title="Chat history" aria-haspopup="true" aria-expanded="false">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="6" x2="20" y2="6"></line><line x1="4" y1="12" x2="20" y2="12"></line><line x1="4" y1="18" x2="20" y2="18"></line></svg>
+                                </button>
+                            </span>
+                        </div>
+                        <!-- Dimming backdrop + a right-anchored sliding side drawer, not a small
+                             anchored dropdown or a full cover — #chatThreadMenu itself is the dark
+                             backdrop (position:absolute; inset:0 — #chatPanel is always
+                             position:fixed, its nearest positioned ancestor either way), and
+                             .chat-thread-panel inside it is the actual white drawer: ~80% width,
+                             full height, sliding in from the right edge, so a strip of the real
+                             chat window stays visible (dimmed, through the backdrop) on the left.
+                             The real .chat-header stays visible THROUGH this (and clickable — see
+                             chatThreadBtn) despite the backdrop technically extending up under it
+                             too: .chat-header's z-index is set above .chat-thread-menu's own, so its
+                             opaque gradient simply paints over that same region. That's also exactly
+                             why nothing of this drawer's own can be placed in that same strip —
+                             confirmed live 2026-10-29: an earlier version put a second "Chats" +
+                               "New chat" header bar at the TOP of .chat-thread-panel, which sits in
+                             IDENTICAL screen space to the real header above it (both start at this
+                             same y=0, since the drawer spans the panel's full height) — the real
+                             header's higher z-index painted straight over it, making that entire bar
+                             (New chat included) invisible even though it was genuinely in the DOM.
+                             .chat-thread-panel's own padding-top (sized to the real header's exact,
+                             fixed height) now keeps the thread LIST clear of that same dead strip
+                             instead, rather than trying to put anything interactive there. Only
+                             #chatThreadList's CONTENTS are rebuilt by renderThreadList() on every
+                             render — the rest of this shell is static markup, never touched from JS. -->
+                        <div class="chat-thread-menu" id="chatThreadMenu">
+                            <div class="chat-thread-panel">
+                                <div class="chat-thread-list" id="chatThreadList"></div>
+                            </div>
                         </div>
                         <!-- TEMPORARY: compare selection hidden for now per request — re-enable by
                              removing the display:none below (on this wrapper too, not just the
-                             field — it's hidden itself now that Clear Chat, its only other visible
-                             content, moved down into #chatModeWrap). The "Acting on" manual picker
-                             that used to sit alongside this was removed outright, not just hidden:
+                             field — this wrapper has nothing else left in it to stay visible for).
+                             The "Acting on" manual picker that used to sit alongside this was
+                             removed outright, not just hidden:
                              DataGPT resolves its own subject company now (auto-pinned from what
                              the user actually types, restored from this workbook's own session
                              notes across reloads — see primaryCo) and no longer needs a manual
@@ -2424,21 +2611,34 @@
                         </div>
                         <div class="chat-stream" id="chatStream"></div>
                         <div class="chat-mode-wrap" id="chatModeWrap">
+                            <!-- Short mode name + caret on the button itself, same convention
+                                 Claude Code's own mode switcher uses — the FULL description for
+                                 each mode only shows once the dropdown below is actually open (see
+                                 each .chat-mode-item's own <small>), not crammed into the button. -->
                             <button type="button" class="chat-mode-btn" id="chatModeBtn" title="Choose write mode">
                                 <span id="chatModeIcon">✋</span>
-                                <span id="chatModeBtnLabel">Ask before writing</span>
+                                <span id="chatModeBtnLabel">Manual</span>
                                 <span class="chat-mode-caret">▾</span>
                             </button>
-                            <button type="button" class="chat-clear" id="chatClear" title="Clear chat history">Clear Chat</button>
+                            <!-- Moved up from .chat-composer below so it shares this one row with
+                                 the mode button instead of sitting on its own line above the
+                                 textarea — see .chat-selection-indicator's own flex:1 for how it
+                                 absorbs whatever width the mode button doesn't need. Still the exact
+                                 same element checkChatSelectionOnce/openPanel/closePanel in
+                                 taskpane.js already drive — only its position in the DOM moved. -->
+                            <div class="chat-selection-indicator" id="chatSelectionIndicator" style="display:none;">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"></rect><line x1="9" y1="3" x2="9" y2="21"></line><line x1="3" y1="9" x2="21" y2="9"></line></svg>
+                                <span id="chatSelectionIndicatorText"></span>
+                            </div>
                             <div class="chat-mode-menu" id="chatModeMenu">
                                 <div class="chat-mode-item" data-mode="ask">
                                     <span class="chat-mode-item-icon">✋</span>
-                                    <span class="chat-mode-item-text"><b>Ask before writing</b><small>DataGPT confirms before editing the sheet</small></span>
+                                    <span class="chat-mode-item-text"><b>Manual</b><small>DataGPT confirms before editing the sheet</small></span>
                                     <span class="chat-mode-tick" data-tick="ask">✓</span>
                                 </div>
                                 <div class="chat-mode-item" data-mode="auto">
                                     <span class="chat-mode-item-icon">⚡</span>
-                                    <span class="chat-mode-item-text"><b>Write automatically</b><small>DataGPT edits the sheet without asking first</small></span>
+                                    <span class="chat-mode-item-text"><b>Auto</b><small>DataGPT edits the sheet without asking first</small></span>
                                     <span class="chat-mode-tick" data-tick="auto">✓</span>
                                 </div>
                             </div>
@@ -2522,49 +2722,15 @@
         </div>-->
     </div>
 
-    <!-- ── One-time "we've moved to the ribbon" notice ──────────────────────────────────────
-         The side-panel-first layout has been retired: the Home tab's GoIndia button is gone from
-         the manifest, and every feature now lives on the "GoIndia Stocks" ribbon tab. Users
-         upgrading from the old build would otherwise just find their familiar Home-tab icon
-         missing with no explanation.
-         Deliberately placed OUTSIDE #loginWrapper: applyRibbonView() hides every child of #addinUI
-         that isn't in the current view's allowlist, and the login flow toggles #loginWrapper's own
-         children — sitting outside both means this shows identically on every ?view= and whether
-         or not the user is signed in. Reuses the existing .dz-overlay/.dz-box modal styling. -->
-    <div id="ribbonMoveModal" class="dz-overlay">
-        <div class="dz-box">
-            <div class="dz-header">We've moved to the ribbon</div>
-            <div class="dz-body">
-                <div class="dz-warn">
-                    Everything now lives on the <b>GoIndia Stocks</b> tab in the ribbon along the top of
-                    Excel — next to Home, Insert, Draw and Data.
-                </div>
-                <div class="dz-gen">
-                    <b>What changed</b><br>
-                    The old Go India button on the <b>Home</b> tab has been removed. Instead of one side
-                    panel holding everything, each feature now has its own ribbon button:<br><br>
-                    • <b>Download Data</b> — pick a company, choose data sources, build the AI model<br>
-                    • <b>Ask DataGPT</b> — the research chat, opens full-width<br>
-                    • <b>Feedback</b> — tell us about a company's data<br>
-                    • <b>Profile</b> — your account, wallet balance and usage history<br>
-                    • <b>Log Out</b><br><br>
-                    Nothing has been removed from the product — it's the same features, reached from the
-                    ribbon instead of a single panel.
-                </div>
-            </div>
-            <div class="dz-footer">
-                <button id="ribbonMoveClose" class="dz-agree">Got it</button>
-            </div>
-        </div>
-    </div>
-
     <!-- ── Query Data -> DataGPT delegation notice ──────────────────────────────────────────
          Shown when the lightweight intent check (see QD_INTENT_CLASSIFIER_MODEL in taskpane.js)
          decides a typed Query Data question is really a modify/mixed request, not a plain
          download — DataGPT, not the deterministic query builder, is what can actually act on an
-         existing table. Same reasoning as ribbonMoveModal above for sitting outside
-         #loginWrapper/#addinUI: this can fire from the "downloadtable" view specifically, and must
-         render regardless of whatever that view's own allowlist hides. -->
+         existing table. Deliberately placed OUTSIDE #loginWrapper/#addinUI: applyRibbonView() hides
+         every child of #addinUI that isn't in the current view's allowlist, and the login flow
+         toggles #loginWrapper's own children — sitting outside both means this can fire from the
+         "downloadtable" view specifically and still render regardless of whatever that view's own
+         allowlist hides. -->
     <div id="qdDelegateModal" class="dz-overlay">
         <div class="dz-box">
             <div class="dz-header">Switching to DataGPT</div>
@@ -2588,25 +2754,8 @@
         // The "replace data" reminder is only shown until the user dismisses it once;
         // after that it stays hidden and is reachable via the "Disclaimer" link instead.
         const INFO_BANNER_SEEN_KEY = "goia_infoBannerSeen";
-        // Shown once per user, the first time they open the taskpane on a build where the Home-tab
-        // button no longer exists (see the comment on #ribbonMoveModal above, and the removed
-        // OfficeTab block in manifest.xml). Versioned key so a future layout change can re-notify
-        // without colliding with this one.
-        const RIBBON_MOVE_SEEN_KEY = "goia_ribbonMoveNoticeSeen_v1";
 
         document.addEventListener("DOMContentLoaded", () => {
-            const ribbonMoveModal = document.getElementById("ribbonMoveModal");
-            const ribbonMoveClose = document.getElementById("ribbonMoveClose");
-            if (ribbonMoveModal && ribbonMoveClose && !localStorage.getItem(RIBBON_MOVE_SEEN_KEY)) {
-                const dismissRibbonMove = () => {
-                    ribbonMoveModal.style.display = "none";
-                    try { localStorage.setItem(RIBBON_MOVE_SEEN_KEY, "1"); } catch (e) { /* storage unavailable — it'll just show again next time */ }
-                };
-                ribbonMoveModal.style.display = "flex";
-                ribbonMoveClose.addEventListener("click", dismissRibbonMove);
-                ribbonMoveModal.addEventListener("click", (e) => { if (e.target === ribbonMoveModal) dismissRibbonMove(); });
-            }
-
             const infoBox = document.getElementById("infoBox");
             if (localStorage.getItem(INFO_BANNER_SEEN_KEY)) {
                 infoBox.style.display = "none";
