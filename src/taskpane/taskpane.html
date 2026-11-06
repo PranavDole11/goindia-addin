@@ -998,160 +998,395 @@
                      view's box styles (.fb-*). -->
                 <div id="downloadTableSection" style="display:none;">
                     <div class="fb-box">
-                        <div class="fb-header">Table Builder</div>
-
-                        <!-- Download Data and Your Tables are separate tabs again (an earlier
-                             revision of this view merged them into one scrolling panel — see git
-                             history for that layout and the ORIGINAL switchDtTab). Both selection
-                             polls (grid-as-query and the Your Tables selection highlight) still run
-                             continuously regardless of which tab is active, same as the merged
-                             view — only which PANEL is visible changes on a tab click; see the
-                             current switchDtTab in taskpane.js. -->
-                        <div class="dt-tabs" id="dtTabs">
-                            <button type="button" class="dt-tab-btn active" id="dtTabDownload" data-tab="download">Download Data</button>
-                            <button type="button" class="dt-tab-btn" id="dtTabYourTables" data-tab="yourtables">
-                                <span>Your Tables</span>
-                                <span class="dt-yt-count-badge" id="dtYtTabCount">0</span>
-                            </button>
+                        <div class="fb-header">
+                            <!-- No tabs/mode-switcher here by design — Formula Picker, FormulaGPT
+                                 and Excel Table Outline all live below as one surface, never behind
+                                 a landing page. The info icon that used to live here moved down to
+                                 the Excel Table Outline card (#dtExcelOutlineCard) instead — see its
+                                 own comment. -->
+                            <span class="fb-header-title">
+                                <!-- Same italic "f" the ribbon button's own icon uses (Icon.FormulaWizard.*
+                                     in manifest.xml) and the Formula Picker panel's own title icon
+                                     further down this view (.fb-panel-title-icon) — one glyph-as-icon
+                                     convention everywhere this feature names itself, rather than a
+                                     generic grid/table icon left over from the "Table Builder" name. -->
+                                <span class="fb-header-icon" aria-hidden="true">f<span class="fb-header-icon-star">★</span></span>
+                                <span>Formula Wizard</span>
+                            </span>
                         </div>
+
                         <div id="dtDownloadBody">
-                            <div class="fb-body" id="dtQueryFieldWrap">
-                                <div class="fb-field" id="dtQueryField">
-                                    <textarea id="dtQuery" class="fb-textarea dt-query-textarea" rows="3" placeholder="e.g. Revenue and EBITDA of Reliance Industries for the last 5 years"></textarea>
+                            <!-- Formula (top — company/metric/period -> a =GIA.GET(...) formula, see
+                                 src/functions/functions.js) and Text (bottom — natural-language typed
+                                 request, or a selected sheet skeleton) are both shown at once, rather
+                                 than a switch picking one. Whichever one the user actually starts
+                                 filling in dims the OTHER (see updateInputModeDimming in taskpane.js,
+                                 which toggles .dt-input-panel-dimmed) so it's always clear which one
+                                 will act when the user submits; clearing it back out un-dims the
+                                 other. Neither is dimmed while both are empty. -->
+                            <!-- Click preview of what "select headers in your sheet" means — see
+                                 hooking it up in taskpane.js (search "dtQueryHintPreview").
+                                 position:fixed (not absolute) deliberately: #dtQueryHint sits near
+                                 the TOP of .fb-box, which clips overflow, and this needs to visibly
+                                 grow past that edge the way a dropdown/popover would — the same
+                                 escape-the-clipped-card technique #dtLoadingOverlay used to, back when
+                                 that existed, just without covering the whole window. Its top/left are
+                                 set in JS from dtQueryHint's own live position rather than fixed in
+                                 CSS, so it still lines up correctly if the window is resized between
+                                 opens. The <video> starts with no "src" — the clip is ~14MB, fetched
+                                 only the first time this is actually opened, never eagerly on page
+                                 load. autoplay+loop+muted+playsinline makes it behave like the GIF it
+                                 replaces (plays immediately, loops forever, no controls UI); muted is
+                                 required for autoplay to be allowed at all. play()/pause() are driven
+                                 from JS on open/close instead of relying on autoplay alone, so it
+                                 actually restarts from the beginning each time it's reopened rather
+                                 than continuing a loop that kept running invisibly in the background. -->
+                            <div class="dt-query-hint-preview" id="dtQueryHintPreview" role="tooltip">
+                                <div class="dt-query-hint-preview-caption">Select a table skeleton in Excel, then press Download</div>
+                                <video id="dtQueryHintPreviewImg" aria-label="Selecting a hand-built table skeleton directly in the sheet, then pressing Download" muted loop playsinline preload="none"></video>
+                            </div>
+                            <!-- Formula: company/metric/period -> a hand-typeable
+                                 =GIA.GET(company, metric, period) formula inserted into the selected
+                                 cell. GET() resolves metric->table/column and the period's literal
+                                 stored value itself (see functions.js) — this panel only ever
+                                 constructs and writes the formula text, same as the old standalone
+                                 Functions view it replaces. -->
+                            <div id="dtFormulaModePanel" class="fb-body">
+                                <div class="fb-panel-title-row">
+                                    <span class="fb-panel-title-icon" aria-hidden="true">f</span>
+                                    <span class="fb-panel-title">Formula Picker</span>
                                 </div>
-                                <!-- Shown INSTEAD of the textarea above whenever the user's live sheet
-                                     selection looks like a hand-built table skeleton (company/metric
-                                     labels, a column of years, etc.) rather than a single cell or a
-                                     blank destination-picking selection — see startSelectionPolling /
-                                     checkSelectionOnce in taskpane.js. Purely an honest echo of what's
-                                     selected (real address + the actual cell text), not a pretend
-                                     semantic breakdown — the real interpretation only happens once the
-                                     request is actually sent. "Type a request instead" is the escape
-                                     hatch back to the textarea above. -->
-                                <div class="fb-field" id="dtSelectionField" style="display:none;">
-                                    <div class="dt-field-header-row">
-                                        <label class="fb-label dt-section-title">Using the table you've selected</label>
-                                        <button type="button" class="dt-mode-toggle-btn" id="dtSelectionUseTextInstead">Type a request</button>
+                                <p class="fb-panel-desc">Build your table using company, metric, period and a formula.</p>
+                                <!-- Metric comes FIRST and is the only field visible until something
+                                     is picked — everything below depends on it: table-entity-map.json
+                                     (fetched via getEntityTypeForTable in taskpane.js) says what kind
+                                     of Entity the metric's source table holds, and metric-registry.
+                                     json's own annual/quarterly keys say whether a period-granularity
+                                     choice is even needed. See dtFnOnMetricChange in taskpane.js. -->
+                                <div class="fb-field">
+                                    <label class="fb-label">Line Item</label>
+                                    <!-- A search box + custom list, not a native <select> — a plain
+                                         <select>'s native popup tries to center the CURRENTLY
+                                         SELECTED option under the control, and with ~700 metrics in
+                                         one flat alphabetical list that routinely put most of the
+                                         popup ABOVE this field, overlapping it, inside this short
+                                         task-pane viewport (confirmed live). A first pass replaced
+                                         it with a plain non-typeable button, which dropped the
+                                         native select's own type-ahead-to-jump behavior with
+                                         nothing standing in for it (confirmed live — reported as
+                                         "typing into the metric dropdown isn't working"); this is
+                                         .fn-suggest-list's own pattern instead (already used for
+                                         company search below) — a real text input that filters the
+                                         ~700 metrics AS you type, same as that company box already
+                                         does against a live search API, just filtered locally here
+                                         since the whole list is already in hand. -->
+                                    <div class="fn-field-wrap">
+                                        <input type="text" class="fb-input" id="fnMetricInput" placeholder="Search line item, or click to browse…" autocomplete="off">
+                                        <ul class="fn-suggest-list fn-metric-list" id="fnMetricList" style="display:none;"></ul>
                                     </div>
-                                    <div class="dt-info" id="dtSelectionAddress"></div>
-                                    <div id="dtSelectionGrid"></div>
                                 </div>
+                                <div class="fb-field" id="fnEntityField" style="display:none;">
+                                    <!-- The hint only appears while this field is ARMED — i.e. the
+                                         user has clicked into it, so the next single cell they click
+                                         in the sheet is read into it (value + address). See
+                                         dtFnSetArmedPick/dtFnCaptureArmedCell in taskpane.js. -->
+                                    <div class="fn-label-row">
+                                        <label class="fb-label" id="fnEntityLabel">Company</label>
+                                        <span class="fn-pick-hint" id="fnCompanyPickHint">or click a cell</span>
+                                    </div>
+                                    <div class="fn-company-row">
+                                        <!-- Live-filtered suggestions from the SAME /goindiastock/company_search
+                                             endpoint the main Get Financials dropdown uses (see gapiHeaders()
+                                             callers in taskpane.js) — a plain text input + a rendered <ul>,
+                                             not the Choices.js widget the main company dropdown happens to
+                                             use elsewhere, since this only needs a company NAME string (the
+                                             LIKE match GIA.GET's own SQL already does), not a resolved fincode.
+                                             Shown only when the selected metric's entity type is Company
+                                             (today, that's every metric in metric-registry.json — see
+                                             #fnEntityUnsupported below for the fallback otherwise). -->
+                                        <div class="fn-field-wrap">
+                                            <input type="text" class="fb-input" id="fnCompanyInput" placeholder="Search company, or click a cell..." autocomplete="off">
+                                            <!-- Readout of a company picked by clicking a cell in the
+                                                 sheet (see dtFnCaptureArmedCell in taskpane.js) — "<value>
+                                                 (<cell>)", e.g. "Reliance Industries Ltd. (A15)". Sits over
+                                                 the (now-cleared) search box rather than a separate line
+                                                 below; pointer-events:none so a click still reaches the
+                                                 real input underneath to re-arm picking or start typing a
+                                                 name instead (either clears the pick — see the "input"
+                                                 listener further down). There used to be a second, typed
+                                                 cell-reference box next to this one for the same purpose;
+                                                 clicking a cell now covers that case too, so it was removed. -->
+                                            <div class="fn-cell-ref-preview" id="fnCompanyCellRefPreview" style="display:none;"></div>
+                                            <ul class="fn-suggest-list" id="fnCompanyList" style="display:none;"></ul>
+                                        </div>
+                                    </div>
+                                    <!-- GIA.GET() only ever resolves against basic_info/fincode today
+                                         (see buildGetSql in functions.js) — shown INSTEAD of the company
+                                         row above whenever table-entity-map.json says the metric's own
+                                         table holds a different entity type (Sector/PMS/Mutual Fund/…),
+                                         since there's no formula support for those yet. -->
+                                    <div class="fb-status err" id="fnEntityUnsupported" style="display:none;"></div>
+                                </div>
+                                <div class="fb-field" id="fnPeriodField" style="display:none;">
+                                    <div class="fn-label-row">
+                                        <label class="fb-label">Period</label>
+                                        <span class="fn-pick-hint" id="fnPeriodPickHint">or click a cell</span>
+                                    </div>
+                                    <div class="fn-period-row">
+                                        <!-- Only shown when the selected metric has BOTH an annual and a
+                                             quarterly column (metric-registry.json's own "annual"/
+                                             "quarterly" keys) — a metric with just one granularity skips
+                                             straight to the year input below, nothing to choose. -->
+                                        <select class="fb-input fn-period-type" id="fnPeriodTypeSelect" style="display:none;">
+                                            <option value="annual">Annual</option>
+                                            <option value="quarterly">Quarterly</option>
+                                        </select>
+                                        <!-- Shown whenever the EFFECTIVE granularity (the type select
+                                             above when present, otherwise whichever single granularity
+                                             the metric has) is quarterly. -->
+                                        <select class="fb-input fn-period-quarter" id="fnQuarterSelect" style="display:none;">
+                                            <option value="1">Q1</option>
+                                            <option value="2">Q2</option>
+                                            <option value="3">Q3</option>
+                                            <option value="4">Q4</option>
+                                        </select>
+                                        <!-- Wrapped so the picked-cell readout can sit directly OVER
+                                             the year box, the same way #fnCompanyCellRefPreview does
+                                             over the company search box — a number input can't display
+                                             "2026 (A15)" itself. The ref behind it is held in JS
+                                             (dtFnYearCellRef), not in a visible box of its own: unlike
+                                             the company field, a period is only ever picked by
+                                             clicking, never typed as a reference by hand. -->
+                                        <div class="fn-field-wrap fn-period-year">
+                                            <input type="number" class="fb-input" id="fnYearInput" placeholder="e.g. 2026">
+                                            <div class="fn-cell-ref-preview" id="fnYearCellRefPreview" style="display:none;"></div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <!-- Live preview of what Insert will actually write — recomputed on
+                                     every Company/Metric/Period change (see dtFnUpdateFormulaPreview
+                                     in taskpane.js), not just shown after the fact. readonly, not
+                                     disabled, so it stays selectable/copyable text. Hidden until a
+                                     formula actually CAN be built (dtFnBuildFormulaText returns
+                                     non-null) rather than sitting there empty the rest of the time. -->
+                                <div class="fb-field" id="fnFormulaField" style="display:none;">
+                                    <label class="fb-label">Formula</label>
+                                    <input type="text" class="fb-input fb-formula-preview" id="fnFormulaPreview" readonly>
+                                </div>
+                                <div class="fb-status" id="fnStatus" style="display:none;"></div>
+                                <button type="button" class="fb-submit" id="fnInsertBtn" style="display:none;">Insert formula</button>
+                            </div>
+
+                            <!-- The resolved skeleton rendered as an actual mini table — see
+                                 renderSkeletonPreviewTable/computeSkeletonPreview in taskpane.js.
+                                 Occupies the SAME vacated space #dtChatDock below does (and
+                                 #dtFormulaModePanel collapses for the SAME reason either one is
+                                 showing — see updateFormulaCollapse), rather than sitting down at
+                                 the bottom near the composer: this IS the table that's about to be
+                                 written, so it reads as "what Formula turned into," not a status
+                                 message tucked under an unrelated box. Chat docking wins if both
+                                 ever happen to apply at once (updateFormulaCollapse's own call
+                                 hides this the moment that happens) — see dockChatPanel's comment. -->
+                            <div id="dtSkeletonPreviewPane" style="display:none;">
+                                <!-- Status text for the loading/couldn't-resolve states; once
+                                     resolved into a real table shape this is hidden and the table
+                                     below takes over instead. -->
+                                <div class="dt-skeleton-preview" id="dtSkeletonPreview" style="display:none;">
+                                    <span id="dtSkeletonPreviewText"></span>
+                                </div>
+                                <div class="dt-skeleton-preview-table" id="dtSkeletonPreviewTable" style="display:none;"></div>
+                                <!-- A skeleton selected directly in the sheet needs no AI involvement
+                                     — this inserts straight from the preview above, on its own,
+                                     without docking/opening FormulaGPT's chat at all (see
+                                     insertSkeletonFormulaGrid in taskpane.js). Shown/hidden by
+                                     setInsertReady, the same signal that used to relabel the
+                                     composer's own Send button instead — kept separate now so the
+                                     two flows (hand-built skeleton vs. a typed FormulaGPT request)
+                                     never share one button. -->
+                                <button type="button" class="fb-submit" id="dtSkeletonInsertBtn" style="display:none;">Insert Formula</button>
+                                <div class="fb-status" id="dtSkeletonInsertStatus" style="display:none;"></div>
+                            </div>
+
+                            <!-- Where DataGPT's real #chatPanel gets reparented into once docked
+                                 (see dockChatPanel/undockChatPanel in taskpane.js) — occupies the
+                                 space #dtFormulaModePanel vacates when it collapses. Empty/hidden
+                                 the rest of the time; nothing of its own to render. -->
+                            <div id="dtChatDock" style="display:none;"></div>
+
+                            <!-- Light "command bar" composer, pinned at the BOTTOM of the screen,
+                                 below Formula — sending from here opens a real DataGPT chat thread
+                                 docked in place of Formula above (see the plan file "Table Builder —
+                                 dock DataGPT's chat..."). Row 1: input + send, same line. Row 2
+                                 (footer): the live cell/range selection indicator (left — mirrors
+                                 #chatSelectionIndicator in the DataGPT panel, fed by
+                                 checkGridSelectionOnce in taskpane.js) and "Open Chat" (right) —
+                                 brings a BACKGROUNDED thread back without sending anything new. This
+                                 whole composer hides itself while the chat is docked (its own real
+                                 composer, #chatInput/#chatSend, takes over once visible) and
+                                 reappears once backgrounded. -->
+                            <!-- FormulaGPT's "teaser": icon+title+description above the composer,
+                                 preserved from the original spec. The whole icon/title/description
+                                 block is itself clickable (div+role="button", not a <button> — it
+                                 contains a REAL button, #dtTeaserHistoryBtn, and a button can't
+                                 nest another button) so opening the chat never requires actually
+                                 sending a message first — same as focusing the input, or sending one,
+                                 all three dock the EXISTING DataGPT chat (#chatPanel, via
+                                 dockChatPanel) in place of Formula above. #dtTextModePanel itself
+                                 never changes, it's the SAME composer throughout — only its own
+                                 teaser chrome (icon/title/desc/divider) hides once docked, since the
+                                 full-chat state shows the real thread title + a close button in
+                                 .chat-docked-toolbar instead (#chatDockedCloseBtn). -->
+                            <div id="dtTextModePanel">
+                                <div class="dt-teaser-divider"></div>
+                                <!-- Compact stand-in for the WHOLE teaser (icon/title/desc/composer
+                                     all hidden — see .dt-teaser-compact's own CSS) — shown once a
+                                     metric is first picked, so Formula Picker's own newly-expanded
+                                     Company/Period/Formula fields get the room. A manual toggle, not
+                                     auto-reverting: clicking this re-expands the full teaser (see
+                                     taskpane.js — setTeaserCompact(false) on click), and picking
+                                     another metric afterward won't re-collapse it again unless it's
+                                     cleared back to no metric first. -->
+                                <button type="button" class="dt-teaser-collapsed-bar" id="dtTeaserCollapsedBar" aria-expanded="false" aria-label="Expand FormulaGPT">
+                                    <span class="dt-teaser-icon" aria-hidden="true">✦</span>
+                                    <span class="dt-teaser-collapsed-label">FormulaGPT</span>
+                                    <span class="dt-teaser-collapsed-arrow" aria-hidden="true">▲</span>
+                                </button>
+                                <!-- Shared hover/focus container for the open-area (icon/title/menu/
+                                     desc) AND the composer box below it, so hovering or keyboard-
+                                     focusing the open-area highlights the WHOLE teaser as one
+                                     clickable unit instead of stopping at the title — see
+                                     .dt-teaser-hover-area's own CSS (:has(#dtTeaserOpenArea:hover),
+                                     the same pattern .dt-radio:has(input:checked) already uses in
+                                     this file). -->
+                                <div class="dt-teaser-hover-area" id="dtTeaserHoverArea">
+                                    <div class="dt-teaser-open-area" id="dtTeaserOpenArea" role="button" tabindex="0" aria-label="Open FormulaGPT">
+                                        <div class="dt-teaser-head" id="dtTeaserHead">
+                                            <span class="dt-teaser-icon" aria-hidden="true">✦</span>
+                                            <span class="dt-teaser-title">FormulaGPT</span>
+                                            <!-- Opens a MINIATURE thread-history popover right from
+                                                 this icon (#dtTeaserHistoryMenu below) rather than
+                                                 the full side-panel drawer — the chat doesn't even
+                                                 need to be docked first to browse/switch threads
+                                                 this way. Reuses the real thread store via
+                                                 window.__goiaChatBridge's listThreads/
+                                                 switchToThread/createNewThread (see taskpane.js) —
+                                                 no second thread list of its own. stopPropagation so
+                                                 this doesn't ALSO fire the open-area's own click
+                                                 underneath it. -->
+                                            <button type="button" class="dt-teaser-history-btn" id="dtTeaserHistoryBtn" title="Chat history" aria-haspopup="true" aria-expanded="false">
+                                                <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="6" x2="20" y2="6"></line><line x1="4" y1="12" x2="20" y2="12"></line><line x1="4" y1="18" x2="20" y2="18"></line></svg>
+                                            </button>
+                                        </div>
+                                        <p class="dt-teaser-desc">Tell the AI what you'd like to add, edit, or refresh.</p>
+                                    </div>
+                                    <!-- position:fixed (not absolute), same reason #dtQueryHintPreview
+                                         is: .fb-box's own overflow:hidden would otherwise clip this the
+                                         moment it grows past the box's edge in a short task-pane
+                                         viewport. Positioned in JS from #dtTeaserHistoryBtn's own live
+                                         rect — see positionTeaserHistoryMenu in taskpane.js. Sits
+                                         OUTSIDE #dtTeaserOpenArea on purpose, so clicking inside it
+                                         never also triggers that area's own "open FormulaGPT" click. -->
+                                    <div class="dt-teaser-history-menu" id="dtTeaserHistoryMenu" role="menu" aria-label="Recent conversations" style="display:none;"></div>
+                                    <div class="dt-composer-box">
+                                        <div class="dt-composer-row">
+                                            <input type="text" id="dtQuery" class="dt-composer-input" placeholder="e.g. Add Reliance EBITDA for FY24" autocomplete="off">
+                                            <!-- Same plain "➤" glyph #chatSend uses in DataGPT — was its
+                                                 own SVG arrow icon here, a real mismatch now that the two
+                                                 composers are meant to read as one consistent shape. -->
+                                            <button type="button" class="dt-composer-send" id="dtDownload" title="Send">➤</button>
+                                        </div>
+                                        <!-- Hidden in the teaser (see CSS) — only shown once chat is
+                                             docked, where it carries the live selection readout plus
+                                             (reparented from .chat-docked-toolbar — see
+                                             #dtComposerToolbarSlot's own comment) New chat/chat-history. -->
+                                        <div class="dt-composer-footer">
+                                            <div class="dt-composer-selection" id="dtComposerSelection" style="display:none;">
+                                                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"></rect><line x1="9" y1="3" x2="9" y2="21"></line><line x1="3" y1="9" x2="21" y2="9"></line></svg>
+                                                <span id="dtComposerSelectionText"></span>
+                                            </div>
+                                            <!-- Empty/unused in the teaser. Once docked, dockChatPanel
+                                                 (taskpane.js) reparents the real #chatThreadNewBtn/
+                                                 #chatThreadBtn here, straight out of .chat-docked-toolbar
+                                                 (same reparenting technique already used for the whole
+                                                 #chatPanel) — undockChatPanel moves them back so the
+                                                 standalone DataGPT view is unaffected. -->
+                                            <span class="dt-composer-toolbar-slot" id="dtComposerToolbarSlot"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                                <!-- #dtSkeletonPreview/#dtSkeletonPreviewTable used to live here —
+                                     moved up to #dtSkeletonPreviewPane, in Formula's own vacated
+                                     space, rather than tucked under the composer (confirmed live:
+                                     that read as the preview sitting "below the chat box" instead of
+                                     replacing the Formula module it's actually standing in for). -->
                                 <div class="fb-status" id="dtStatus" style="display:none;"></div>
                             </div>
-                            <!-- Always visible, in both input modes (unlike the hint below it) — the
-                                 one shared submit action for a typed request OR a selected skeleton. -->
-                            <div class="fb-footer dt-download-footer" id="dtDownloadFooter">
-                                <div class="dt-query-hint" id="dtQueryHint" role="button" tabindex="0" aria-expanded="false" aria-describedby="dtQueryHintPreview">
-                                    <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"></rect><rect x="14" y="3" width="7" height="7" rx="1"></rect><rect x="3" y="14" width="7" height="7" rx="1"></rect><rect x="14" y="14" width="7" height="7" rx="1"></rect></svg>
-                                    <span>Or select headers in your sheet</span>
-                                </div>
-                                <!-- Hover OR click preview of what "select headers in your sheet" means
-                                     — see hooking it up in taskpane.js (search "dtQueryHintPreview").
-                                     position:fixed (not absolute) deliberately: #dtQueryHint sits at the
-                                     very bottom of .fb-box, which clips overflow, and this needs to
-                                     visibly grow DOWNWARD past that edge the way a dropdown/popover
-                                     would — the same escape-the-clipped-card technique #dtLoadingOverlay
-                                     already uses, just without covering the whole window. Its
-                                     top/left are set in JS from dtQueryHint's own live position rather
-                                     than fixed in CSS, so it still lines up correctly if the window is
-                                     resized between opens. The <video> starts with no "src" — the clip
-                                     is ~14MB, fetched only the first time this is actually opened, never
-                                     eagerly on page load. autoplay+loop+muted+playsinline makes it
-                                     behave like the GIF it replaces (plays immediately, loops forever,
-                                     no controls UI); muted is required for autoplay to be allowed at
-                                     all. play()/pause() are driven from JS on open/close instead of
-                                     relying on autoplay alone, so it actually restarts from the
-                                     beginning each time it's reopened rather than continuing a loop
-                                     that kept running invisibly in the background. -->
-                                <div class="dt-query-hint-preview" id="dtQueryHintPreview" role="tooltip">
-                                    <video id="dtQueryHintPreviewImg" aria-label="Selecting a hand-built table skeleton directly in the sheet, then pressing Download" muted loop playsinline preload="none"></video>
-                                </div>
-                                <button type="button" class="fb-submit dt-download-btn" id="dtDownload">
-                                    <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
-                                    <span>Download</span>
-                                </button>
+
+                            <!-- Excel Table Outline — a separate, always-accessible entry point
+                                 (visible in BOTH the Formula Picker state and the full-chat state;
+                                 never nested inside either). The user builds a skeleton directly in
+                                 Excel (company names + metric headers + periods), selects it, and
+                                 the existing grid-skeleton pipeline (computeSkeletonPreview /
+                                 tryGridSkeletonFastPath in taskpane.js) takes it from there — this
+                                 card is purely an explainer + entry point, not a trigger of its own
+                                 (#dtSkeletonInsertBtn, inside #dtSkeletonPreviewPane above, is what
+                                 appears the moment a qualifying skeleton is detected and resolved).
+                                 Desktop hover re-anchors the SAME
+                                 #dtQueryHintPreview video popover this view already had (unchanged
+                                 lazy-load/positioning logic — see positionQueryHintPreview in
+                                 taskpane.js, just re-triggered by hover now instead of click); click
+                                 (on the card OR the info icon) opens a fuller modal with the same
+                                 clip, a short explanation and 3 numbered steps. Touch devices never
+                                 fire the hover events at all, so tap opens the modal directly with no
+                                 extra feature-detection needed. -->
+                            <div id="dtExcelOutlineCard">
+                                <span class="dt-excel-icon" aria-hidden="true">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"></rect><path d="M8 3v18M3 9h18M3 15h18"></path></svg>
+                                </span>
+                                <span class="dt-excel-text">
+                                    <span class="dt-excel-head-row">
+                                        <span class="dt-excel-title">Create a table outline in the cells</span>
+                                        <!-- No longer a visible icon — the WHOLE card is clickable
+                                             now (see dtExcelOutlineCardEl's own click/hover
+                                             handlers in taskpane.js), so a separate "i" button is
+                                             redundant. Kept in the DOM, invisible+non-interactive
+                                             (see .dt-query-hint's own CSS), rather than removed
+                                             outright: this exact element is still this view's
+                                             positioning anchor for the hover preview
+                                             (positionQueryHintPreview reads its rect) and is part
+                                             of the big init guard further up in taskpane.js —
+                                             deleting it would silently break both. -->
+                                        <button type="button" class="dt-query-hint" id="dtQueryHint" aria-hidden="true" tabindex="-1"></button>
+                                    </span>
+                                </span>
+                                <span class="dt-excel-chevron" aria-hidden="true">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"></polyline></svg>
+                                </span>
                             </div>
 
-                        </div>
-
-                        <!-- "Your Tables" — every table in THIS workbook that this feature created,
-                             found by scanning every sheet's cell comments for one containing
-                             "Table Identifier:" (see writeDownloadedTableToSheet's refresh-tag
-                             comment) — not a separate persisted index, so it can never drift out of
-                             sync with the workbook; it only ever reflects what's actually there
-                             right now. Scanned automatically (on load, on an interval, and after any
-                             write/refresh/delete here) rather than needing a manual refresh — there's
-                             no button for that any more. Every row is always fully expanded — title,
-                             location, description, and the Refresh/Modify/Delete actions — the title
-                             and location are themselves buttons that jump to that table in the sheet
-                             (see renderYourTablesList/navigateToTable). Its own tab panel — see
-                             #dtTabs above — toggled by switchDtTab in taskpane.js. No section header
-                             of its own any more (it used to repeat "Your tables" + the count badge
-                             right here, directly under the #dtTabYourTables tab button that already
-                             says both) — just the plain list below. -->
-                        <div id="dtYourTablesPanel" style="display:none;">
-                            <div class="dt-yt-body" id="dtYourTablesBody">
-                                <div class="fb-field" id="dtYourTablesField">
-                                    <div id="dtYourTablesList" class="dt-yt-list">
-                                        <div class="dt-info">Scanning…</div>
+                            <!-- Click/tap modal — its own independent lazy <video> (same source as
+                                 the hover popover's own, not reparented between the two; see the
+                                 plan's design-decision note: this codebase's own chat-docking
+                                 mechanism already shows reparenting a live node needs real care, and
+                                 a second lazy element for a rarely-opened-twice ~14MB clip is a
+                                 simpler, safer trade). -->
+                            <div class="dt-excel-modal-backdrop" id="dtExcelOutlineModalBackdrop" style="display:none;">
+                                <div class="dt-excel-modal" role="dialog" aria-modal="true" aria-labelledby="dtExcelModalTitle">
+                                    <div class="dt-excel-modal-head">
+                                        <span id="dtExcelModalTitle">Build from table outline</span>
+                                        <button type="button" class="dt-excel-modal-close" id="dtExcelOutlineModalClose" aria-label="Close">&times;</button>
                                     </div>
-                                </div>
-                                <!-- Shared Undo toast — per-row Delete uses this (see showYtUndoToast in
-                                     taskpane.js) instead of a confirm modal. Floats over the bottom of
-                                     the panel (position:absolute, #dtYourTablesBody is its positioned
-                                     ancestor) rather than taking flex layout space, since it's transient. -->
-                                <div class="dt-yt-toast" id="dtYourTablesToast" style="display:none;">
-                                    <span class="dt-yt-toast-message" id="dtYourTablesToastMessage"></span>
-                                    <button type="button" class="dt-yt-toast-undo" id="dtYourTablesToastUndo">Undo</button>
+                                    <video id="dtExcelOutlineModalVideo" muted loop playsinline preload="none"></video>
+                                    <p class="dt-excel-modal-desc">Arrange company names, metric headers and periods directly in Excel, then select the whole outline and press Download — the app reads the shape and builds the table for you.</p>
+                                    <ol class="dt-excel-modal-steps">
+                                        <li>Create a skeleton: company names, metric headers and periods in plain cells.</li>
+                                        <li>Select the full range you just built.</li>
+                                        <li>Click Download (the composer's send button) to fill it in.</li>
+                                    </ol>
                                 </div>
                             </div>
 
-                            <!-- ── Tutorial — Your Tables ── The only step-by-step tutorial left in
-                                 this feature (Download Data's own equivalent was removed in favor of
-                                 its hover/click video preview — see #dtQueryHintPreview above).
-                                 Deliberately NOT built on .dz-overlay (that family of modal always
-                                 dims the whole window behind it, position:fixed; inset:0) — this
-                                 "expands" from the button's own bottom-right corner instead
-                                 (transform-origin, see .dt-tutorial-panel below) and leaves
-                                 everything else fully visible/usable. Used to demonstrate the Update/
-                                 Refresh flow with a disposable sample table it created on its own
-                                 temporary sheet and deleted on close — replaced with
-                                 #dtYtTutorialVideo (Table Update Tutorial2.mp4) instead, so nothing
-                                 here touches the workbook at all any more; see "ytTutorialSteps" in
-                                 taskpane.js. #dtYtTutorialVideo starts with no "src" — the clip is
-                                 ~11MB, fetched only the first time this tutorial is actually opened.
-                                 #dtYourTablesPanel is this pair's own positioned ancestor
-                                 (position:relative, same rule #dtDownloadBody shares). -->
-                            <button type="button" id="dtYtTutorialBtn" class="dt-tutorial-fab" title="Tutorial: how to use Your Tables">
-                                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M9.5 9a2.5 2.5 0 0 1 5 0c0 1.4-1.25 1.8-1.75 2.75-.2.4-.25.75-.25 1.25"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
-                                <span>Tutorial</span>
-                            </button>
-                            <div id="dtYtTutorialPanel" class="dt-tutorial-panel" style="display:none;">
-                                <button type="button" id="dtYtTutorialX" class="dt-icon-btn dt-tutorial-x-btn" title="Close tutorial" aria-label="Close tutorial">
-                                    <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-                                </button>
-                                <video id="dtYtTutorialVideo" class="dt-tutorial-video" muted loop controls playsinline preload="none"></video>
-                                <div class="dt-tutorial-body" id="dtYtTutorialBody"></div>
-                                <div class="dt-tutorial-footer">
-                                    <button type="button" id="dtYtTutorialPrev" class="dt-tutorial-nav-btn" disabled>Previous</button>
-                                    <span id="dtYtTutorialStepLabel" class="dt-tutorial-step-label">Step 1 of 2</span>
-                                    <button type="button" id="dtYtTutorialNext" class="fb-submit dt-tutorial-next-btn"><span>Next</span></button>
-                                </div>
-                            </div>
                         </div>
-                    </div>
-                </div>
-
-                <!-- Blocking "something is happening" overlay for any write/modify/refresh/move on
-                     a table — see showQueryDataOverlay/hideQueryDataOverlay in taskpane.js. Covers
-                     the whole window (position:fixed;inset:0) rather than just updating a status
-                     line, specifically so an AUTO-triggered refresh (the user editing a Description
-                     cell or a header cell directly, not clicking any button here) is still obviously
-                     visible even if the user isn't looking at this panel at that exact moment. -->
-                <div id="dtLoadingOverlay" class="dt-loading-overlay">
-                    <div class="dt-loading-box">
-                        <div class="dt-loading-spinner"></div>
-                        <div class="dt-loading-text" id="dtLoadingText">Working…</div>
                     </div>
                 </div>
 
@@ -1376,6 +1611,15 @@
                     .fb-box-overflow-visible { overflow: visible; }
                     .fb-header-self-rounded { border-radius: 10.5px 10.5px 0 0; }
                     .fb-body { padding: 16px; display: flex; flex-direction: column; gap: 14px; }
+                    /* Formula Picker's own heading — negative top margin on the row it sits in (via
+                       .fb-body's own `gap`) isn't needed since this is just the panel's first flex
+                       child like any other .fb-field. */
+                    .fb-panel-title-row { display: flex; align-items: center; gap: 6px; }
+                    /* Same italic-serif-glyph-as-icon convention as the docked chat toggle's own "f"
+                       (.dt-open-chat-f) — math-notation f(x), not a drawn icon. */
+                    .fb-panel-title-icon { font-family: Georgia, "Times New Roman", serif; font-style: italic; font-weight: 700; font-size: 14px; color: #173760; line-height: 1; }
+                    .fb-panel-title { font-size: 13px; font-weight: 700; color: #173760; }
+                    .fb-panel-desc { font-size: 11px; color: #6b7686; margin: -2px 0 2px; }
                     .fb-field { display: flex; flex-direction: column; gap: 6px; }
                     .fb-label { font-size: 11.5px; font-weight: 700; color: #173760; }
                     .fb-username { font-size: 13px; font-weight: 700; color: #173760; background: #f0f5ff; border: 1px solid #d6e5f5; border-radius: 8px; padding: 8px 10px; }
@@ -1409,6 +1653,74 @@
                     .fb-status { font-size: 11.5px; padding: 8px 10px; border-radius: 8px; }
                     .fb-status.ok { background: #eafaf0; color: #1a7a3d; border: 1px solid #bfe8cf; }
                     .fb-status.err { background: #fff0f0; color: #b80000; border: 1px solid #f3caca; }
+                    /* Quiet, neutral variant — for reporting a RESULT rather than a verdict. The
+                       Formula picker's "here's what was inserted" readout uses it: a successful
+                       insert isn't news worth a green success banner every time, it's just the
+                       formula, shown back so it can be read or copied. Monospace for the formula
+                       itself (same literal-data convention DESIGN_SYSTEM.md sets out), with the
+                       label above it left in the UI font. */
+                    .fb-status.neutral { background: #f5f7fa; color: #2c3744; border: 1px solid #e6eaf0; }
+                    .fb-status-label { display: block; font-weight: 700; color: #173760; margin-bottom: 3px; }
+                    .fb-status-formula { display: block; font-family: Consolas, Monaco, monospace; font-size: 11px; line-height: 1.45; word-break: break-all; }
+                    /* Functions (formula builder) — company search box. .fn-company-row used to lay
+                       this out next to a separate typed cell-reference box (removed — see
+                       #fnCompanyInput's own HTML comment); kept as a wrapper since .fn-field-wrap
+                       still needs a positioned ancestor for the suggestion list below it. */
+                    .fn-company-row { display: flex; align-items: flex-start; }
+                    .fn-company-row .fn-field-wrap { flex: 1; min-width: 0; }
+                    /* Sits exactly over #fnCompanyInput (same box model as .fb-input: padding,
+                       border width, radius) rather than below the field, and is itself
+                       pointer-events:none so a click still reaches the real input underneath (see
+                       that input's own HTML comment). Opaque background matches the input's own so
+                       there's no seam between its edges and this overlay's text. */
+                    .fn-cell-ref-preview {
+                        position: absolute; inset: 0; display: flex; align-items: center;
+                        padding: 8px 10px; border: 1.5px solid transparent; border-radius: 8px;
+                        background: #f3f5f8; box-sizing: border-box;
+                        font-size: 12.5px; font-weight: 700; color: #1a7a3d;
+                        overflow: hidden; text-overflow: ellipsis; white-space: nowrap; pointer-events: none;
+                    }
+                    .fn-cell-ref-preview.err { color: #b80000; }
+                    /* Label + "or click a cell" hint on one line, the hint pushed to the right edge
+                       of the field it belongs to. */
+                    .fn-label-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+                    /* Shown only while its field is armed (see dtFnSetArmedPick in taskpane.js) —
+                       a permanent hint on both fields would be noise, since clicking a cell is only
+                       meaningful once one of them is actually waiting for it. */
+                    .fn-pick-hint { display: none; font-size: 10.5px; font-weight: 600; color: #2f6fd0; white-space: nowrap; }
+                    .fn-pick-hint.on { display: inline; }
+                    /* The armed field itself. .fb-input:focus already recolours the border, so this
+                       adds a ring instead — it has to stay legible after the webview loses focus to
+                       the grid (which is exactly when it matters, since the user is off clicking a
+                       cell and :focus may no longer paint). */
+                    .fb-input.fn-pick-armed { border-color: #2f6fd0; box-shadow: 0 0 0 3px rgba(47,111,208,0.15); }
+                    /* Functions (formula builder) — company search suggestions. Positioned relative
+                       so the suggestion list (absolute) drops down from directly under the input
+                       without affecting the rest of the form's own flow/height. */
+                    .fn-field-wrap { position: relative; }
+                    .fn-suggest-list {
+                        position: absolute; top: calc(100% + 2px); left: 0; right: 0; z-index: 20;
+                        margin: 0; padding: 4px 0; list-style: none;
+                        max-height: 180px; overflow-y: auto;
+                        background: #fff; border: 1.5px solid #d6e5f5; border-radius: 8px;
+                        box-shadow: 0 8px 20px rgba(23,55,96,0.14);
+                    }
+                    .fn-suggest-item { padding: 7px 10px; font-size: 12px; color: #2c3744; cursor: pointer; }
+                    .fn-suggest-item:hover { background: #f0f5ff; }
+                    .fn-suggest-item.active { background: #eef3fb; font-weight: 700; }
+                    .fn-suggest-empty { padding: 7px 10px; font-size: 12px; color: #9aa5b1; cursor: default; }
+                    /* 708 metrics is a lot to scroll a flat (unfiltered) list for — a taller
+                       viewport than the company list's 180px (which only ever shows a handful of
+                       search matches) earns its keep here specifically. */
+                    .fn-metric-list { max-height: 260px; }
+                    /* Functions (formula builder) — period row: an optional Annual/Quarterly type
+                       select, an optional Q1-4 select (both display:none until dtFnOnMetricChange
+                       in taskpane.js decides they're needed for the current metric), and the year
+                       input, left to right. fn-period-year is the one field always present. */
+                    .fn-period-row { display: flex; gap: 6px; }
+                    .fn-period-row .fn-period-type { flex: 0 0 110px; }
+                    .fn-period-row .fn-period-quarter { flex: 0 0 72px; }
+                    .fn-period-row .fn-period-year { flex: 1; min-width: 0; }
                     /* "Query Data" view — see the HTML section above for what replaced the earlier
                        dropdown-based Download Table feature. Sized to fill the whole taskpane
                        edge-to-edge, the same full-bleed treatment body[data-view="datagpt"]
@@ -1443,150 +1755,275 @@
                        treatment body[data-view="datagpt"] #chatPanel already gets (border-radius:
                        0, no border, no shadow) — not a box floating inside extra chrome. */
                     body[data-view="downloadtable"] .fb-box { flex: 1; display: flex; flex-direction: column; min-height: 0; border: none; border-radius: 0; box-shadow: none; }
-                    /* Download Data and Your Tables are two separate tab panels (#dtTabs picks
-                       which one is visible — see switchDtTab in taskpane.js) rather than one
-                       continuous scrolling view. Each panel takes the full remaining height below
-                       the tab bar — the composer no longer needs to stay shrink-to-fit now that
-                       nothing shares the space below it, and this keeps both panels filling the
-                       window the same way regardless of which is active. */
-                    /* Flush against .fb-header (margin:0, plain white — no background/top-border
-                       of its own) rather than reading as a separate light-gray strip floating
-                       below it; shorter vertical padding than the first pass (11px -> 6px) so the
-                       whole bar reads as a compact continuation of the header, not its own block. */
-                    #dtTabs { display: flex; flex-shrink: 0; margin: 0; background: #fff; border-bottom: 1.5px solid #e6eaf0; }
-                    .dt-tab-btn {
-                        flex: 1; display: flex; align-items: center; justify-content: center; gap: 6px;
-                        margin: 0; background: none; border: none; border-bottom: 3px solid transparent;
-                        padding: 6px 10px; font-family: Arial, sans-serif; font-size: 12.5px; font-weight: 700;
-                        color: #6b7686; cursor: pointer; transition: color .15s, border-color .15s;
+                    /* Formula is flex:1 (fills remaining height); Text is flex:0 0 auto below it,
+                       sized by its own compact composer content — see #dtTextModePanel/
+                       #dtFormulaModePanel further down. */
+                    /* Whichever panel the user ISN'T currently filling in — see
+                       updateInputModeDimming in taskpane.js, which toggles this class on whichever
+                       panel is idle once the OTHER one has real content. pointer-events:none keeps
+                       the dimmed panel from being accidentally edited/submitted while it's greyed
+                       (this also dims the collapsed chat-toggle button itself when Text is idle and
+                       Formula is in use). */
+                    .dt-input-panel-dimmed { opacity: 0.4; pointer-events: none; transition: opacity .15s ease; }
+                    #dtTextModePanel { flex: 0 0 auto; padding: 6px 16px 14px; }
+                    #dtFormulaModePanel {
+                        flex: 1; display: flex; flex-direction: column; min-height: 0;
+                        overflow: hidden; opacity: 1; max-height: 2000px;
+                        transition: opacity .15s ease, max-height .22s ease;
                     }
-                    .dt-tab-btn:hover { color: #173760; }
-                    /* The active tab's own rule wins over :hover for color regardless of source
-                       order, since both are plain classes of equal specificity — !important here
-                       just guarantees the active tab never looks like it's merely being hovered. */
-                    .dt-tab-btn.active { color: #173760 !important; border-bottom-color: #173760; }
-                    /* position:relative so the tutorial button/panel (position:absolute, see below)
-                       anchor to THIS panel's own box — bottom-right of the Download Data tab
-                       specifically, never drifting outside it or overlapping the tab bar above. */
-                    #dtDownloadBody, #dtYourTablesPanel { flex: 1; display: flex; flex-direction: column; min-height: 0; position: relative; }
-                    #dtYourTablesBody { flex: 1; display: flex; flex-direction: column; min-height: 0; }
-                    /* .fb-field's base rule (shared with every other form field in this add-in) is
-                       shrink-to-fit by design — it never stretches. #dtYourTablesField is the ONLY
-                       in-flow child of #dtYourTablesBody (the Undo toast is position:absolute, the
-                       tutorial fab/panel are too), so WITHOUT this override the flex:1 chain above
-                       dead-ends here: this div just shrink-wraps to whatever height .dt-yt-list
-                       happens to be, rather than stretching to fill whatever space #dtYourTablesBody
-                       actually has. That's the real cause of the "blank space below the scroller on
-                       a tall window" report — .dt-yt-list's own max-height was a RED HERRING fix
-                       target, since raising it would do nothing until this link in the chain exists. */
-                    #dtYourTablesField { flex: 1; min-height: 0; }
-                    /* ── Tutorial (Your Tables tab only now — see the HTML's own comment on
-                       #dtYtTutorialBtn for why this isn't built on .dz-overlay) ── */
-                    .dt-tutorial-fab {
-                        position: absolute; right: 12px; bottom: 12px; z-index: 40;
-                        display: inline-flex; align-items: center; gap: 6px;
-                        background: #fff; color: #173760; border: 1.5px solid #d6e5f5; border-radius: 20px;
-                        padding: 7px 14px; font-family: inherit; font-size: 11.5px; font-weight: 700;
-                        cursor: pointer; box-shadow: 0 2px 8px rgba(23,55,96,0.12);
+                    /* "Collapse upwards" — content shrinks away to nothing from the top, handing its
+                       space to #dtChatDock (flex:1 too) right below it. Toggled by
+                       dockChatPanel/undockChatPanel in taskpane.js. padding:0 is NOT redundant with
+                       max-height:0 here — .fb-body's own 16px padding is content-box (no box-sizing
+                       override on this element), so max-height alone only caps the CONTENT area;
+                       the padding keeps rendering on top of that, which was the actual source of
+                       the leftover gap above the docked chat. */
+                    #dtFormulaModePanel.dt-formula-collapsed { flex: 0 0 auto; opacity: 0; max-height: 0; padding: 0; }
+                    /* The mirror image of the collapse above — while the metric list is open
+                       (setMetricPickerExpanded in taskpane.js), #dtTextModePanel and
+                       #dtExcelOutlineCard shrink away instead, handing Formula Picker's own flex:1
+                       their space so its ~700-item dropdown has more room before
+                       #dtFormulaModePanel's own overflow:hidden would clip it. */
+                    #dtTextModePanel.dt-teaser-collapsed { flex: 0 0 auto; opacity: 0; max-height: 0; padding: 0; overflow: hidden; pointer-events: none; transition: opacity .15s ease, max-height .22s ease; }
+                    #dtExcelOutlineCard.dt-excel-collapsed { flex: 0 0 auto; opacity: 0; max-height: 0; padding: 0; margin: 0 16px; border-color: transparent; overflow: hidden; pointer-events: none; transition: opacity .15s ease, max-height .22s ease; }
+                    /* Where DataGPT's real #chatPanel gets reparented into — see dockChatPanel in
+                       taskpane.js. flex:1 so it fills exactly the space Formula just vacated above;
+                       #chatPanel's own normal position:fixed chrome is overridden back to a plain
+                       in-flow block that fills this wrapper (see body[data-view="downloadtable"]
+                       #chatPanel.dt-docked further down) — none of its content/bubble CSS needs any
+                       changes, those classes are generic, not scoped to the standalone panel. */
+                    #dtChatDock { flex: 1; min-height: 0; flex-direction: column; }
+                    /* Same flex:1 slot as #dtChatDock right below it — set to "flex" (not just
+                       un-hidden) by updateFormulaCollapse in taskpane.js, exactly when Formula is
+                       collapsed FOR THIS reason (chat docking collapses it too, but wins the slot
+                       when both apply — see that function's own comment). Scrolls its own content
+                       rather than growing the whole view, same as #dtFormulaModePanel/#dtChatDock. */
+                    #dtSkeletonPreviewPane { flex: 1; flex-direction: column; min-height: 0; overflow-y: auto; padding: 16px; gap: 6px; }
+                    body[data-view="downloadtable"] #chatPanel.dt-docked {
+                        position: static; width: 100%; height: 100%; max-width: 100%; max-height: 100%;
+                        border: none; border-radius: 0; box-shadow: none; flex: 1; min-height: 0;
                     }
-                    .dt-tutorial-fab:hover { background: #f0f5ff; border-color: #b9cff0; }
-                    /* Anchored to the SAME corner the button sits in, with transform-origin matching
-                       — the open/close transition visibly grows out of/shrinks back into the button,
-                       which is the "expands into a modal" effect that was asked for. No backdrop
-                       (unlike .dz-overlay): position:absolute within #dtDownloadBody only, not
-                       position:fixed;inset:0, so the sheet/composer behind it stay fully visible and
-                       interactive the whole time — several steps specifically rely on the user
-                       watching those update live while this stays open alongside them. The
-                       display:none -> flex + class-added-a-frame-later split (dt-tutorial-panel-open)
-                       mirrors the same two-step pattern .dt-yt-refresh-form-open uses elsewhere in
-                       this file, for the same reason: display itself can't be transitioned. */
-                    .dt-tutorial-panel {
-                        /* bottom: 12px, NOT the Tutorial button's own clearance (it used to match the
-                           54px needed to sit above that button) — the button is hidden the moment this
-                           panel opens (see tutorialBtn.style.display = "none"), so there's nothing left
-                           to clear underneath it, and the reclaimed ~40px goes straight to the text,
-                           which is what was cramped. */
-                        position: absolute; right: 12px; bottom: 12px; z-index: 45; width: 340px; max-width: calc(100% - 24px);
-                        /* Caps the panel's own growth against the real viewport (not just its
-                           absolute-positioned container) so a short task pane window can never force
-                           it taller than there's room for — .dt-tutorial-body scrolls internally
-                           instead of pushing the header/footer out of view or getting clipped. */
-                        max-height: min(460px, calc(100vh - 50px));
-                        flex-direction: column; background: #fff; border-radius: 12px;
-                        box-shadow: 0 10px 32px rgba(23,55,96,0.28); border: 1px solid #e6eaf0;
-                        transform-origin: bottom right; opacity: 0; transform: scale(0.85);
-                        transition: opacity .16s ease, transform .16s ease;
+                    /* Table Builder has its own dedicated chat entry point ("Open Chat" below) — the
+                       floating fab would be a second, confusing way to reach the same single docked
+                       instance, so it's hidden on this view entirely (same convention
+                       body[data-view="datagpt"] #chatFab already uses). */
+                    body[data-view="downloadtable"] #chatFab { display: none !important; }
+                    /* Docked-only chrome simplification — see #chatDockedToolbar's own HTML comment
+                       for the reparent mechanism. The title bar is genuinely removed (not just
+                       hidden-but-present as an empty colored strip): zero height/padding, so the
+                       stream starts right at the panel's own top edge. DataGPT's own composer card
+                       (#chatInput/#chatSend, the Manual/Auto mode switcher, and the — while docked,
+                       inactive; its own poller is never started here — selection indicator, all now
+                       nested inside .chat-composer, see that element's own HTML comment) is hidden
+                       as ONE unit while docked — Table Builder's OWN composer (#dtTextModePanel,
+                       stays visible throughout, never hidden) is the one input surface used for
+                       every message, first or tenth, not swapped out for a different-looking box
+                       once chat opens; docked turns are always auto-apply regardless of the
+                       Manual/Auto preference (see effectiveAutoApply in taskpane.js) either way. See
+                       dockChatPanel's own comment in taskpane.js. */
+                    body[data-view="downloadtable"] #chatPanel.dt-docked .chat-header { display: none; }
+                    body[data-view="downloadtable"] #chatPanel.dt-docked .chat-composer { display: none; }
+                    /* Docked-only close control — hidden by default (shown in the standalone DataGPT
+                       view's own .chat-docked-toolbar too otherwise, where there's nothing to "go
+                       back" to), shown only once actually docked inside Table Builder, right next to
+                       the thread title itself. Replaces the earlier separate #chatDockedHeader row
+                       (icon + "FormulaGPT" + a "Use Formula Picker" text button) with just this. */
+                    #chatDockedCloseBtn { display: none; }
+                    body[data-view="downloadtable"] #chatPanel.dt-docked #chatDockedCloseBtn {
+                        display: inline-flex; align-items: center; justify-content: center;
+                        width: 22px; height: 22px; padding: 0; margin: 0; font-size: 13px; line-height: 1;
+                        background: #fff; border: 1px solid #e6eaf0; border-radius: 7px; color: #173760;
+                        cursor: pointer; box-shadow: none; font-family: inherit;
                     }
-                    .dt-tutorial-panel.dt-tutorial-panel-open { opacity: 1; transform: scale(1); }
-                    @media (prefers-reduced-motion: reduce) { .dt-tutorial-panel { transition: none; } }
-                    /* Floated into the panel's own top-right corner (.dt-tutorial-panel is already
-                       position:absolute, so it's this button's containing block too) rather than
-                       sitting in a dedicated header row — a whole row was a lot of vertical space to
-                       spend on one small icon. #dtYtTutorialVideo's own top margin below is sized to
-                       clear it, so the close button reads as floating over the corner of the video,
-                       not colliding with it. */
-                    .dt-tutorial-x-btn { position: absolute; top: 6px; right: 6px; z-index: 1; }
-                    /* width:100%/height:auto (not a fixed height) so this adapts to the clip's own
-                       real aspect ratio rather than letterboxing or cropping it — the panel's WIDTH
-                       is fixed (340px, see .dt-tutorial-panel) regardless of viewport, so unlike
-                       #dtQueryHintPreview's video (which has to fit whatever vertical room happens to
-                       be left below a hint sitting at an unpredictable Y position) there's nothing to
-                       compute here: a 16:9 clip comes out to a very modest ~170px tall. margin-top
-                       clears the close button floating over this corner (see its own comment);
-                       border-radius only on the top corners, since the body/footer below sit flush
-                       against it with no gap. */
-                    .dt-tutorial-video { display: block; width: 100%; height: auto; margin-top: 28px; border-radius: 12px 12px 0 0; background: #000; }
-                    .dt-tutorial-body { padding: 10px 16px 14px; font-size: 12.5px; line-height: 1.55; color: #2c3744; overflow-y: auto; min-height: 0; }
-                    .dt-tutorial-body p { margin: 0 0 8px; }
-                    .dt-tutorial-body p:last-child { margin-bottom: 0; }
-                    .dt-tutorial-body b { color: #173760; }
-                    /* One row: Previous — "Step X of Y" — Next/Finish. Three flex children with
-                       space-between reads as Prev pinned left, Next pinned right, and the label
-                       settling naturally in the middle between them. */
-                    .dt-tutorial-footer {
-                        display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-shrink: 0;
-                        padding: 4px 14px 8px;
+                    body[data-view="downloadtable"] #chatPanel.dt-docked #chatDockedCloseBtn:hover { background: #f0f5ff; }
+                    /* position:relative + the same z-index .chat-header used to carry (1301, above
+                       the thread drawer's backdrop at 1300) — without it, the moved #chatThreadBtn
+                       would sit UNDER the backdrop once the drawer is open, same bug the header's
+                       own original z-index comment describes, just relocated here now that the
+                       button itself has moved rather than staying in the (now-hidden) header. */
+                    .chat-docked-toolbar {
+                        position: relative; z-index: 1301;
+                        display: flex; align-items: center; justify-content: space-between; gap: 10px;
+                        padding: 6px 12px; border-bottom: 1px solid #e6eaf0;
                     }
-                    .dt-tutorial-step-label { font-size: 10.5px; font-weight: 700; color: #6b7686; text-transform: uppercase; letter-spacing: 0.04em; }
-                    .dt-tutorial-nav-btn {
-                        background: #fff; color: #173760; border: 1.5px solid #d6e5f5; border-radius: 6px;
-                        padding: 6px 10px; font-family: inherit; font-size: 11.5px; font-weight: 700; cursor: pointer;
+                    /* The active thread's name. Takes the row's spare width (so the buttons stay
+                       pinned right) and ellipsizes rather than wrapping the bar onto a second line —
+                       an auto-generated title can run long. min-width:0 is what lets a flex item
+                       shrink below its own content at all; without it a long unbreakable title just
+                       pushes the buttons off the row instead. */
+                    .chat-toolbar-title {
+                        flex: 1; min-width: 0;
+                        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+                        font-size: 11.5px; font-weight: 700; color: #173760;
                     }
-                    .dt-tutorial-nav-btn:hover { background: #f0f5ff; border-color: #b9cff0; }
-                    .dt-tutorial-nav-btn:disabled { opacity: 0.45; cursor: default; }
-                    .dt-tutorial-next-btn { width: auto; margin: 0; padding: 6px 14px; font-size: 11.5px; }
-                    /* Composer kept deliberately compact — no "Get data" header/subtitle any more,
-                       tighter padding/gap than this view's own Download Data/Feedback neighbors use,
-                       and a shorter textarea/footer/button (see dt-query-textarea/dt-download-footer/
-                       dt-download-btn below) — this is the view's entry point, not its main content,
-                       so it shouldn't compete with Your Tables for vertical space. */
-                    #dtQueryFieldWrap { padding: 10px 16px; gap: 8px; }
-                    .dt-info { font-size: 11.5px; color: #6b7686; }
-                    /* A real multi-line box (not the single-line chat-composer style
-                       .dt-yt-refresh-input uses for the per-table Edit panel further down), since the
-                       question typed here is often longer — but short enough to keep this section
-                       compact overall. */
-                    .dt-query-textarea { min-height: 54px; resize: vertical; }
-                    /* Hint (left) + the one shared Download button (right) — always visible in both
-                       input modes, unlike the hint itself (see checkGridSelectionOnce/
-                       exitGridQueryMode in taskpane.js, which hide the hint only once a selection is
-                       actually being used as the query). Tighter padding than the shared .fb-footer
-                       default, again to keep this whole section compact. */
-                    .dt-download-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 16px; }
-                    /* A visible chip/pill at REST (not just a hover tint) — background matches
-                       .fb-box's own white, with a border to actually read as a distinct, clickable
-                       shape against it (plain white-on-white would be invisible), same convention
-                       .dt-tutorial-fab already uses for its own pill button. min-width:0 (unchanged
-                       from before) is still what lets this shrink/wrap on a narrow window rather
-                       than pushing the Download button out of the footer. */
+                    .chat-toolbar-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+                    /* #chatThreadBtn/#chatThreadNewBtn's base styling is translucent-white, for the
+                       navy .chat-header gradient they used to sit on — invisible against this light,
+                       near-white bar, so they get a light-chip treatment here instead (see
+                       #chatDockedToolbar's own HTML comment). */
+                    .chat-docked-toolbar .chat-thread-btn,
+                    .chat-docked-toolbar .chat-thread-new-btn {
+                        background: #fff; border-color: #e6eaf0; color: #173760;
+                        /* Same page-wide `button` margin reset the composer's own buttons need (see
+                           .dt-composer-send's comment) — 8px/12px of inherited vertical margin on
+                           each of these was the rest of the gap between this bar and whatever sits
+                           above it. */
+                        margin: 0;
+                    }
+                    .chat-docked-toolbar .chat-thread-btn:hover,
+                    .chat-docked-toolbar .chat-thread-new-btn:hover { background: #eef3fb; }
+                    .chat-docked-toolbar .chat-thread-btn:disabled:hover,
+                    .chat-docked-toolbar .chat-thread-new-btn:disabled:hover { background: #fff; }
+                    #dtDownloadBody { flex: 1; display: flex; flex-direction: column; min-height: 0; position: relative; }
+                    /* Light two-row "command bar" pill, ChatGPT-composer style — a plain single-line
+                       input on top, a slim footer row below it holding the live selection indicator
+                       (left) and the send button (right). Pinned at the top of the screen
+                       (#dtTextModePanel is the FIRST child of #dtDownloadBody, Formula below it)
+                       rather than floating in a layout sense. Reads as a raised module against the
+                       view's white background — a shade darker fill + shadow, no border — rather
+                       than an outlined chip like .dt-query-hint below. */
+                    .dt-composer-box {
+                        display: flex; flex-direction: column; gap: 6px;
+                        background: #f2f4f8; border-radius: 12px; padding: 6px 10px;
+                        box-shadow: 0 2px 4px rgba(23,55,96,0.12), 0 8px 20px rgba(23,55,96,0.18);
+                    }
+                    /* Row 1: input + send, same line — send moved up from the footer so the footer
+                       row is free for "Open Chat" (see .dt-open-chat-btn below). */
+                    .dt-composer-row { display: flex; align-items: center; gap: 8px; }
+                    /* A plain <input>, not a <textarea> — this is deliberately single-line, and a
+                       textarea here (even at rows="1") could grow a vertical scrollbar/resize affordance
+                       depending on the host's rendering, which read as a visual glitch. */
+                    .dt-composer-input {
+                        flex: 1; min-width: 0; box-sizing: border-box; border: none; background: transparent;
+                        color: #1b2430; font-size: 12.5px; font-family: inherit;
+                        padding: 3px 0;
+                    }
+                    .dt-composer-input::placeholder { color: #9aa6b5; }
+                    .dt-composer-input:focus { outline: none; }
+                    /* Clean but faintly coloured separation from the input row above — same
+                       convention shared with DataGPT's own composer (.chat-mode-wrap's own
+                       border-top), numerically identical padding-top/margin-top/border too, now
+                       that both read as one consistent floating-card shape. No min-height (was
+                       14px) — content (the send/Open FormulaAI buttons) already governs this row's
+                       height on both sides, a floor here just added extra space DataGPT's
+                       equivalent never had. */
+                    .dt-composer-footer {
+                        display: flex; align-items: center; justify-content: space-between; gap: 10px;
+                        border-top: 1px solid #e3eaf4; padding-top: 8px; margin-top: 2px;
+                    }
+                    /* Live "what's selected" readout — same wording/mechanism as #chatSelectionIndicator
+                       in the DataGPT panel (see checkGridSelectionOnce in taskpane.js), fed from the
+                       same poll that already detects a hand-built skeleton selection for the fast
+                       path below, so this doesn't cost a second Excel round trip. */
+                    .dt-composer-selection {
+                        display: flex; align-items: center; gap: 5px; min-width: 0;
+                        color: #8891a0; font-size: 10.5px;
+                    }
+                    .dt-composer-selection svg { flex-shrink: 0; }
+                    .dt-composer-selection span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+                    /* margin:0 is NOT redundant — the page-wide `button` rule near the top of this
+                       file sets margin-top:8px/margin-bottom:12px on EVERY button, which this row's
+                       own height then had to carry (20px of phantom space, the real reason this
+                       composer rendered far taller than DataGPT's, whose #chatSend/.chat-mode-btn
+                       both reset it). Same reset on .dt-open-chat-btn and .dt-query-hint below. */
+                    .dt-composer-send {
+                        flex-shrink: 0; width: 22px; height: 22px; padding: 0; margin: 0;
+                        border: none; border-radius: 7px; background: #173760; color: #fff;
+                        font-size: 12px; line-height: 1;
+                        display: flex; align-items: center; justify-content: center; cursor: pointer;
+                        transition: background-color .12s ease, transform .12s ease;
+                    }
+                    .dt-composer-send:hover { background: #1f4a80; }
+                    .dt-composer-send:active { transform: scale(0.94); }
+                    .dt-composer-send:disabled { opacity: 0.55; cursor: default; }
+                    /* Preview of what a selected table skeleton resolved to (company/metrics/periods)
+                       — see #dtSkeletonPreview's own HTML comment. Same status-banner language as
+                       .fb-status's ok/err variants, plus a neutral "loading" state while
+                       tryGridSkeletonFastPath is still running. */
+                    .dt-skeleton-preview { display: flex; align-items: center; padding: 8px 10px; border-radius: 8px; font-size: 11.5px; line-height: 1.4; }
+                    .dt-skeleton-preview.loading { background: #f5f7fa; color: #6b7686; border: 1px solid #e6eaf0; }
+                    .dt-skeleton-preview.ready { background: #eafaf0; color: #1a7a3d; border: 1px solid #bfe8cf; }
+                    .dt-skeleton-preview.err { background: #fff0f0; color: #b80000; border: 1px solid #f3caca; }
+                    /* The resolved skeleton rendered as an actual mini table (renderSkeletonPreviewTable
+                       in taskpane.js) — same mono/grid-preview convention DESIGN_SYSTEM.md already
+                       calls for ("cell addresses, SQL, grid previews"), not prose. Lives in
+                       #dtSkeletonPreviewPane now (Formula's own vacated space, a real flex:1 area),
+                       not squeezed under the composer — sized generously (420px, same "comfortable
+                       preview" figure the query-hint's own GIF uses) before it needs its own
+                       internal scroll, with the pane's own scroll as a fallback past that. Both
+                       margin-top:0 here and above — the PANE's own `gap` spaces its two children
+                       now, not each one's individual margin (only one is ever visible at a time
+                       anyway, but keeping just one source of truth for the gap avoids doubling up
+                       whenever that stops being true). */
+                    .dt-skeleton-preview-table { border: 1px solid #e6eaf0; border-radius: 8px; overflow: auto; max-height: 420px; }
+                    .dt-skeleton-preview-table table { width: 100%; border-collapse: collapse; font-family: Consolas, Monaco, monospace; font-size: 11px; }
+                    .dt-skeleton-preview-table th, .dt-skeleton-preview-table td { padding: 5px 8px; text-align: left; border-bottom: 1px solid #eef1f5; white-space: nowrap; }
+                    .dt-skeleton-preview-table thead th { background: #f5f7fa; color: #173760; font-weight: 700; position: sticky; top: 0; }
+                    .dt-skeleton-preview-table td.num { text-align: right; color: #2c3744; }
+                    .dt-skeleton-preview-table tbody tr:last-child td { border-bottom: none; }
+                    /* Stand-in for a live formula cell — the raw "=GIA.GET(...)" text is a technical
+                       detail not worth spelling out in a preview; its full text is still available via
+                       the title tooltip for anyone curious. Same italic-glyph-as-icon convention as the
+                       Formula Picker's own "f" toggle/"i" hint icon elsewhere in this view. */
+                    .dt-skeleton-preview-fx { display: inline-flex; align-items: center; justify-content: center; min-width: 20px; padding: 1px 5px; border-radius: 5px; background: #eef3fb; color: #173760; font-style: italic; font-weight: 700; font-size: 10.5px; }
+                    /* "Open Chat"/"Formula Picker" — rounded rectangle (not a pill), labeled + a
+                       leading icon (not icon-only, unlike send) since it's a distinct action:
+                       reopen/foreground an existing (possibly backgrounded) thread, or toggle back
+                       to Formula, never sends anything itself. Filled, same accent as send, to read
+                       as the composer's other primary action. Same 8px radius as every other
+                       button/input in this view (DESIGN_SYSTEM.md) — was 999px (a true pill), which
+                       read as an oval once the "f" icon variant shortened its content to fit less
+                       width. */
+                    .dt-open-chat-btn {
+                        flex-shrink: 0; margin: 0 0 0 auto; display: inline-flex; align-items: center; gap: 5px;
+                        border: none; border-radius: 8px;
+                        padding: 3px 11px; font-size: 11px; font-weight: 600; font-family: inherit;
+                        background: #173760; color: #fff; cursor: pointer;
+                        transition: background-color .12s ease, transform .12s ease;
+                    }
+                    .dt-open-chat-btn:hover { background: #1f4a80; }
+                    .dt-open-chat-btn:active { transform: scale(0.96); }
+                    .dt-open-chat-btn svg { flex-shrink: 0; pointer-events: none; }
+                    .dt-open-chat-icon { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; pointer-events: none; }
+                    /* The "Formula Picker" state's icon — a plain italic serif f (the math-notation
+                       "f(x)" glyph), swapped in via JS (dockChatPanel) in place of the message-box
+                       SVG rather than drawing a custom path for it. */
+                    .dt-open-chat-icon .dt-open-chat-f { font-family: Georgia, "Times New Roman", serif; font-style: italic; font-weight: 700; font-size: 13px; line-height: 1; }
+                    #dtTextModePanel .fb-status { margin-top: 6px; }
+                    /* Title bar (.fb-header is shared with other .fb-box views — e.g. Download
+                       Data — so this is scoped to Table Builder only): just the icon + "Formula
+                       Wizard" now, no mode-switcher or other control — see .fb-header-title. */
+                    body[data-view="downloadtable"] .fb-header { display: flex; align-items: center; gap: 8px; }
+                    .fb-header-title { display: flex; align-items: center; gap: 8px; }
+                    /* Italic "f" glyph-as-icon, same convention as .dt-open-chat-icon/
+                       .fb-panel-title-icon elsewhere in this view — relative positioning so the
+                       star badge below can sit pinned to its corner the same way the ribbon
+                       icon's own red star badge sits on its navy square. */
+                    .fb-header-icon {
+                        position: relative; flex-shrink: 0;
+                        font-family: Georgia, "Times New Roman", serif; font-style: italic; font-weight: 700;
+                        font-size: 16px; line-height: 1; color: #fff;
+                    }
+                    /* The star badge — same brand red (#d80404, DESIGN_SYSTEM.md) this header's own
+                       border-bottom already proves legible against this exact navy, echoing the
+                       ribbon icon's red star badge without trying to replicate its circular-badge
+                       layout at title-bar scale. */
+                    .fb-header-icon-star {
+                        position: absolute; right: -6px; bottom: -2px;
+                        font-style: normal; font-size: 8px; line-height: 1; color: #d80404;
+                    }
+                    /* Invisible now — the WHOLE Excel Table Outline card is clickable/hoverable
+                       (see dtExcelOutlineCardEl's own handlers in taskpane.js), so a separate "i"
+                       button is redundant. Kept at its ORIGINAL size (not display:none/0-sized),
+                       just transparent and un-clickable: positionQueryHintPreview still reads this
+                       element's own rect to place the hover popover, and collapsing it would shift
+                       that anchor and change the popover's position. */
                     .dt-query-hint {
-                        display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: #6b7686; min-width: 0;
-                        cursor: pointer; background: #fff; border: 1.5px solid #e6eaf0; border-radius: 20px;
-                        padding: 6px 12px;
-                        transition: background-color .12s ease, color .12s ease, border-color .12s ease;
+                        display: flex; align-items: center; justify-content: center;
+                        width: 20px; height: 20px; padding: 0; margin: 0;
+                        background: transparent; border: none; border-radius: 50%;
+                        flex-shrink: 0; font-family: inherit; pointer-events: none; opacity: 0;
                     }
-                    .dt-query-hint:hover, .dt-query-hint:focus-visible { background: #eef3fb; border-color: #b9cff0; color: #173760; outline: none; }
-                    .dt-query-hint svg { flex-shrink: 0; }
                     /* Grows DOWNWARD from dtQueryHint's own bottom-left corner — see the HTML's own
                        comment on #dtQueryHintPreview for why position:fixed, not absolute. Closed by
                        default: zero height, so it takes no layout space and can't intercept hover/
@@ -1612,11 +2049,20 @@
                        height is now what actually makes the visible GIF bigger. */
                     .dt-query-hint-preview {
                         position: fixed; z-index: 60; width: fit-content; max-width: calc(100vw - 24px);
-                        display: flex; align-items: center; justify-content: center;
+                        display: flex; flex-direction: column; align-items: stretch;
                         background: #fff; border: 1px solid #e6eaf0; border-radius: 10px;
                         box-shadow: 0 10px 28px rgba(23,55,96,0.22);
                         overflow: hidden; max-height: 0; opacity: 0; pointer-events: none;
                         transition: max-height .2s ease, opacity .15s ease;
+                    }
+                    /* The "Use the formula module..." text that used to live on the trigger chip
+                       itself (see #dtQueryHint's own comment) — shown once, INSIDE the popup, right
+                       above the clip. Its rendered height is measured in JS (positionQueryHintPreview)
+                       and folded into the popup's own max-height/the video's own available space, so
+                       adding this line doesn't push the video past the bottom of the window. */
+                    .dt-query-hint-preview-caption {
+                        padding: 10px 14px 8px; font-size: 11.5px; line-height: 1.4; color: #45516b;
+                        border-bottom: 1px solid #eef1f5; text-align: left; flex-shrink: 0;
                     }
                     /* max-height here is only a FALLBACK default (if positionQueryHintPreview's own
                        inline style somehow never runs) — the real, viewport-aware target is set in
@@ -1625,20 +2071,175 @@
                        Same story for the img's height just below: no fixed value in CSS any more,
                        JS sets it per-open to whatever actually fits. */
                     .dt-query-hint-preview.dt-query-hint-preview-open { max-height: 434px; opacity: 1; pointer-events: auto; }
-                    .dt-query-hint-preview video { display: block; width: auto; max-width: 100%; }
+                    .dt-query-hint-preview video { display: block; width: auto; max-width: 100%; margin: 0 auto; }
                     @media (prefers-reduced-motion: reduce) { .dt-query-hint-preview { transition: none; } }
-                    /* Slightly smaller than the shared .fb-submit default (10px/14px padding, 13px
-                       font) — not drastically, just enough to match the rest of this now-compact
-                       section instead of looming over it. */
-                    .dt-download-btn { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; width: auto; padding: 8px 12px; font-size: 12px; }
-                    /* The count badge now lives only on the #dtTabYourTables tab button — a quick
-                       "how many do I have" glance, not a control. (It used to also repeat here, in
-                       a section header above the list — removed as a duplicate.) */
-                    .dt-yt-count-badge {
-                        display: inline-flex; align-items: center; justify-content: center;
-                        min-width: 20px; height: 20px; padding: 0 6px; border-radius: 10px;
-                        background: #eaf1fd; color: #173760; font-size: 11px; font-weight: 700;
+
+                    /* Live Formula preview (Formula Picker's 4th field) — same box as every other
+                       .fb-input, but readonly/monospace, per DESIGN_SYSTEM.md's own convention for
+                       literal data (cell refs, SQL, formulas) rather than prose. */
+                    .fb-formula-preview { font-family: Consolas, Monaco, monospace; font-size: 11px; color: #2c3744; background: #f5f7fa; cursor: text; }
+
+                    /* ── FormulaGPT teaser ── icon+title+description above the composer. Accented
+                       with the SAME blue DataGPT's own header uses (#2f6fd0, paired with navy
+                       #173760 — see .chat-header below), not a separate color of its own, so
+                       FormulaGPT reads as "the same assistant" everywhere it appears. */
+                    .dt-teaser-divider { border-top: 1px solid #e6eaf0; margin: 0 0 10px; }
+                    /* Shared hover/focus container for the open-area (icon/title/menu/desc) AND the
+                       composer box below it — hovering or keyboard-focusing the open-area should
+                       read as "the whole teaser is clickable," not just the title strip, so the
+                       highlight is painted on this ANCESTOR via :has() rather than on
+                       .dt-teaser-open-area itself (same :has() pattern .dt-radio:has(input:checked)
+                       already uses in this file). Negative margin lets the highlight bleed slightly
+                       past the content's own padding without shifting anything below it. */
+                    .dt-teaser-hover-area {
+                        border-radius: 10px; padding: 4px 6px 0; margin: -4px -6px 0;
+                        transition: background-color .12s ease;
                     }
+                    #dtTextModePanel:not(.dt-chat-docked) .dt-teaser-hover-area:has(#dtTeaserOpenArea:hover),
+                    #dtTextModePanel:not(.dt-chat-docked) .dt-teaser-hover-area:has(#dtTeaserOpenArea:focus-visible) {
+                        background: #e3edfb;
+                    }
+                    /* The composer box keeps its own lighter permanent tint (below) so it still
+                       reads as its own input card — this just deepens its border to match, so it
+                       visibly belongs to the same highlighted group instead of looking untouched. */
+                    #dtTextModePanel:not(.dt-chat-docked) .dt-teaser-hover-area:has(#dtTeaserOpenArea:hover) .dt-composer-box,
+                    #dtTextModePanel:not(.dt-chat-docked) .dt-teaser-hover-area:has(#dtTeaserOpenArea:focus-visible) .dt-composer-box {
+                        border-color: #b9cff0;
+                    }
+                    /* The open-area itself is just the clickable region now — no background/padding
+                       of its own, the wrapper above owns the visual treatment. */
+                    .dt-teaser-open-area { display: block; cursor: pointer; }
+                    .dt-teaser-open-area:focus-visible { outline: none; }
+                    .dt-teaser-head { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; }
+                    .dt-teaser-icon { color: #2f6fd0; font-size: 13px; line-height: 1; }
+                    .dt-teaser-title { font-size: 12.5px; font-weight: 700; color: #2f6fd0; }
+                    /* Top-right corner of the clickable block, per request — the thread-history
+                       entry point, reached before the chat is even open yet (see its own click
+                       handler in taskpane.js: docks first if needed, then forwards to the real
+                       #chatThreadBtn). Same round "i"-chip sizing/shape as .dt-query-hint, just a
+                       history glyph instead of "i" and the FormulaGPT blue instead of neutral grey. */
+                    .dt-teaser-history-btn {
+                        display: flex; align-items: center; justify-content: center;
+                        width: 22px; height: 22px; padding: 0; margin: 0 0 0 auto; color: #2f6fd0;
+                        cursor: pointer; background: #fff; border: 1.5px solid #d6e5f5; border-radius: 50%;
+                        flex-shrink: 0; font-family: inherit;
+                        transition: background-color .12s ease, border-color .12s ease;
+                    }
+                    .dt-teaser-history-btn:hover, .dt-teaser-history-btn:focus-visible { background: #eef4fd; border-color: #b9cff0; outline: none; }
+                    .dt-teaser-desc { font-size: 11px; color: #6b7686; margin: 0 0 8px; }
+                    /* The miniature thread-history popover itself — closed by default (zero height,
+                       so it can't intercept clicks until actually opened), grown open via JS adding
+                       .dt-teaser-history-menu-open once positionTeaserHistoryMenu has set its real
+                       bottom/left/max-height from the trigger button's own rect. Opens UPWARD
+                       (anchored via `bottom`, not `top`) since the teaser sits near the bottom of a
+                       short task-pane window — growing down routinely ran the popover off-screen. */
+                    .dt-teaser-history-menu {
+                        position: fixed; z-index: 70; width: 230px; max-width: calc(100vw - 24px);
+                        background: #fff; border: 1px solid #e6eaf0; border-radius: 10px;
+                        box-shadow: 0 10px 28px rgba(23,55,96,0.22);
+                        max-height: 0; opacity: 0; overflow: hidden; pointer-events: none;
+                        transition: max-height .18s ease, opacity .15s ease;
+                    }
+                    /* max-height here is only a FALLBACK default (if positionTeaserHistoryMenu's own
+                       inline style somehow never runs) — the real, viewport-aware target is set in JS
+                       on every open, same convention #dtQueryHintPreview's own open class uses. */
+                    .dt-teaser-history-menu.dt-teaser-history-menu-open { max-height: 260px; opacity: 1; pointer-events: auto; overflow-y: auto; }
+                    .dt-teaser-history-new {
+                        display: flex; align-items: center; gap: 6px; padding: 9px 10px;
+                        font-size: 11.5px; font-weight: 700; color: #2f6fd0; cursor: pointer;
+                        border-bottom: 1px solid #eef1f5; position: sticky; top: 0; background: #fff;
+                    }
+                    .dt-teaser-history-new:hover { background: #f0f5ff; }
+                    .dt-teaser-history-item {
+                        display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+                        padding: 8px 10px; font-size: 11.5px; color: #2c3744; cursor: pointer;
+                        border-bottom: 1px solid #f0f3f8;
+                    }
+                    .dt-teaser-history-item:last-child { border-bottom: none; }
+                    .dt-teaser-history-item:hover { background: #f0f5ff; }
+                    .dt-teaser-history-item.active { background: #eef3fb; font-weight: 700; }
+                    .dt-teaser-history-item-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+                    .dt-teaser-history-item-meta { flex-shrink: 0; font-size: 10px; color: #9aa5b1; }
+                    .dt-teaser-history-empty { padding: 10px; font-size: 11.5px; color: #9aa5b1; text-align: center; }
+                    @media (prefers-reduced-motion: reduce) { .dt-teaser-history-menu { transition: none; } }
+                    /* Hidden once chat is docked — the full-chat state shows the real thread title +
+                       a close button in .chat-docked-toolbar instead (#chatDockedCloseBtn). */
+                    #dtTextModePanel.dt-chat-docked .dt-teaser-open-area,
+                    #dtTextModePanel.dt-chat-docked .dt-teaser-collapsed-bar,
+                    #dtTextModePanel.dt-chat-docked .dt-teaser-divider { display: none; }
+                    /* Compact mode: a metric has been picked in Formula Picker, which just grew its
+                       own Company/Period/Formula fields — the teaser shrinks to the small bar above
+                       (#dtTeaserCollapsedBar) to hand that space over, instead of the full
+                       icon/title/description/composer. See setTeaserCompact in taskpane.js. */
+                    #dtTeaserCollapsedBar { display: none; }
+                    #dtTextModePanel.dt-teaser-compact:not(.dt-chat-docked) #dtTeaserCollapsedBar { display: flex; }
+                    /* Hides the whole shared wrapper (open-area + composer-box + history popover),
+                       not just its two children — hiding only the children left the wrapper's own
+                       (normally self-cancelling) padding/margin rendering as a few stray empty
+                       pixels once nothing inside it remained to cancel against. */
+                    #dtTextModePanel.dt-teaser-compact .dt-teaser-hover-area { display: none; }
+                    .dt-teaser-collapsed-bar {
+                        width: 100%; display: flex; align-items: center; gap: 6px;
+                        background: #eef4fd; border: 1px solid #d6e5f5; border-radius: 8px;
+                        padding: 8px 10px; margin: 0; box-shadow: none; cursor: pointer; font-family: inherit;
+                        transition: background-color .12s ease;
+                    }
+                    .dt-teaser-collapsed-bar:hover, .dt-teaser-collapsed-bar:focus-visible { background: #e3edfb; outline: none; }
+                    .dt-teaser-collapsed-label { flex: 1; text-align: left; font-size: 12px; font-weight: 700; color: #2f6fd0; }
+                    .dt-teaser-collapsed-arrow { color: #2f6fd0; font-size: 11px; line-height: 1; }
+                    #dtTextModePanel:not(.dt-chat-docked) .dt-composer-box { background: #eef4fd; border: 1px solid #d6e5f5; box-shadow: none; transition: border-color .12s ease; }
+                    /* Squarish (same 8px radius as every other button in this view), not a circle. */
+                    #dtTextModePanel:not(.dt-chat-docked) .dt-composer-send { background: #2f6fd0; }
+                    #dtTextModePanel:not(.dt-chat-docked) .dt-composer-send:hover { background: #1f4a80; }
+                    /* The footer row stays hidden in the teaser (no selection readout there, by
+                       request) but appears once chat is docked — see #dtComposerToolbarSlot's own
+                       HTML comment for what gets reparented into it there. */
+                    #dtTextModePanel:not(.dt-chat-docked) .dt-composer-footer { display: none; }
+                    .dt-composer-toolbar-slot { display: flex; align-items: center; gap: 6px; margin-left: auto; }
+                    /* Same light-chip treatment .chat-docked-toolbar's own copy of these buttons
+                       uses — identical styling in both homes, since dockChatPanel/undockChatPanel
+                       move the SAME two buttons between them rather than duplicating anything. */
+                    .dt-composer-toolbar-slot .chat-thread-btn,
+                    .dt-composer-toolbar-slot .chat-thread-new-btn { background: #fff; border-color: #e6eaf0; color: #173760; margin: 0; }
+                    .dt-composer-toolbar-slot .chat-thread-btn:hover,
+                    .dt-composer-toolbar-slot .chat-thread-new-btn:hover { background: #eef3fb; }
+
+                    /* ── Excel Table Outline card — a separate, compact, always-visible entry point
+                       (both Formula Picker and full-chat states show it; never nested inside
+                       either). Plain navy/white, same as the rest of the app — purple is reserved
+                       for FormulaGPT only. */
+                    #dtExcelOutlineCard {
+                        flex: 0 0 auto; display: flex; align-items: center; gap: 10px;
+                        margin: 0 16px 14px; padding: 7px 10px;
+                        background: #fff; border: 1.5px solid #e6eaf0; border-radius: 10px;
+                        cursor: pointer; transition: border-color .12s ease, background-color .12s ease;
+                    }
+                    #dtExcelOutlineCard:hover { border-color: #b9cff0; background: #f7f9fc; }
+                    .dt-excel-icon { flex-shrink: 0; color: #1a7a3d; display: flex; }
+                    .dt-excel-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+                    .dt-excel-head-row { display: flex; align-items: center; gap: 6px; }
+                    /* flex:1/min-width:0 so the longer title wraps within the row instead of
+                       pushing the info button off to the side or overflowing the card. */
+                    .dt-excel-title { flex: 1; min-width: 0; font-size: 12px; font-weight: 700; color: #173760; line-height: 1.3; }
+                    .dt-excel-chevron { flex-shrink: 0; color: #9aa5b1; display: flex; }
+                    /* Click/tap modal — simple centered overlay, same "floats above the page" shadow
+                       depth DESIGN_SYSTEM.md reserves for exactly this (a modal, a dropdown, the
+                       standalone chat panel). */
+                    .dt-excel-modal-backdrop {
+                        position: fixed; inset: 0; z-index: 1400; display: flex; align-items: center; justify-content: center;
+                        background: rgba(15,23,35,0.55); padding: 20px; box-sizing: border-box;
+                    }
+                    .dt-excel-modal {
+                        background: #fff; border-radius: 12px; max-width: 420px; width: 100%; max-height: 90vh; overflow-y: auto;
+                        box-shadow: 0 12px 36px rgba(0,0,0,0.22); padding: 16px; box-sizing: border-box;
+                    }
+                    .dt-excel-modal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+                    .dt-excel-modal-head span { font-size: 13px; font-weight: 700; color: #173760; }
+                    .dt-excel-modal-close { background: none; border: none; box-shadow: none; margin: 0; padding: 0; width: 24px; height: 24px; font-size: 18px; line-height: 1; color: #6b7686; cursor: pointer; }
+                    .dt-excel-modal-close:hover { color: #173760; }
+                    .dt-excel-modal video { display: block; width: 100%; border-radius: 8px; margin-bottom: 10px; background: #f5f7fa; }
+                    .dt-excel-modal-desc { font-size: 11.5px; line-height: 1.5; color: #45516b; margin: 0 0 10px; }
+                    .dt-excel-modal-steps { margin: 0; padding-left: 18px; font-size: 11.5px; line-height: 1.6; color: #2c3744; }
                     /* Stylized radio "pills" for the destination picker — native radio input kept
                        for accessibility/keyboard use but visually hidden; the label itself is the
                        clickable, styled control, toggled via the sibling :checked selector so no JS
@@ -1706,112 +2307,7 @@
                     .dt-grid td.dt-grid-blank { background: #fff; }
                     .dt-preview-actions { display: flex; align-items: center; gap: 14px; margin-top: 10px; }
                     .dt-preview-actions .fb-submit { flex: 1; margin: 0; }
-                    /* "Your Tables" — the on-demand workbook scan's results list (see
-                       scanYourTables), filling the space below the compact Download composer (see
-                       #dtYourTablesBody) and scrolling independently of it. */
-                    /* "Describe what data you want" shares this with the (now-removed) old "Your
-                       Tables" inline label — kept as a named size rather than inlining it, in case
-                       another section title needs to match later. */
                     .dt-section-title { font-size: 13px; }
-                    /* #dtYourTablesBody is the positioned ancestor for the Undo toast below
-                       (position:absolute, anchored to this panel's bottom edge rather than the
-                       whole window). */
-                    .dt-yt-body { position: relative; }
-                    .dt-yt-item-loc-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-                    .dt-yt-item-header-left { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
-                    /* A soft grey backdrop (not the stark white the row cards sit on) shows through
-                       the gaps between rows now that each one is its own rounded, bordered card. */
-                    /* Was a flat "max-height: 320px" — a fine height on a small/default-sized task
-                       pane window, but a FIXED cap means a larger window (a maximized or popped-out
-                       pane) still only shows 320px of list, clipping the last card mid-way and
-                       leaving the rest of the panel's actual height as dead grey space below the
-                       scroller. flex: 1 + min-height: 0 makes it fill whatever room
-                       #dtYourTablesField actually has (see that rule's own comment for the rest of
-                       the chain this depends on) instead of a number guessed for one window size.
-                       min-height here (not just on the ancestors) is still needed — a flex item's
-                       default min-height is auto (= its content size), which would let this list
-                       keep growing taller than its flex basis instead of clipping into its own
-                       scrollbar the way a fixed max-height always did. */
-                    .dt-yt-list { flex: 1; min-height: 0; overflow-y: auto; background: #eef1f5; padding: 6px; border-radius: 8px; }
-                    .dt-yt-list .dt-info { padding: 10px; margin: 0; }
-                    /* A flat row with a bottom divider (Excel's own Queries & Connections pane,
-                       Gmail/Drive lists) instead of a bordered/shadowed card per table — title and
-                       the two header icon buttons (Refresh/Delete) share one header line; clicking
-                       anywhere on the row other than an actual control navigates to the table (see
-                       the click delegation in taskpane.js). */
-                    .dt-yt-item {
-                        border: 1px solid #b9cff0; border-bottom: 2px solid #173760; border-radius: 8px;
-                        padding: 10px 8px; background: #fff; box-shadow: none; font-size: 12px;
-                        margin-bottom: 6px; cursor: pointer;
-                    }
-                    .dt-yt-item:hover { background: #f7f9fc; }
-                    .dt-yt-item:last-child { margin-bottom: 0; }
-                    /* A pending (not-yet-final) Delete hides the row immediately — see the Undo
-                       toast in taskpane.js; the actual deleteYourTable call is deferred until the
-                       toast's timeout fires with no Undo click. */
-                    .dt-yt-item.dt-yt-item-pending-delete { display: none; }
-                    .dt-yt-item-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
-                    .dt-yt-item-title-group { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; }
-                    .dt-yt-item-title-btn {
-                        text-align: left; background: none; border: none; box-shadow: none; padding: 0; margin: 0;
-                        font-family: inherit; font-weight: 700; font-size: 13px; color: #173760; cursor: pointer;
-                    }
-                    .dt-yt-item-title-btn:hover { text-decoration: underline; }
-                    /* The cell range as a small monospace "badge" rather than another button
-                       competing with the title — metadata, not a primary action. */
-                    .dt-yt-item-loc-badge {
-                        display: inline-block; font-size: 10.5px; font-family: Consolas, Monaco, monospace;
-                        background: #f3f6fb; color: #6b7686; border: 1px solid #e3eaf3; border-radius: 4px;
-                        padding: 1px 6px; margin: 0; box-shadow: none; cursor: pointer;
-                    }
-                    .dt-yt-item-loc-badge:hover { background: #eef2f8; color: #2f6fd0; border-color: #c7d7ee; }
-                    /* Swaps in for the badge above once Modify is clicked (see setLocEditing) — a
-                       destination-sheet picker (defaults to this table's own sheet), two compact
-                       monospace cell boxes with a ":" between them (not one "B2:D15" text field),
-                       and tick/cross buttons to commit or cancel — committing moves the table (see
-                       commitTableMove/moveYourTable). A full-width row of its own now (a sibling of
-                       .dt-yt-item-header, not nested inside its narrower title column — nested
-                       there, this row's content overflowed RIGHT UNDER the header's own fixed-width
-                       Refresh/Delete icons instead of fitting; see the HTML's own comment on this
-                       element for the full story), so there's no flex-wrap to worry about — every
-                       control here comfortably fits on one line with real room to spare. */
-                    .dt-yt-item-loc-edit { display: flex; align-items: center; gap: 4px; margin-top: 6px; }
-                    .dt-yt-item-loc-sheet-select {
-                        width: auto; max-width: 110px; font-size: 10.5px; font-family: inherit;
-                        padding: 1px 2px; border-radius: 4px; border: 1.5px solid #d6e5f5; color: #2c3744;
-                    }
-                    .dt-yt-item-loc-cell-input {
-                        /* A bare cell ("B5", or "XFD1048576" at the extreme) is all either of
-                           these ever has to hold — the ":" lives outside as its own element now,
-                           so neither box needs the wider budget a full "A3:C16" range used to. */
-                        width: auto; max-width: 70px; flex-shrink: 1; min-width: 0; display: inline-block;
-                        font-size: 10.5px; font-family: Consolas, Monaco, monospace;
-                        padding: 1px 6px; border-radius: 4px;
-                    }
-                    .dt-yt-item-loc-colon { flex-shrink: 0; color: #6b7686; font-size: 10.5px; font-weight: 700; }
-                    /* Tick (commit)/cross (cancel) pinned to the end of the row — reuse the generic
-                       small icon button (.dt-icon-btn, the same one the description's pencil edit
-                       toggle uses), cross additionally tinted red on hover (.dt-btn-danger, already
-                       used for Delete) purely to read as visually distinct from tick at a glance,
-                       not because cancelling is destructive. */
-                    .dt-yt-item-loc-edit .dt-icon-btn { flex-shrink: 0; margin-left: 2px; }
-                    /* Two icon-only buttons in the row's own header — Refresh, then Delete
-                       (rightmost). Each gets a full 44x44px tap target even though the drawn icon
-                       inside is much smaller, per standard touch-target guidance. */
-                    .dt-yt-item-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; position: relative; }
-                    .dt-yt-icon-action-btn {
-                        display: inline-flex; align-items: center; justify-content: center;
-                        width: 44px; height: 44px; background: transparent; color: #6b7686;
-                        border: none; border-radius: 8px; padding: 0; margin: 0; box-shadow: none; cursor: pointer;
-                    }
-                    .dt-yt-icon-action-btn svg { width: 14px; height: 14px; flex-shrink: 0; }
-                    .dt-yt-icon-action-btn:hover, .dt-yt-icon-action-btn:focus-visible { background: #f0f3f8; color: #173760; }
-                    .dt-yt-icon-action-btn:disabled { opacity: 0.5; cursor: default; }
-                    /* Delete stays grey like Refresh until hovered/focused/pressed — only then does
-                       it turn red, so a row doesn't read as "dangerous" at a glance. */
-                    .dt-yt-icon-action-btn.dt-yt-delete-btn:hover,
-                    .dt-yt-icon-action-btn.dt-yt-delete-btn:focus-visible,
-                    .dt-yt-icon-action-btn.dt-yt-delete-btn:active { background: #fdf0ee; color: #b80000; }
                     .dt-icon-btn {
                         display: inline-flex; align-items: center; justify-content: center;
                         width: 24px; height: 24px; background: transparent; border: none; box-shadow: none;
@@ -1821,89 +2317,6 @@
                     .dt-icon-btn:disabled { opacity: 0.5; cursor: default; }
                     .dt-icon-btn.dt-btn-danger { color: #c0392b; }
                     .dt-icon-btn.dt-btn-danger:hover { background: #fdf0ee; color: #a80000; }
-                    .dt-yt-item-body { margin-top: 6px; }
-                    /* Description + its pencil edit-toggle sit on the row itself now — it used to
-                       live hidden inside the Edit form, only shown once Edit was clicked. flex:1 +
-                       min-width:0 on the text is what lets it actually wrap/clamp inside this row
-                       instead of pushing the pencil button out to the side. */
-                    .dt-yt-item-desc-row { display: flex; align-items: flex-start; gap: 6px; }
-                    .dt-yt-item-desc { flex: 1; min-width: 0; color: #6b7686; font-style: italic; font-size: 11.5px; margin: 0; line-height: 1.4; }
-                    .dt-yt-item-desc-row .dt-yt-modify-btn { flex-shrink: 0; }
-                    /* A single full-width button now — Edit moved up beside the description above
-                       (the pencil button, see .dt-yt-item-desc-row) instead of sitting next to the
-                       Update bar here, so this wrapper only ever has the one child these days. Kept
-                       as its own element (rather than just using .dt-yt-update-bar directly) since
-                       the Edit-open handler still needs a single thing to hide/show as a unit — see
-                       the dt-yt-modify-btn handler. */
-                    .dt-yt-item-footer { display: flex; align-items: stretch; margin-top: 8px; }
-                    /* Update bar — same position/size whether idle or pending, so the row never
-                       jumps. Idle: quiet grey, not disabled (aria-disabled only, so it's still
-                       reachable by a screen reader, just not operable) and deliberately given no
-                       hover effect so it doesn't look clickable. Pending: filled navy, a real
-                       button, labeled with what changed (see pollTableMetaEdits/classifyDataRowChange
-                       for how that's detected) — text alone carries the state, not just color. */
-                    .dt-yt-update-bar {
-                        flex: 1; min-width: 0; min-height: 30px; display: flex; align-items: center;
-                        justify-content: center; gap: 6px; background: #eef1f5; color: #6b7686;
-                        border: none; border-radius: 6px; padding: 5px 8px; font-family: inherit;
-                        font-size: 11px; font-weight: 700; box-shadow: none; cursor: default;
-                    }
-                    .dt-yt-update-bar svg { width: 12px; height: 12px; flex-shrink: 0; }
-                    .dt-yt-update-bar.dt-yt-update-bar-pending { background: #173760; color: #fff; cursor: pointer; }
-                    .dt-yt-update-bar.dt-yt-update-bar-pending:hover { background: #21497e; }
-                    .dt-yt-update-bar.dt-yt-update-bar-pending:disabled { opacity: 0.6; cursor: default; }
-                    /* The inline "describe what you want changed" row — the Edit button above
-                       "transforms into" this (the button hides, this fades in in the exact same
-                       slot — see the dt-yt-modify-btn handler) rather than opening a separate panel
-                       below a button that stays visible. display:none by default (so its fields
-                       are fully out of the tab order while closed) — opening it adds
-                       .dt-yt-refresh-form-open (display:flex, the tinted "shared card" background)
-                       and then, one frame later, .dt-yt-refresh-form-visible to actually fade/slide
-                       it in (display can't itself be transitioned, hence the two-step). Closing
-                       removes both immediately, same instant hide, and restores the Edit button.
-                       Only ever ONE of these is open at a time across the whole list. */
-                    .dt-yt-refresh-form { display: none; flex-direction: column; gap: 8px; }
-                    .dt-yt-refresh-form.dt-yt-refresh-form-open {
-                        /* Vertical padding only — horizontal padding here would inset the textarea
-                           (and Cancel) further than the card's own edges, making the input row look
-                           noticeably narrower than everything else on the row (the description,
-                           header, Update bar) above and below it. */
-                        display: flex; margin-top: 8px; padding: 8px 0; border-radius: 6px; background: #f7f9fc;
-                        opacity: 0; transform: translateY(-4px); transition: opacity .15s ease, transform .15s ease;
-                    }
-                    .dt-yt-refresh-form.dt-yt-refresh-form-open.dt-yt-refresh-form-visible { opacity: 1; transform: translateY(0); }
-                    @media (prefers-reduced-motion: reduce) {
-                        .dt-yt-refresh-form.dt-yt-refresh-form-open { transition: none; }
-                    }
-                    /* Clamped to 3 lines by default — "Show more"/"Show less" only appears when the
-                       text actually overflows that (checked once the panel opens, see the
-                       dt-yt-modify-btn handler — a hidden element has no scrollHeight to measure
-                       against). */
-                    .dt-yt-item-desc-clamped {
-                        display: -webkit-box; -webkit-line-clamp: 3; line-clamp: 3; -webkit-box-orient: vertical;
-                        overflow: hidden;
-                    }
-                    .dt-yt-item-desc-clamped.dt-yt-item-desc-expanded { display: block; -webkit-line-clamp: unset; line-clamp: unset; overflow: visible; }
-                    .dt-yt-desc-toggle-btn {
-                        align-self: flex-start; background: none; border: none; box-shadow: none; padding: 0;
-                        margin: -2px 0 0; color: #2f6fd0; font-size: 11px; font-weight: 700; font-family: inherit; cursor: pointer;
-                    }
-                    .dt-yt-desc-toggle-btn:hover { text-decoration: underline; }
-                    /* Small uppercase label above the change textarea — a plain caption, not a
-                       control. (Used to also caption the description above it, back when the
-                       description lived inside this same form — it's always on the row now.) */
-                    .dt-yt-field-label {
-                        font-size: 10px; font-weight: 700; color: #6b7686; text-transform: uppercase;
-                        letter-spacing: 0.04em; margin-top: 2px;
-                    }
-                    .dt-yt-refresh-input { font-size: 12px; }
-                    .dt-yt-refresh-input-tall { min-height: 64px; resize: vertical; }
-                    /* "Apply change" (filled navy, same .fb-submit as Download) + "Cancel" (outlined
-                       .dt-link) side by side below the textarea — real, full-size buttons rather
-                       than an icon-only send button sitting inside the textarea itself. */
-                    .dt-yt-refresh-actions { display: flex; align-items: center; gap: 8px; margin-top: 2px; }
-                    .dt-yt-refresh-actions .fb-submit { flex: 1; margin: 0; display: inline-flex; align-items: center; justify-content: center; gap: 7px; }
-                    .dt-yt-refresh-actions .fb-submit svg { width: 13px; height: 13px; flex-shrink: 0; }
                     /* Label + mode-toggle button sharing one row, right-aligned — the toggle stays
                        in this exact top-right spot whether it currently reads "Using the table
                        you've selected" or "Type a request instead", so switching modes never makes
@@ -1918,68 +2331,6 @@
                     .dt-mode-toggle-btn:hover { background: #fdf0ee; }
                     .dt-mode-toggle-btn:disabled { opacity: 0.5; cursor: default; }
                     .dt-mode-toggle-btn svg { width: 12px; height: 12px; flex-shrink: 0; }
-                    /* A table whose description/company/period was edited directly in the sheet
-                       (see pollTableMetaEdits) — subtle, static highlight on its OWN row, alongside
-                       the row's own Update bar (which carries the actual "what changed" text and
-                       is the only way to apply it). */
-                    .dt-yt-item.dt-yt-item-pending-change { border-left: 3px solid #173760; background: #eaf1fd; }
-                    /* The table whose range currently contains the selected Excel cell (see
-                       checkYtSelectionOnce) — a soft focus ring (thin blue border + a faint glow),
-                       the same visual language as keyboard focus, which reads as "this is the
-                       current one" without competing with the pending-change highlight above (a left
-                       navy accent + tint, meaning "needs updating"). Deliberately NOT a thicker
-                       border in the SAME navy as pending-change — that looked identical to it at a
-                       glance. The two can still combine on one card (tint + left bar + ring + the
-                       eyebrow label below), and still never look like the same state. */
-                    .dt-yt-item.dt-yt-item-cell-selected { border: 1px solid #2f6fd0; box-shadow: 0 0 0 3px rgba(47, 111, 208, 0.18); }
-                    /* The state doesn't rely on the ring/color alone — this label is why the card
-                       is highlighted, same 10px caps treatment as .dt-yt-field-label elsewhere in
-                       this view's edit panel, just in the brand blue instead of grey. */
-                    .dt-yt-selected-eyebrow {
-                        display: flex; align-items: center; gap: 4px; margin-bottom: 2px;
-                        font-size: 10px; font-weight: 700; color: #2f6fd0; text-transform: uppercase; letter-spacing: 0.04em;
-                    }
-                    .dt-yt-selected-dot { font-size: 8px; line-height: 1; }
-                    /* Shared Undo toast (per-row Delete) — floats over the bottom of
-                       #dtYourTablesBody (its positioned ancestor, see .dt-yt-body) rather than
-                       taking flex layout space, since it's transient. */
-                    .dt-yt-toast {
-                        position: absolute; left: 12px; right: 12px; bottom: 12px; z-index: 30;
-                        display: flex; align-items: center; justify-content: space-between; gap: 12px;
-                        background: #173760; color: #fff; border-radius: 8px; padding: 10px 14px;
-                        font-size: 12px; box-shadow: 0 8px 22px rgba(0, 0, 0, 0.25);
-                    }
-                    .dt-yt-toast-message { flex: 1; min-width: 0; }
-                    .dt-yt-toast-undo {
-                        flex-shrink: 0; background: none; border: none; box-shadow: none; color: #9ecbff;
-                        font-weight: 700; font-size: 12px; font-family: inherit; cursor: pointer; padding: 0;
-                    }
-                    .dt-yt-toast-undo:hover { color: #fff; text-decoration: underline; }
-                    /* Blocking overlay shown for the duration of any write/modify/refresh/move —
-                       see showQueryDataOverlay/hideQueryDataOverlay in taskpane.js. Same dimmed-
-                       backdrop + centered white card language as .dz-overlay/.dz-box, just with a
-                       spinner instead of a form, and a higher z-index so it always sits above any
-                       other modal/dropdown this view might have open underneath it. */
-                    .dt-loading-overlay {
-                        position: fixed; inset: 0; background: rgba(0,0,0,0.45);
-                        display: none; align-items: center; justify-content: center;
-                        z-index: 1400; font-family: Arial, sans-serif;
-                    }
-                    .dt-loading-box {
-                        background: #fff; border-radius: 12px; padding: 26px 30px;
-                        display: flex; flex-direction: column; align-items: center; gap: 14px;
-                        box-shadow: 0 14px 44px rgba(0,0,0,0.35); max-width: 260px; text-align: center;
-                    }
-                    .dt-loading-spinner {
-                        width: 32px; height: 32px; border-radius: 50%; flex-shrink: 0;
-                        border: 3.5px solid #d6e5f5; border-top-color: #173760;
-                        animation: dtLoadingSpin 0.8s linear infinite;
-                    }
-                    @keyframes dtLoadingSpin { to { transform: rotate(360deg); } }
-                    @media (prefers-reduced-motion: reduce) {
-                        .dt-loading-spinner { animation-duration: 2.4s; }
-                    }
-                    .dt-loading-text { font-size: 13px; font-weight: 700; color: #173760; line-height: 1.4; }
                     .dz-footer {
                         display: flex; justify-content: flex-end; gap: 10px;
                         padding: 12px 16px; border-top: 1px solid #eee;
@@ -2230,7 +2581,6 @@
                         background: linear-gradient(135deg, #2f6fd0, #173760); color: #fff;
                         border-bottom: 2px solid #d80404; padding: 10px 14px; font-weight: 700; font-size: 13px;
                     }
-                    .chat-header-actions { display: flex; align-items: center; gap: 6px; }
                     /* Icon-only hamburger — swaps to a cross (✕) while open (see setThreadMenuOpen in
                        taskpane.js, which swaps this button's own inner SVG) since it's also what
                        closes the panel; stays visible/clickable the whole time the panel is open —
@@ -2456,17 +2806,30 @@
                     @media (prefers-reduced-motion: reduce) {
                         .chat-card.run { animation: none; opacity: 0.75; }
                     }
-                    .chat-mode-wrap { position: relative; padding: 6px 10px; flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+                    /* Bottom row ("supporting buttons") now nested inside .chat-composer, after the
+                       input row — see that element's own HTML comment. border-top is the "clean
+                       but faintly coloured separation" between the two rows; no horizontal padding
+                       of its own any more (the card's own padding already insets both rows evenly,
+                       doubling up here would misalign this row's edges against the input row
+                       above). */
+                    /* flex-wrap:wrap is a safety net for a genuinely narrow task pane — the
+                       selection indicator (the one item here allowed to shrink/ellipsize, see its
+                       own flex:0 1 auto) drops to its own second line rather than visually
+                       overflowing the row once it and the mode button together don't fit on one
+                       line anymore. */
+                    .chat-mode-wrap { position: relative; padding-top: 8px; margin-top: 2px; border-top: 1px solid #e3eaf4; flex-shrink: 0; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 8px; }
                     /* Shrunk a bit (was 5px 10px / 11.5px) now that this shares its row with the
                        selection indicator — every px here is row space that no longer has to fight
                        the mode button for. "Auto"/"Manual" (see renderMode in taskpane.js) is the
                        short, Claude-Code-style mode name BY DESIGN, not a truncation — the dropdown
                        item below carries the same name plus its own full description, shown only
-                       once that menu is actually open. */
-                    .chat-mode-btn { display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; background: #f5f7fa; border: 1px solid #e6eaf0; border-radius: 7px; padding: 4px 8px; margin: 0; font-size: 11px; font-weight: 600; color: #2c3744; cursor: pointer; font-family: inherit; }
+                       once that menu is actually open. white-space:nowrap keeps this short label
+                       from ever breaking mid-word — flex-wrap on the WRAP above is the safety net
+                       for a narrow row, not this button's own text wrapping internally. */
+                    .chat-mode-btn { display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; white-space: nowrap; background: #f5f7fa; border: 1px solid #e6eaf0; border-radius: 7px; padding: 4px 8px; margin: 0; font-size: 11px; font-weight: 600; color: #2c3744; cursor: pointer; font-family: inherit; }
                     .chat-mode-btn:hover { background: #eef1f5; }
                     .chat-mode-caret { font-size: 9px; opacity: .6; margin-left: 1px; }
-                    .chat-mode-menu { display: none; position: absolute; bottom: calc(100% + 4px); left: 10px; min-width: 240px; background: #fff; border: 1px solid #d6e5f5; border-radius: 10px; box-shadow: 0 10px 28px rgba(0,0,0,0.18); overflow: hidden; z-index: 1300; }
+                    .chat-mode-menu { display: none; position: absolute; bottom: calc(100% + 4px); left: 0; min-width: 240px; background: #fff; border: 1px solid #d6e5f5; border-radius: 10px; box-shadow: 0 10px 28px rgba(0,0,0,0.18); overflow: hidden; z-index: 1300; }
                     .chat-mode-menu.open { display: block; }
                     .chat-mode-item { display: flex; align-items: center; gap: 8px; padding: 8px 10px; cursor: pointer; }
                     .chat-mode-item:hover { background: #f0f5ff; }
@@ -2509,16 +2872,47 @@
                     .chat-companies .cc-input:focus { border-color: #2f6fd0; }
                     .chat-confirm.cf-done { border-left-color: #4b9f27; background: #fff; }
                     .chat-confirm.cf-skipped { border-left-color: #999; background: #fff; }
-                    .chat-composer { border-top: 1px solid #eef1f5; padding: 8px 10px; }
-                    .chat-input-wrap { position: relative; display: flex; }
-                    .chat-composer textarea { flex: 1; border: 2px solid #d6e5f5; border-radius: 10px; outline: none; resize: none; font-family: inherit; font-size: 12.5px; color: #2c3744; max-height: 96px; line-height: 1.4; padding: 8px 38px 8px 9px; }
-                    .chat-composer textarea:focus { border-color: #2f6fd0; }
-                    /* Stop state: same footprint so the composer does not shift when a turn starts,
-                       but unmistakably a different control. */
-                    /* The glyph IS the white square, so its size is the square's size. */
-                    .chat-composer button.stop { background: #b80000; font-size: 15px; line-height: 1; }
-                    .chat-composer button.stop:hover { background: #9a0000; }
-                    .chat-composer button:disabled { background: #c3ccd8; cursor: not-allowed; }
+                    /* One floating card, same shape/shadow language as Table Builder's own composer
+                       (.dt-composer-box) — see this element's own HTML comment. Padding matches
+                       .dt-composer-box's own (3px 10px) EXACTLY, as the one source of vertical
+                       spacing for both rows inside — .chat-input-wrap below deliberately carries no
+                       padding of its own any more (it used to add 4px on top of this, stacking into
+                       a visibly taller/looser box than Table Builder's own, tighter one). */
+                    .chat-composer {
+                        margin: 8px 10px 16px; padding: 8px 12px;
+                        background: #f2f4f8; border-radius: 12px;
+                        box-shadow: 0 2px 4px rgba(23,55,96,0.12), 0 8px 20px rgba(23,55,96,0.18);
+                    }
+                    /* Top row: input + send, same line — a normal flex row now (not the textarea
+                       with the send button absolutely overlaid inside its own padding, which this
+                       used to be), matching .dt-composer-row's own layout exactly (including: no
+                       padding of its own — see .chat-composer's own comment). */
+                    .chat-input-wrap { display: flex; align-items: center; gap: 8px; }
+                    /* Borderless, blending into the card itself — same convention
+                       .dt-composer-input uses — rather than a separately-boxed input nested inside
+                       an already-boxed composer. rows="1" plus this keeps it visually a single-line
+                       field; max-height only matters once actual typed content grows it. */
+                    /* Explicit height (not just line-height) pins this to the SAME resting
+                       single-line height as Table Builder's plain <input> (.dt-composer-input,
+                       which has no height quirk since inputs size themselves differently from
+                       textareas) — a <textarea>'s own rows-based intrinsic sizing otherwise renders
+                       taller than a same-font-size <input> by default, which was the real source of
+                       "Formula AI's box is far bigger" even after the padding fix above: the
+                       textarea itself, not the surrounding box, was taller. Harmless to pin: the
+                       existing auto-grow listener (taskpane.js, on #chatInput's own "input" event)
+                       sets its OWN inline height once the user actually types more than one line,
+                       which overrides this CSS default exactly like it already did before. */
+                    .chat-composer textarea { flex: 1; min-width: 0; height: 24px; border: none; background: transparent; outline: none; resize: none; font-family: inherit; font-size: 12.5px; color: #2c3744; max-height: 96px; line-height: 1.4; padding: 1px 0; }
+                    /* Scoped to the SEND button specifically (#chatSend), not every <button> inside
+                       .chat-composer — #chatModeBtn also lives in here now (nested inside
+                       .chat-mode-wrap, see its own HTML comment), and the old ".chat-composer
+                       button" descendant selector was matching THAT too once it moved in here,
+                       forcing it into this button's own 21x21/padding:0 footprint and badly
+                       crushing its "Manual"/"Auto" label — confirmed live, a real rendering bug,
+                       not just a style mismatch. */
+                    #chatSend.stop { background: #b80000; font-size: 15px; line-height: 1; }
+                    #chatSend.stop:hover { background: #9a0000; }
+                    #chatSend:disabled { background: #c3ccd8; cursor: not-allowed; }
                     .chat-balance-notice { display: none; margin-bottom: 6px; padding: 6px 8px; border-radius: 8px; background: #fdecec; border: 1px solid #f5c2c2; color: #a12626; font-size: 11px; line-height: 1.35; }
                     /* A small, quiet chip — confirms what DataGPT will treat as "the selection"
                        without competing with the composer for attention. monospace + ellipsis
@@ -2530,29 +2924,54 @@
                        still ellipsizes instead of overflowing for a long one. min-width:0 is what
                        lets a flex item shrink/ellipsize at all; without it a long, unbreakable
                        (white-space:nowrap) address would just keep the box growing to fit instead. */
+                    /* Plain text, no background pill — same quiet treatment as Table Builder's own
+                       .dt-composer-selection (was a filled blue chip here, a real colour mismatch
+                       against that plain-text version). */
                     .chat-selection-indicator {
-                        display: flex; align-items: center; gap: 5px; flex: 0 1 auto; min-width: 0; max-width: 65%; padding: 4px 8px;
-                        border-radius: 7px; background: #eef3fb; color: #45587a; font-size: 10.5px;
+                        display: flex; align-items: center; gap: 5px; flex: 0 1 auto; min-width: 0; max-width: 50%;
+                        color: #8891a0; font-size: 10.5px;
                         overflow: hidden; white-space: nowrap;
                     }
                     .chat-selection-indicator svg { flex-shrink: 0; }
                     .chat-selection-indicator span { overflow: hidden; text-overflow: ellipsis; min-width: 0; font-family: "SFMono-Regular", Consolas, monospace; }
-                    .chat-composer button { position: absolute; right: 4px; bottom: 4px; margin: 0; width: 28px; height: 28px; padding: 0; border-radius: 8px; border: none; background: linear-gradient(135deg, #2f6fd0, #173760); color: #fff; font-size: 13px; line-height: 1; cursor: pointer; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; box-shadow: none; }
+                    /* Scoped to #chatSend specifically — see the comment above #chatSend.stop for
+                       why ".chat-composer button" (matching EVERY button inside, including
+                       #chatModeBtn once it moved in here) was wrong. Normal flex sibling now (was
+                       position:absolute, overlaid inside the textarea's own reserved padding) —
+                       same flat navy, size, and hover shade as .dt-composer-send (was a blue-to-navy
+                       GRADIENT at a different size — a real mismatch against Table Builder's own
+                       flat send button, now fixed). */
+                    #chatSend { margin: 0; width: 28px; height: 28px; padding: 0; border-radius: 8px; border: none; background: #173760; color: #fff; font-size: 14px; line-height: 1; cursor: pointer; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; box-shadow: none; transition: background-color .12s ease, transform .12s ease; }
+                    #chatSend:hover { background: #1f4a80; }
+                    #chatSend:active { transform: scale(0.94); }
                 </style>
                 <div id="chatFeature">
                     <button id="chatFab" title="Ask DataGPT">✦ Ask DataGPT</button>
                     <div id="chatPanel" style="display:none;">
+                        <!-- Close control removed. The panel fills the ribbon task pane
+                             (view=datagpt), so there is nothing to close back to — it just left the
+                             user on a blank pane. Nothing but the product name lives here now: the
+                             thread picker moved down into the bar below (see its own comment), so
+                             this is a plain title strip in every view that shows it. -->
                         <div class="chat-header">
                             <span>✦ Ask DataGPT</span>
-                            <!-- Close control removed. The panel fills the ribbon task pane
-                                 (view=datagpt), so there is nothing to close back to — it just left
-                                 the user on a blank pane. The actions span now holds the thread
-                                 picker (see renderThreadList/switchToThread/createNewThread in
-                                 taskpane.js) instead of staying empty. New chat lives HERE, in the
-                                 real header, rather than inside the drawer's own area below — see
-                                 #chatThreadMenu's own comment for why nothing placed there can sit
-                                 in this same vertical strip. -->
-                            <span class="chat-header-actions">
+                        </div>
+                        <!-- The thread bar: ACTIVE thread's name on the left, New chat / history on
+                             the right, a rule along the bottom separating it from the stream. Its
+                             two buttons used to live in .chat-header's own actions span and get
+                             REPARENTED here by dockChatPanel/undockChatPanel whenever Table Builder
+                             docked the panel; they live here permanently in BOTH views now, so there
+                             is one arrangement to style and nothing to move at runtime. Sits directly
+                             UNDER the title strip above (never over it), and ends up as the top strip
+                             of the docked area in Table Builder for free, since .chat-header is
+                             hidden entirely there (see .dt-docked .chat-header below) and so takes no
+                             height. #chatToolbarTitle's text is set by renderThreadList() in
+                             taskpane.js — every switch/new/auto-rename path already calls it,
+                             including the initial render, so there's no separate wiring to keep in
+                             step. -->
+                        <div class="chat-docked-toolbar" id="chatDockedToolbar">
+                            <span class="chat-toolbar-title" id="chatToolbarTitle"></span>
+                            <span class="chat-toolbar-actions">
                                 <button type="button" class="chat-thread-new-btn" id="chatThreadNewBtn" title="Start a new conversation">
                                     <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
                                     <span>New chat</span>
@@ -2560,6 +2979,11 @@
                                 <button type="button" class="chat-thread-btn" id="chatThreadBtn" title="Chat history" aria-haspopup="true" aria-expanded="false">
                                     <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="6" x2="20" y2="6"></line><line x1="4" y1="12" x2="20" y2="12"></line><line x1="4" y1="18" x2="20" y2="18"></line></svg>
                                 </button>
+                                <!-- Docked-only (see the scoped CSS rule keyed off #chatPanel.dt-docked)
+                                     — replaces the old separate #chatDockedHeader's "Use Formula
+                                     Picker" text button with just a cross, right next to the thread
+                                     title itself rather than its own extra header row above it. -->
+                                <button type="button" class="chat-docked-close-btn" id="chatDockedCloseBtn" title="Close FormulaGPT — back to Formula Picker" aria-label="Close FormulaGPT — back to Formula Picker">✕</button>
                             </span>
                         </div>
                         <!-- Dimming backdrop + a right-anchored sliding side drawer, not a small
@@ -2610,44 +3034,51 @@
                             </div>
                         </div>
                         <div class="chat-stream" id="chatStream"></div>
-                        <div class="chat-mode-wrap" id="chatModeWrap">
-                            <!-- Short mode name + caret on the button itself, same convention
-                                 Claude Code's own mode switcher uses — the FULL description for
-                                 each mode only shows once the dropdown below is actually open (see
-                                 each .chat-mode-item's own <small>), not crammed into the button. -->
-                            <button type="button" class="chat-mode-btn" id="chatModeBtn" title="Choose write mode">
-                                <span id="chatModeIcon">✋</span>
-                                <span id="chatModeBtnLabel">Manual</span>
-                                <span class="chat-mode-caret">▾</span>
-                            </button>
-                            <!-- Moved up from .chat-composer below so it shares this one row with
-                                 the mode button instead of sitting on its own line above the
-                                 textarea — see .chat-selection-indicator's own flex:1 for how it
-                                 absorbs whatever width the mode button doesn't need. Still the exact
-                                 same element checkChatSelectionOnce/openPanel/closePanel in
-                                 taskpane.js already drive — only its position in the DOM moved. -->
-                            <div class="chat-selection-indicator" id="chatSelectionIndicator" style="display:none;">
-                                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"></rect><line x1="9" y1="3" x2="9" y2="21"></line><line x1="3" y1="9" x2="21" y2="9"></line></svg>
-                                <span id="chatSelectionIndicatorText"></span>
-                            </div>
-                            <div class="chat-mode-menu" id="chatModeMenu">
-                                <div class="chat-mode-item" data-mode="ask">
-                                    <span class="chat-mode-item-icon">✋</span>
-                                    <span class="chat-mode-item-text"><b>Manual</b><small>DataGPT confirms before editing the sheet</small></span>
-                                    <span class="chat-mode-tick" data-tick="ask">✓</span>
-                                </div>
-                                <div class="chat-mode-item" data-mode="auto">
-                                    <span class="chat-mode-item-icon">⚡</span>
-                                    <span class="chat-mode-item-text"><b>Auto</b><small>DataGPT edits the sheet without asking first</small></span>
-                                    <span class="chat-mode-tick" data-tick="auto">✓</span>
-                                </div>
-                            </div>
-                        </div>
+                        <!-- One floating card, consistent with Table Builder's own composer shape
+                             (.dt-composer-box) — top row: input + send; a faintly coloured divider;
+                             bottom row: "supporting buttons" (mode switcher + selection indicator).
+                             .chat-mode-wrap used to be a separate sibling ABOVE .chat-composer (its
+                             own full-width bar); it's now nested INSIDE it, after the input row,
+                             so both rows read as one unit. .chat-mode-menu's own position:absolute
+                             is relative to .chat-mode-wrap itself (still position:relative), so
+                             nesting it one level deeper doesn't change where the dropdown anchors —
+                             it still opens upward from this row, just from within the card now. -->
                         <div class="chat-composer">
                             <div class="chat-balance-notice" id="chatBalanceNotice">Insufficient balance, please recharge your wallet</div>
                             <div class="chat-input-wrap">
                                 <textarea id="chatInput" rows="1" placeholder="Ask to fetch or edit your sheet…"></textarea>
                                 <button id="chatSend">➤</button>
+                            </div>
+                            <div class="chat-mode-wrap" id="chatModeWrap">
+                                <!-- Short mode name + caret on the button itself, same convention
+                                     Claude Code's own mode switcher uses — the FULL description for
+                                     each mode only shows once the dropdown below is actually open (see
+                                     each .chat-mode-item's own <small>), not crammed into the button. -->
+                                <button type="button" class="chat-mode-btn" id="chatModeBtn" title="Choose write mode">
+                                    <span id="chatModeIcon">✋</span>
+                                    <span id="chatModeBtnLabel">Manual</span>
+                                    <span class="chat-mode-caret">▾</span>
+                                </button>
+                                <!-- .chat-selection-indicator's own flex:1 is how it absorbs whatever
+                                     width the mode button doesn't need. Still the exact same element
+                                     checkChatSelectionOnce/openPanel/closePanel in taskpane.js
+                                     already drive — only its position in the DOM moved. -->
+                                <div class="chat-selection-indicator" id="chatSelectionIndicator" style="display:none;">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"></rect><line x1="9" y1="3" x2="9" y2="21"></line><line x1="3" y1="9" x2="21" y2="9"></line></svg>
+                                    <span id="chatSelectionIndicatorText"></span>
+                                </div>
+                                <div class="chat-mode-menu" id="chatModeMenu">
+                                    <div class="chat-mode-item" data-mode="ask">
+                                        <span class="chat-mode-item-icon">✋</span>
+                                        <span class="chat-mode-item-text"><b>Manual</b><small>DataGPT confirms before editing the sheet</small></span>
+                                        <span class="chat-mode-tick" data-tick="ask">✓</span>
+                                    </div>
+                                    <div class="chat-mode-item" data-mode="auto">
+                                        <span class="chat-mode-item-icon">⚡</span>
+                                        <span class="chat-mode-item-text"><b>Auto</b><small>DataGPT edits the sheet without asking first</small></span>
+                                        <span class="chat-mode-tick" data-tick="auto">✓</span>
+                                    </div>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -2721,30 +3152,6 @@
             </div>
         </div>-->
     </div>
-
-    <!-- ── Query Data -> DataGPT delegation notice ──────────────────────────────────────────
-         Shown when the lightweight intent check (see QD_INTENT_CLASSIFIER_MODEL in taskpane.js)
-         decides a typed Query Data question is really a modify/mixed request, not a plain
-         download — DataGPT, not the deterministic query builder, is what can actually act on an
-         existing table. Deliberately placed OUTSIDE #loginWrapper/#addinUI: applyRibbonView() hides
-         every child of #addinUI that isn't in the current view's allowlist, and the login flow
-         toggles #loginWrapper's own children — sitting outside both means this can fire from the
-         "downloadtable" view specifically and still render regardless of whatever that view's own
-         allowlist hides. -->
-    <div id="qdDelegateModal" class="dz-overlay">
-        <div class="dz-box">
-            <div class="dz-header">Switching to DataGPT</div>
-            <div class="dz-body">
-                <div class="dz-gen" id="qdDelegateText">
-                    Your question has been delegated to DataGPT, since this is more suited to DataGPT.
-                </div>
-            </div>
-            <div class="dz-footer">
-                <button id="qdDelegateContinue" class="dz-agree">Continue</button>
-            </div>
-        </div>
-    </div>
-
 
 
 

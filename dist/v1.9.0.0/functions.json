@@ -1,0 +1,95 @@
+{
+    "allowCustomDataForDataTypeAny": true,
+    "functions": [
+        {
+            "description": "SPIKE ONLY. Proves the Custom Functions manifest/webpack wiring works at all — no network,\nno async, nothing that could fail for any reason other than \"the plumbing is broken.\"",
+            "id": "PING",
+            "name": "PING",
+            "parameters": [],
+            "result": {
+                "type": "string"
+            }
+        },
+        {
+            "description": "SPIKE ONLY. Reads the SAME localStorage key the task pane's own getWalletIdentity() reads\n(see taskpane.js:1079) to prove — or disprove — that this runtime shares the task pane's\nidentity. Log into the add-in via the task pane FIRST, then type this formula in the same\nExcel session.",
+            "id": "WHOAMI",
+            "name": "WHOAMI",
+            "parameters": [],
+            "result": {
+                "type": "string"
+            }
+        },
+        {
+            "description": "SPIKE ONLY. No network call — a free probe for how often Excel actually re-invokes a plain\nasync custom function. Put it in a cell, then: save+reopen the workbook, edit an unrelated\ncell elsewhere on the sheet, press F9/Ctrl+Alt+F9, and edit `nonce` itself — note which of\nthese actually change the returned timestamp.",
+            "id": "RECALCPROBE",
+            "name": "RECALCPROBE",
+            "parameters": [
+                {
+                    "description": "Any value — changing it is the \"edited input\" trigger specifically.",
+                    "name": "nonce",
+                    "type": "number"
+                }
+            ],
+            "result": {
+                "type": "string"
+            }
+        },
+        {
+            "description": "=GIA.GET(company, metric, period) — hand-typeable with just those 3. `quarter` is an optional\n4th value (1-4) for a quarterly read instead of annual; `table`/`column`/`periodLiteral` are\noptional power-user overrides (see resolveGetArgs); a typical formula never needs them.",
+            "id": "GET",
+            "name": "GET",
+            "parameters": [
+                {
+                    "description": "Company name to look up (loose match).",
+                    "name": "companyName",
+                    "type": "string"
+                },
+                {
+                    "description": "Canonical metric name, e.g. \"Revenue\". Only optional when both `table`\nand `column` are given directly.",
+                    "name": "metric",
+                    "type": "string"
+                },
+                {
+                    "description": "Fiscal year, e.g. 2026 — or a cell reference to a label this app\nitself writes, \"FY26\"/\"Q3 FY26\" (see parseFiscalLabel), which also supplies the quarter.",
+                    "name": "period",
+                    "type": "any"
+                },
+                {
+                    "description": "Quarter number 1-4, for a quarterly read instead of annual. Omit for\nthe annual figure, or when `period` is already a \"Q.. FY..\" label.",
+                    "name": "quarter",
+                    "optional": true,
+                    "type": "number"
+                },
+                {
+                    "description": "Advanced: skip metric resolution and use this real table directly,\ne.g. \"GIAStock_Data.dbo.sc_year_data\".",
+                    "name": "table",
+                    "optional": true,
+                    "type": "string"
+                },
+                {
+                    "description": "Advanced: skip metric resolution and use this real column directly.",
+                    "name": "column",
+                    "optional": true,
+                    "type": "string"
+                },
+                {
+                    "description": "Advanced: skip period-format resolution and filter on this\nliteral (already in the target table's own stored format) directly.",
+                    "name": "periodLiteral",
+                    "optional": true,
+                    "type": "string"
+                }
+            ],
+            "result": {}
+        },
+        {
+            "description": "SPIKE ONLY. No network call — a hardcoded 2D array to prove dynamic-array spilling works at\nall before GET even needs to.",
+            "id": "GETTABLE",
+            "name": "GETTABLE",
+            "parameters": [],
+            "result": {
+                "dimensionality": "matrix",
+                "type": "string"
+            }
+        }
+    ]
+}

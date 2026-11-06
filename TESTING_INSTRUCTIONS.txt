@@ -27,6 +27,8 @@ C. Feedback and Profile
 11. Click Feedback, enter any text, submit. A confirmation appears.
 12. Click Profile to view the username, wallet balance with recent charges, and the Disclaimer. Confirm the Privacy Policy link in the manifest opens correctly.
 
+D. Table Builder - Build tables populated with company data using natural language input
+
 Notes
 - Test in Excel desktop or Excel on the web. All backend calls use HTTPS.
 - Test account is pre-configured to simulate customer use.

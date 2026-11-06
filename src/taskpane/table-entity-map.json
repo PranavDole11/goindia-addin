@@ -1,0 +1,363 @@
+{
+  "_comment": "Entity-type classification for every real (non-VectorDB helper-function) table in the Table Builder catalog (https://ir-reports.s3.ap-south-1.amazonaws.com/dbcatalog/index.json). Built by inspecting each table's own columns, not its catalog summary text (a couple of summaries are copy-pasted/wrong — see notes). Purpose: given the table a selected metric resolves to (metric-registry.json's annual.prefer/quarterly.prefer, or the catalog's own table for non-registry metrics), look up table_entity_map[table] to know what kind of thing the Entity dropdown should let the user pick, and which column holds that entity's id/display name. is_entity_table:false rows are reference/metadata tables (a metric catalog or a JSON-key mapping) with no entity of their own to pick — they exist to be joined, not queried as a row-per-entity source. related_entity_* is set only for a table that joins two different entity types in one row (a holdings/relationship table) — entity_type/entity_id_column/entity_name_column always describe the table's OWN primary row identity.",
+  "entity_types": [
+    "Company",
+    "Sector",
+    "Mutual Fund AMC",
+    "Mutual Fund Scheme",
+    "PMS Provider",
+    "PMS Investment Approach",
+    "Economic Indicator"
+  ],
+  "tables": [
+    {
+      "table": "GIAStock_Data.dbo.basic_info",
+      "domain": "COMPANY MASTER",
+      "is_entity_table": true,
+      "entity_type": "Company",
+      "entity_id_column": "fincode",
+      "entity_name_column": "CompName",
+      "notes": "Also carries NSECode/BSECode/isin as alternate company identifiers."
+    },
+    {
+      "table": "GIAStock_Data.dbo.global_filter",
+      "domain": "COMPANY MASTER",
+      "is_entity_table": false,
+      "entity_type": null,
+      "entity_id_column": null,
+      "entity_name_column": null,
+      "notes": "Metric catalog, not a data table: one row per metric (filter_name/Type/Unit) registered for sc_year_data/sc_quater_data. No entity of its own."
+    },
+    {
+      "table": "GIAStock_Data.dbo.sc_cagr_data",
+      "domain": "FINANCIAL STATEMENTS",
+      "is_entity_table": true,
+      "entity_type": "Company",
+      "entity_id_column": "fincode",
+      "entity_name_column": "company_name",
+      "notes": "Pre-computed annual CAGR, one row per company per fiscal year."
+    },
+    {
+      "table": "GIAStock_Data.dbo.workingcap_ana",
+      "domain": "FINANCIAL STATEMENTS",
+      "is_entity_table": true,
+      "entity_type": "Company",
+      "entity_id_column": "fincode",
+      "entity_name_column": null,
+      "notes": "No name column on the table itself — resolve fincode -> CompName via basic_info."
+    },
+    {
+      "table": "GIAStock_Data.dbo.sc_quater_data",
+      "domain": "FINANCIAL STATEMENTS",
+      "is_entity_table": true,
+      "entity_type": "Company",
+      "entity_id_column": "fincode",
+      "entity_name_column": "company_name",
+      "notes": null
+    },
+    {
+      "table": "GIS.dbo.result_instant",
+      "domain": "FINANCIAL STATEMENTS",
+      "is_entity_table": true,
+      "entity_type": "Company",
+      "entity_id_column": "fincode",
+      "entity_name_column": "company_name",
+      "notes": "Fallback for quarterly results missing from sc_quater_data."
+    },
+    {
+      "table": "GIAStock_Data.dbo.ratios_ind",
+      "domain": "FINANCIAL STATEMENTS",
+      "is_entity_table": true,
+      "entity_type": "Company",
+      "entity_id_column": "fincode",
+      "entity_name_column": null,
+      "notes": "No name column — resolve via basic_info."
+    },
+    {
+      "table": "GIAStock_Data.dbo.sc_cagr_quater",
+      "domain": "FINANCIAL STATEMENTS",
+      "is_entity_table": true,
+      "entity_type": "Company",
+      "entity_id_column": "fincode",
+      "entity_name_column": "company_name",
+      "notes": null
+    },
+    {
+      "table": "GIAStock.dbo.estimate",
+      "domain": "FINANCIAL STATEMENTS",
+      "is_entity_table": true,
+      "entity_type": "Company",
+      "entity_id_column": "fincode",
+      "entity_name_column": "Company",
+      "notes": "Also carries Ticker as an alternate identifier."
+    },
+    {
+      "table": "GIAStock_Data.dbo.sc_year_data",
+      "domain": "FINANCIAL STATEMENTS",
+      "is_entity_table": true,
+      "entity_type": "Company",
+      "entity_id_column": "fincode",
+      "entity_name_column": "company_name",
+      "notes": null
+    },
+    {
+      "table": "GIAStock_Data.dbo.consensus_estimate",
+      "domain": "FINANCIAL STATEMENTS",
+      "is_entity_table": true,
+      "entity_type": "Company",
+      "entity_id_column": "fincode",
+      "entity_name_column": "Company",
+      "notes": null
+    },
+    {
+      "table": "GIS.dbo.guidance_tracking",
+      "domain": "Earning Call Tools",
+      "is_entity_table": true,
+      "entity_type": "Company",
+      "entity_id_column": "fincode",
+      "entity_name_column": null,
+      "notes": "No name column — resolve via basic_info."
+    },
+    {
+      "table": "GIS.dbo.annual_report_analysis",
+      "domain": "Annual Report Tools",
+      "is_entity_table": true,
+      "entity_type": "Company",
+      "entity_id_column": "fincode",
+      "entity_name_column": "company_name",
+      "notes": null
+    },
+    {
+      "table": "GIAStock.dbo.bulk_block_record",
+      "domain": "SHAREHOLDING AND TRADING",
+      "is_entity_table": true,
+      "entity_type": "Company",
+      "entity_id_column": "FINCODE",
+      "entity_name_column": "Company_Name",
+      "notes": "One row per bulk/block deal transaction, not one row per company."
+    },
+    {
+      "table": "GIS.dbo.New_Insider_Trading",
+      "domain": "SHAREHOLDING AND TRADING",
+      "is_entity_table": true,
+      "entity_type": "Company",
+      "entity_id_column": "fincode",
+      "entity_name_column": "company",
+      "notes": "One row per insider transaction disclosure, not one row per company."
+    },
+    {
+      "table": "GIS.dbo.thurro_sectors",
+      "domain": "SECTOR INTELLIGENCE",
+      "is_entity_table": true,
+      "entity_type": "Sector",
+      "entity_id_column": "id",
+      "entity_name_column": "sector_name",
+      "notes": null
+    },
+    {
+      "table": "GIS.dbo.thurro_metrics2",
+      "domain": "SECTOR INTELLIGENCE",
+      "is_entity_table": false,
+      "entity_type": null,
+      "entity_id_column": null,
+      "entity_name_column": null,
+      "notes": "Metric catalog for Sector metrics (one row per metric_name per sector_id) — join to thurro_sectors for the Sector entity, then to thurro_data2 for values."
+    },
+    {
+      "table": "GIS.dbo.thurro_data2",
+      "domain": "SECTOR INTELLIGENCE",
+      "is_entity_table": true,
+      "entity_type": "Sector",
+      "entity_id_column": "sector_id",
+      "entity_name_column": null,
+      "notes": "Time-series values keyed by (metric_id, sector_id, data_date) — resolve sector_id -> sector_name via thurro_sectors."
+    },
+    {
+      "table": "GIS.dbo.mva_technical",
+      "domain": "TECHNICAL ANALYSIS",
+      "is_entity_table": true,
+      "entity_type": "Company",
+      "entity_id_column": "fincode",
+      "entity_name_column": null,
+      "notes": "No name column — resolve via basic_info."
+    },
+    {
+      "table": "GIAStock_Data.dbo.technical_analysis",
+      "domain": "TECHNICAL ANALYSIS",
+      "is_entity_table": true,
+      "entity_type": "Company",
+      "entity_id_column": "fincode",
+      "entity_name_column": null,
+      "notes": "No name column — resolve via basic_info. This IS one of the 6 tables metric-registry.json's Formula picker already draws from."
+    },
+    {
+      "table": "GIAStock.dbo.stock_recommendations",
+      "domain": "TECHNICAL ANALYSIS",
+      "is_entity_table": true,
+      "entity_type": "Company",
+      "entity_id_column": "FINCODE",
+      "entity_name_column": "name",
+      "notes": "Also carries symbol as an alternate identifier."
+    },
+    {
+      "table": "GoIndiaStock.dbo.movingavg_master",
+      "domain": "TECHNICAL ANALYSIS",
+      "is_entity_table": true,
+      "entity_type": "Company",
+      "entity_id_column": "fincode",
+      "entity_name_column": null,
+      "notes": "No name column — resolve via basic_info."
+    },
+    {
+      "table": "GIS.dbo.company_holding_percent",
+      "domain": "MUTUAL FUND",
+      "is_entity_table": true,
+      "entity_type": "Company",
+      "entity_id_column": "fincode",
+      "entity_name_column": null,
+      "notes": "Columns are fincode + one column per month (% of total MF industry AUM invested in that company). The catalog's own \"summary\" field for this table is wrong — it's a verbatim copy of sector_holding_percent's summary and describes sector allocation, not this table's actual fincode-keyed columns. Flag for a catalog fix upstream."
+    },
+    {
+      "table": "GIS.dbo.mf_amc_detail",
+      "domain": "MUTUAL FUND",
+      "is_entity_table": true,
+      "entity_type": "Mutual Fund AMC",
+      "entity_id_column": "FSCBI-ProviderCompanyID",
+      "entity_name_column": "FSCBI-ProviderCompanyName",
+      "notes": "Asset Management Company (the mutual fund provider), not the listed companies the funds hold."
+    },
+    {
+      "table": "GIS.dbo.mf_fund_alldatapoints",
+      "domain": "MUTUAL FUND",
+      "is_entity_table": true,
+      "entity_type": "Mutual Fund Scheme",
+      "entity_id_column": "scheme_isin",
+      "entity_name_column": null,
+      "notes": "Scheme's display name isn't a column — it's a key inside the JSON blob in `data` (resolve via mf_general_name_mapping, e.g. general_name='Fund Name')."
+    },
+    {
+      "table": "GIS.dbo.mf_general_name_mapping",
+      "domain": "MUTUAL FUND",
+      "is_entity_table": false,
+      "entity_type": null,
+      "entity_id_column": null,
+      "entity_name_column": null,
+      "notes": "JSON-key lookup for mf_fund_alldatapoints.data — not an entity table."
+    },
+    {
+      "table": "GIS.dbo.sector_holding_percent",
+      "domain": "MUTUAL FUND",
+      "is_entity_table": true,
+      "entity_type": "Sector",
+      "entity_id_column": "Sector",
+      "entity_name_column": "Sector",
+      "notes": "Columns are Sector + one column per month + benchmark_weight."
+    },
+    {
+      "table": "GIS.dbo.new_morningstar_amc_sector",
+      "domain": "MUTUAL FUND",
+      "is_entity_table": true,
+      "entity_type": "Sector",
+      "entity_id_column": "sector",
+      "entity_name_column": "sector",
+      "related_entity_type": "Mutual Fund AMC",
+      "notes": "Pivoted: one row per Sector, one column per AMC name (not one row per AMC) — AMC is a column dimension here, not the row entity."
+    },
+    {
+      "table": "GIS.dbo.mf_scheme_details_mstar",
+      "domain": "MUTUAL FUND",
+      "is_entity_table": true,
+      "entity_type": "Mutual Fund Scheme",
+      "entity_id_column": "FSCBI-ISIN",
+      "entity_name_column": "FSCBI-FundName",
+      "related_entity_type": "Mutual Fund AMC",
+      "related_entity_id_column": "FSCBI-ProviderCompanyID",
+      "notes": "FSCBI-LegalName is the AMC's name for that scheme's provider."
+    },
+    {
+      "table": "GIS.dbo.current_fund_holdings",
+      "domain": "MUTUAL FUND",
+      "is_entity_table": true,
+      "entity_type": "Mutual Fund Scheme",
+      "entity_id_column": "fundID",
+      "entity_name_column": null,
+      "related_entity_type": "Company",
+      "related_entity_id_column": "fincode",
+      "notes": "Holdings/relationship table: one row per (scheme, held company). Two Entity dropdowns could apply depending on which side the user is asking about."
+    },
+    {
+      "table": "SimplyIR.dbo.economy_master",
+      "domain": "ECONOMY",
+      "is_entity_table": true,
+      "entity_type": "Economic Indicator",
+      "entity_id_column": "identifier",
+      "entity_name_column": "title",
+      "notes": null
+    },
+    {
+      "table": "SimplyIR.dbo.economy_detail",
+      "domain": "ECONOMY",
+      "is_entity_table": true,
+      "entity_type": "Economic Indicator",
+      "entity_id_column": "identifier",
+      "entity_name_column": null,
+      "notes": "No name column — resolve identifier -> title via economy_master."
+    },
+    {
+      "table": "GoIndiaStock.dbo.brsr_energy_data",
+      "domain": "ENERGY ANALYSIS",
+      "is_entity_table": true,
+      "entity_type": "Company",
+      "entity_id_column": "fincode",
+      "entity_name_column": "company_name",
+      "notes": null
+    },
+    {
+      "table": "GIS.dbo.comp_about_us",
+      "domain": "COMPANY PROFILE",
+      "is_entity_table": true,
+      "entity_type": "Company",
+      "entity_id_column": "fincode",
+      "entity_name_column": null,
+      "notes": "No name column — resolve via basic_info."
+    },
+    {
+      "table": "GIS.dbo.apmi_ia_details",
+      "domain": "PORTFOLIO MANAGEMENT SERVICES",
+      "is_entity_table": true,
+      "entity_type": "PMS Investment Approach",
+      "entity_id_column": "ia_id",
+      "entity_name_column": "ia_name",
+      "related_entity_type": "PMS Provider",
+      "related_entity_id_column": "pms_id",
+      "notes": "An investment approach/strategy belonging to a PMS provider, not the provider itself."
+    },
+    {
+      "table": "GIS.dbo.apmi_ia_performance",
+      "domain": "PORTFOLIO MANAGEMENT SERVICES",
+      "is_entity_table": true,
+      "entity_type": "PMS Investment Approach",
+      "entity_id_column": "ia_id",
+      "entity_name_column": null,
+      "notes": "No name column — resolve ia_id -> ia_name via apmi_ia_details."
+    },
+    {
+      "table": "GIS.dbo.apmi_pms_extra",
+      "domain": "PORTFOLIO MANAGEMENT SERVICES",
+      "is_entity_table": true,
+      "entity_type": "PMS Provider",
+      "entity_id_column": "pms_id",
+      "entity_name_column": "pms_name",
+      "notes": "This is the example from the exercise prompt — pms_id/pms_name columns are what identify it as PMS-provider-entity rows."
+    },
+    {
+      "table": "GIS.dbo.apmi_pms_providers",
+      "domain": "PORTFOLIO MANAGEMENT SERVICES",
+      "is_entity_table": true,
+      "entity_type": "PMS Provider",
+      "entity_id_column": "id",
+      "entity_name_column": "pms_name",
+      "notes": "Master/lookup list of providers (id, is_active, pms_name) rather than a metrics table."
+    }
+  ]
+}

@@ -8,6 +8,11 @@ const webpack = require("webpack");
 const devCerts = require("office-addin-dev-certs");
 const CopyWebpackPlugin = require("copy-webpack-plugin");
 const HtmlWebpackPlugin = require("html-webpack-plugin");
+// Custom Functions spike (Phase 0, see C:\Users\prana\.claude\plans\mellow-hopping-whisper.md) —
+// generates functions.json (the metadata manifest.xml's CustomFunctions ExtensionPoint points at)
+// by parsing the @customfunction JSDoc tags in src/functions/functions.js at build time, so that
+// file never needs to be hand-edited to match.
+const CustomFunctionsMetadataPlugin = require("custom-functions-metadata-plugin");
 
 const urlDev = "https://localhost:3000/";
 const PROD_BASE = "https://goindia-addin.netlify.app/"; // must match manifest.xml's own hardcoded SourceLocation domain
@@ -91,6 +96,14 @@ class CopyToDistRootPlugin {
 // dist/v*/taskpane.js inherited as-is from a past commit (any version other than the one just
 // freshly compiled, which never contains the placeholder to begin with, making this a safe no-op
 // for it). Runs on EVERY build, so it keeps working for whatever version gets committed next.
+//
+// Also covers functions.js (added for the Custom Functions spike, see
+// C:\Users\prana\.claude\plans\mellow-hopping-whisper.md) — confirmed live that DefinePlugin
+// bakes process.env.GOINDIASTOCKS_API_TOKEN into ANY file referencing it, not just taskpane.js
+// (grepped the built dist/v*/functions.js for a literal fragment of the real token and found it);
+// without this, a committed functions.js would publish that token in plain text the same way an
+// unredacted taskpane.js would.
+const SECRET_BEARING_FILENAMES = ["taskpane.js", "functions.js"];
 class ReinjectSecretsPlugin {
   constructor({ distRoot, secretPlaceholder, secretValue }) {
     this.distRoot = distRoot;
@@ -100,10 +113,10 @@ class ReinjectSecretsPlugin {
   apply(compiler) {
     compiler.hooks.afterEmit.tap("ReinjectSecretsPlugin", () => {
       if (!this.secretPlaceholder || !fs.existsSync(this.distRoot)) return;
-      const candidates = [path.join(this.distRoot, "taskpane.js")];
+      const candidates = SECRET_BEARING_FILENAMES.map((name) => path.join(this.distRoot, name));
       for (const entry of fs.readdirSync(this.distRoot, { withFileTypes: true })) {
         if (entry.isDirectory() && entry.name.startsWith("v")) {
-          candidates.push(path.join(this.distRoot, entry.name, "taskpane.js"));
+          for (const name of SECRET_BEARING_FILENAMES) candidates.push(path.join(this.distRoot, entry.name, name));
         }
       }
       for (const file of candidates) {
@@ -133,6 +146,12 @@ module.exports = async (env, options) => {
       polyfill: ["core-js/stable", "regenerator-runtime/runtime"],
       taskpane: ["./src/taskpane/taskpane.js", "./src/taskpane/taskpane.html"],
       commands: "./src/commands/commands.js",
+      // Custom Functions spike — SEPARATE bundle from taskpane's own, but see the taskpane
+      // HtmlWebpackPlugin below for why its output still gets loaded INTO taskpane.html rather
+      // than a dedicated page: shared runtime (manifest.xml's <Runtimes>/<ExtensionPoint
+      // xsi:type="CustomFunctions"><Page>) only shares the task pane's own localStorage identity
+      // if custom functions actually execute in that SAME page's context, not a separate one.
+      functions: "./src/functions/functions.js",
     },
     output: {
       path: outputPath,
@@ -187,7 +206,18 @@ module.exports = async (env, options) => {
       new HtmlWebpackPlugin({
         filename: "taskpane.html",
         template: "./src/taskpane/taskpane.html",
-        chunks: ["polyfill", "taskpane"],
+        // "functions" added for the Custom Functions spike — shared runtime means the SAME page
+        // backs both the visible task pane AND Excel's persistent custom-functions host, so
+        // functions.js's own CustomFunctions.associate(...) calls need to run in this exact page,
+        // not a separate one (see the entry comment above for why that's the whole point).
+        chunks: ["polyfill", "taskpane", "functions"],
+      }),
+      // Custom Functions spike — generates dist/.../functions.json from functions.js's own
+      // @customfunction JSDoc tags; manifest.xml's CustomFunctions ExtensionPoint Metadata
+      // SourceLocation points at this file.
+      new CustomFunctionsMetadataPlugin({
+        input: "./src/functions/functions.js",
+        output: "functions.json",
       }),
       new CopyWebpackPlugin({
         patterns: [

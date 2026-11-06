@@ -32,7 +32,7 @@ colors.
 |---|---|---|
 | `--brand-navy` | `#173760` | Primary brand color — headers, primary buttons, bold labels, titles |
 | `--brand-red` | `#d80404` | Brand accent line only (header bottom-border, chat FAB gradient) — never a primary action color |
-| `--accent-blue` | `#2f6fd0` | Interactive/focus state — input focus borders, links, selected-pill borders, gradients paired with navy |
+| `--accent-blue` | `#2f6fd0` | Interactive/focus state — input focus borders, links, selected-pill borders, gradients paired with navy. Also FormulaGPT's own accent (composer tint, docked chat header's gradient) — the SAME blue DataGPT's own header uses, not a separate color for a separate feature. |
 | `--danger` | `#b80000` | Destructive/cancel actions, error text |
 | `--danger-strong` | `#c0392b` | Solid-fill danger buttons (e.g. a confirmed "Delete") — one step more alarming than `--danger`'s outline use |
 | `--danger-bg` | `#fff0f0` | Error/danger banner backgrounds |

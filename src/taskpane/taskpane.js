@@ -965,6 +965,15 @@ const WALLET_LOG_DATAGPT_RETRIEVAL_URL = `${WALLET_BASE_URL}/excel_log_datagpt_r
 // straight from the browser.
 const DOWNLOADTABLE_CATALOG_URL = "https://ir-reports.s3.ap-south-1.amazonaws.com/dbcatalog/index.json";
 const DOWNLOADTABLE_SCHEMA_BASE_URL = "https://ir-reports.s3.ap-south-1.amazonaws.com/dbcatalog/";
+// Table -> entity-type classification (Company/Sector/Mutual Fund Scheme/PMS Provider/etc. — see
+// the file's own _comment for the full shape) for every real table in the catalog above. Lives in
+// a DIFFERENT bucket (ir-feed, not ir-reports) — that's just where write access was available when
+// this was built, not a meaningful distinction; still a public, unauthenticated GET, fetched and
+// cached the same way as DOWNLOADTABLE_CATALOG_URL (see getTableEntityMap near getCatalogEntries).
+// src/taskpane/table-entity-map.json in this repo is the reviewable SOURCE this was generated from
+// — kept in git for history/diffing, but never imported/bundled; the app always fetches the live
+// hosted copy so updating the mapping doesn't require an add-in redeploy.
+const TABLE_ENTITY_MAP_URL = "https://ir-feed.s3.ap-south-1.amazonaws.com/excel-addin-metadata/table-entity-map.json";
 // TEMPORARY, for testing — was "deepseek/deepseek-v4.1-flash", then "google/gemini-3.5-flash-lite".
 // Revert to one of those if this doesn't work out. Used by the Modify/Refresh/Add Columns flows
 // below (each passes no model to callQueryDataLLM, so they fall back to this default) — NOT by the
@@ -993,28 +1002,14 @@ const DOWNLOADTABLE_PLAN_MODEL = "anthropic/claude-haiku-5.5";
 // removed once from this file), and re-adding a second integration just for one lightweight
 // classification isn't worth it when qwen already does the job through the existing path.
 const QD_INTENT_CLASSIFIER_MODEL = "qwen/qwen-2.5-7b-instruct";
-// Every written table reserves exactly this many rows above its header for title/description
-// metadata (see writeDownloadedTableToSheet and the preview-grid builder further down) — a fixed,
-// predictable offset so a future "find this table's tag from wherever the user clicked" step can
-// just walk up 2 rows from the header, rather than having to search for it. The refresh tag itself
-// (the encrypted token) is NOT a 3rd visible row — a real SQL query's token runs several hundred
-// characters, which would blow out the column's width if it ever sat in a cell's own value. It's
-// attached as a COMMENT on the title cell instead (see writeDownloadedTableToSheet), which has no
-// bearing on column width and has no practical length concern for this size of content.
-const QD_TABLE_META_ROWS = 2;
-// Prefixes the refresh-tag comment's content (see writeDownloadedTableToSheet) — this is the exact
-// marker the "Your Tables" workbook scan (scanYourTables) searches every sheet's comments for to
-// recognize "this cell is a table this feature created." The Excel JS API's Comment object only
-// exposes plain-text content (no font/size control), so there's no way to shrink that comment's
-// own text size — Excel renders all comments at its own fixed theme size regardless.
-const QD_TABLE_ID_COMMENT_PREFIX = "Table Identifier: ";
-// Optional extra line in that same comment — present only for a table whose result has
-// exactly ONE company across every row (see detectSingleCompanyColumn/
-// writeDownloadedTableToSheet). Its value is that company's name, stored here rather than
-// re-sniffed from a cell's text, so scanYourTables can tell this table apart from a
-// normal multi-company one (and compute its one extra meta row) in the same pass it
-// already reads the token in.
-const QD_SINGLE_COMPANY_PREFIX = "Single Company: ";
+// Every written table reserves exactly this many rows above its header for title metadata (see
+// writeDownloadedTableToSheet and the preview-grid builder further down) — a fixed, predictable
+// offset so a future "find this table's tag from wherever the user clicked" step can just walk up
+// this many rows from the header, rather than having to search for it. Was 2 (title + a
+// Description row underneath it) — the description added little once every table's formulas are
+// right there to read, so it was dropped; kept as a named constant rather than inlining 1
+// everywhere, since every row-math call site below already reads through this name.
+const QD_TABLE_META_ROWS = 1;
 // The generated SQL is then executed via /wallet/excel_run_query (backend/routers/wallet.py) —
 // that endpoint treats the SQL as UNTRUSTED (it's LLM-generated from free text, not developer-
 // authored) and re-validates it server-side: single SELECT/WITH statement only, no comments, a
@@ -1766,7 +1761,7 @@ function showAddinUI() {
 //         a dropdown saved into the file stays until the next time the add-in does load.
 //   2. Opening Query Data loads it on the CURRENT sheet only — other sheets get it only if the
 //      user actually navigates to them while Query Data stays open.
-//      -> moveAutofillToSheet, driven by checkYtSelectionOnce's existing active-sheet poll.
+//      -> moveAutofillToSheet, driven by checkActiveSheetOnce's own active-sheet poll.
 //   3. If QD_Autofill_Data already exists, apply from what's already in it FIRST (dropdown arrow
 //      visible immediately), and only then update that sheet.
 //      -> the `workbookHasNames` branch of the startup sequence; the refresh is deliberately not
@@ -1776,6 +1771,14 @@ function showAddinUI() {
 //      -> applyRibbonView's clear covers view switches; visibilitychange/pagehide cover the X.
 //   5. Load and unload must each stay within ~2 seconds.
 //      -> QD_AUTOFILL_RANGE (below) is the single biggest lever here; see the last design point.
+//   6. Merely BACKGROUNDING the pane must not lose the dropdown for good.
+//      -> handlePaneShowing (next to the hide handlers) re-applies on visible/resume/pageshow.
+//         Requirement 4's hide signals cannot tell an X-button close apart from the browser tab
+//         simply going to the background — on Excel for the WEB the task pane is an iframe, so
+//         switching browser tabs hands it the exact same visibilityState="hidden" a close does.
+//         It is only on the way BACK that the two are distinguishable at all (a real close never
+//         comes back without a page load), which is why the asymmetry is resolved there and not
+//         by trying to be cleverer about which hide signal means what.
 //
 // Design, each point tied to something confirmed live rather than assumed:
 //   - Touch ONLY the active sheet, never sweep the whole workbook. An earlier version applied (and
@@ -1831,23 +1834,31 @@ const QD_AUTOFILL_RANGE = "A1:AZ2000";
 
 let autofillActive = false; // true only while Query Data is the open view, this page load (requirement 2/3)
 
+// Whether this page is currently hidden — set by the pane hide/show handlers in the
+// "downloadtable" block below. Read by all three background polls, which stand down entirely
+// while it's true: nothing they read can have changed in a way the user can see (the pane isn't
+// on screen), and every tick they skip is one less thing queued on Office.js's single request
+// channel for the re-apply that runs the moment the pane comes BACK. Each poll diffs against its
+// own stored baseline rather than against "what changed since the last tick", so a skipped
+// stretch delays detection until the next tick after the pane returns — it never loses it.
+let qdPaneHidden = false;
+
 // ── Excel request-channel contention gate ──
 // Office.js serves one request channel per host, and in Excel ON THE WEB every context.sync() is a
-// real network round trip (~0.8s when that channel is idle). This view runs THREE recurring polls
-// against it (the merged selection poll and pollTableMetaEdits), and the user's own actions —
-// writing a table, refreshing one, applying/clearing the dropdown's 104,000-cell validation range —
-// are many syncs each. Those compete for the same channel.
+// real network round trip (~0.8s when that channel is idle). This view runs several recurring polls
+// against it (the grid-selection and active-sheet polls), and the user's own actions — writing a
+// table, applying/clearing the dropdown's 104,000-cell validation range — are many syncs each.
+// Those compete for the same channel.
 //
-// Confirmed live, across several machines, after v1.8.0.0 shipped the Your Tables watchers: a
-// 1-round-trip Your Tables scan took 17s in one session and 76s in a longer-lived one, and a single
-// data-validation clear took 16s — both while the workbook had ZERO tables. Nothing about those
+// Confirmed live, across several machines: a 1-round-trip workbook scan took 17s in one session and
+// 76s in a longer-lived one, and a single data-validation clear took 16s. Nothing about those
 // operations is itself expensive; they were simply queued behind a backlog of background poll ticks
 // that the channel could never drain, and the backlog grew the longer the pane stayed open.
 //
 // So: every background poll stands down entirely while a user-initiated operation holds this gate,
 // giving the thing the user is actually waiting on an uncontested channel. A COUNTER, not a
-// boolean — these operations legitimately nest (writeRefreshedTable clears a block, then writes a
-// table, each wrapped) and an inner one finishing must not release the gate for the outer one.
+// boolean — these operations can legitimately nest, and an inner one finishing must not release
+// the gate for the outer one.
 let qdExcelBusy = 0;
 const qdWithExcelBusy = async (fn) => {
     qdExcelBusy++;
@@ -1879,13 +1890,6 @@ const qdSuspendRepaint = (ctx) => {
 // real re-trigger within one page load (same tag) or just two separate loads logging into the same
 // console (different tags — a reload, a view switch, HMR).
 const QD_AUTOFILL_TAG = Math.random().toString(36).slice(2, 8);
-
-// A question Query Data's own intent triage decided belongs with DataGPT instead (see
-// classifyQueryDataIntent/QD_INTENT_CLASSIFIER_MODEL) — stashed here because the switch to the
-// "datagpt" view is a full page reload (same reasoning as QD_VALIDATED_SHEET_KEY below), so a plain
-// JS variable couldn't carry it across. The "datagpt" view's own startup (see the chat panel's
-// init, near "Ribbon handshake" in this file) reads and clears this on load, prefilling its input.
-const QD_DELEGATED_QUESTION_KEY = "qd_delegated_question";
 
 // The one sheet (if any) currently carrying the rule — see the design note above for why this is
 // sessionStorage, not a plain variable.
@@ -1969,13 +1973,23 @@ function applyRibbonView() {
     try { view = new URLSearchParams(location.search).get("view") || "main"; } catch (e) { /* malformed query string */ }
     console.log(`[QueryData timing][${QD_AUTOFILL_TAG}] applyRibbonView — view="${view}"`);
     document.body.dataset.view = view;
-    // Cleared UNCONDITIONALLY on every single page load, "downloadtable" included (requirement 3) —
-    // never trusting the PREVIOUS page to have cleaned up after itself, since that page's own
-    // cleanup (visibilitychange/pagehide, see the design note above) is best-effort, not a
-    // guarantee. The "downloadtable" block re-applies fresh a moment later when that view genuinely
-    // loads, so clearing first here is a harmless no-op in that one case — it just reclears the
-    // exact sheet the downloadtable block is about to reapply to anyway.
-    pendingAutofillClear = clearAutofillValidationEverywhere(`applyRibbonView (view="${view}")`);
+    // Cleared on every page load for every view EXCEPT "downloadtable" — never trusting the
+    // PREVIOUS page to have cleaned up after itself, since that page's own cleanup
+    // (visibilitychange/pagehide, see the design note above) is best-effort, not a guarantee.
+    //
+    // "downloadtable" is excluded because it is about to re-apply the rule anyway, and this clear
+    // was never the "harmless no-op" its previous comment here claimed: whenever the record DID
+    // survive the last page (the normal case when reopening Table Builder), this was a full
+    // 104,000-cell dataValidation.clear() plus its own sync — ~0.8s of network in Excel on the web
+    // on an idle channel, and measured as bad as 16s on a contended one — sitting directly in
+    // front of the dropdown's first appearance, since the startup block below AWAITS it before
+    // doing anything. moveAutofillToSheet already clears whatever sheet the rule was on as part of
+    // the same batched run that applies it to the new one, so nothing is left behind by skipping
+    // it here; the startup apply just forces itself through (see its own `force` flag) rather than
+    // trusting the surviving record to mean the rule is genuinely still on that sheet.
+    pendingAutofillClear = view === "downloadtable"
+        ? null
+        : clearAutofillValidationEverywhere(`applyRibbonView (view="${view}")`);
     const keep = RIBBON_VIEW_ALLOWLIST[view];
     if (!keep) return view; // "main" (or anything unrecognized) — show everything, as today
 
@@ -2104,50 +2118,30 @@ function applyRibbonView() {
         if (section) section.style.display = "flex";
 
         const queryInput = document.getElementById("dtQuery");
-        const queryField = document.getElementById("dtQueryField");
-        const selectionField = document.getElementById("dtSelectionField");
-        const selectionAddressEl = document.getElementById("dtSelectionAddress");
-        const selectionGridEl = document.getElementById("dtSelectionGrid");
-        const selectionUseTextBtn = document.getElementById("dtSelectionUseTextInstead");
+        const composerSelectionEl = document.getElementById("dtComposerSelection");
+        const composerSelectionTextEl = document.getElementById("dtComposerSelectionText");
         const statusEl = document.getElementById("dtStatus");
         const generateBtn = document.getElementById("dtDownload");
-        const yourTablesList = document.getElementById("dtYourTablesList");
+        const skeletonPreviewEl = document.getElementById("dtSkeletonPreview");
+        const skeletonPreviewTextEl = document.getElementById("dtSkeletonPreviewText");
+        const skeletonPreviewTableEl = document.getElementById("dtSkeletonPreviewTable");
         const queryHint = document.getElementById("dtQueryHint");
         const queryHintPreview = document.getElementById("dtQueryHintPreview");
         const queryHintPreviewImg = document.getElementById("dtQueryHintPreviewImg");
-        const loadingOverlay = document.getElementById("dtLoadingOverlay");
-        const loadingText = document.getElementById("dtLoadingText");
-        const yourTablesToast = document.getElementById("dtYourTablesToast");
-        const yourTablesToastMessage = document.getElementById("dtYourTablesToastMessage");
-        const yourTablesToastUndo = document.getElementById("dtYourTablesToastUndo");
-        // Download Data / Your Tables tabs — see switchDtTab below for the actual toggle.
-        const dtTabDownloadBtn = document.getElementById("dtTabDownload");
-        const dtTabYourTablesBtn = document.getElementById("dtTabYourTables");
-        const dtDownloadBodyEl = document.getElementById("dtDownloadBody");
-        const dtYourTablesPanelEl = document.getElementById("dtYourTablesPanel");
-        const dtYtTabCountEl = document.getElementById("dtYtTabCount");
-        if (queryInput && queryField && selectionField && selectionAddressEl && selectionGridEl && selectionUseTextBtn && statusEl && generateBtn
-            && loadingOverlay && loadingText
-            && yourTablesList
-            && yourTablesToast && yourTablesToastMessage && yourTablesToastUndo
-            && queryHint && queryHintPreview && queryHintPreviewImg
-            && dtTabDownloadBtn && dtTabYourTablesBtn && dtDownloadBodyEl && dtYourTablesPanelEl && dtYtTabCountEl) {
-            // ── "Or select headers in your sheet" hover/click preview ──
-            // Hovering OR clicking the hint expands a small popover beneath it playing a GIF of
-            // what that hint actually means (a hand-built skeleton selection, then Download) — see
-            // the HTML's own comment on #dtQueryHintPreview for why it's position:fixed.
-            //
-            // Hover and click are two DIFFERENT persistence models, not the same trigger twice:
-            //   - hover opens it for as long as the pointer stays over the hint OR the popover
-            //     itself, closing again the moment it leaves both (with a short debounce below —
-            //     moving the mouse from the hint straight down INTO the popover crosses real screen
-            //     space outside either element for a frame or two, which would otherwise fire a
-            //     premature close-then-reopen flicker).
-            //   - a CLICK pins it open regardless of hover, for a user who wants to glance back at
-            //     the sheet while it keeps playing — closed again only by clicking the hint again or
-            //     clicking anywhere else.
-            let queryHintPinned = false;
-            let queryHintCloseTimer = null;
+        const queryHintPreviewCaption = document.querySelector("#dtQueryHintPreview .dt-query-hint-preview-caption");
+        if (queryInput && composerSelectionEl && composerSelectionTextEl && statusEl && generateBtn
+            && queryHint && queryHintPreview && queryHintPreviewImg) {
+            // ── "Or select headers in your sheet" — progressive disclosure ──
+            // Pure teach-once case: selecting headers in the sheet works regardless of whether
+            // this is ever clicked, unlike hiding an actual CONTROL behind a FAB. Always just a
+            // compact "?" (see #dtQueryHint's own HTML comment) — the explanation text lives
+            // INSIDE the popup instead (#dtQueryHintPreview's own caption), shown only once
+            // actually opened, not on the trigger itself. Click-only (never hover) — hover fails
+            // on touch/keyboard and can trigger the clip just from a cursor passing over it while
+            // scanning the pane; a real <button> (see its own HTML comment) gets native
+            // Enter/Space activation for free, no custom keydown handler needed the way the old
+            // div/role="button" version required.
+            let queryHintOpen = false;
             let queryHintSrcLoaded = false; // the clip is ~14MB — fetched once, the first time this actually opens, never eagerly on page load
             // The img's own height when there's genuinely room for it below the hint — NOT a
             // fixed size, since the hint sits near the bottom of the Download Data card, close to
@@ -2160,18 +2154,26 @@ function applyRibbonView() {
             const QD_HINT_PREVIEW_BOTTOM_MARGIN = 10; // breathing room kept clear above the very bottom of the window
             const positionQueryHintPreview = () => {
                 const r = queryHint.getBoundingClientRect();
-                const availableBelow = window.innerHeight - r.bottom - QD_HINT_PREVIEW_BOTTOM_MARGIN;
+                // The caption's own rendered height (see taskpane.html's own comment on
+                // .dt-query-hint-preview-caption) — measurable even while the popup itself is
+                // still closed (overflow:hidden on the PARENT clips what's painted, not the
+                // child's own layout size), so this is accurate on the very first open too.
+                const captionHeight = queryHintPreviewCaption ? queryHintPreviewCaption.offsetHeight : 0;
+                const availableBelow = window.innerHeight - r.bottom - QD_HINT_PREVIEW_BOTTOM_MARGIN - captionHeight;
                 // Never below 80px (still a usable, if modest, preview) even on a very short window
                 // — better than refusing to show anything at all.
                 const imgHeight = Math.max(80, Math.min(QD_HINT_PREVIEW_IDEAL_IMG_HEIGHT, availableBelow));
                 queryHintPreviewImg.style.height = `${imgHeight}px`;
                 // +14px over the image's own height, same small buffer the fixed CSS value used
                 // before — set here instead of in CSS now that the target height itself is dynamic.
-                // Inline style overrides the open-state class's own max-height, but the transition
-                // still animates correctly: it's one value change per open(), from whatever the
+                // captionHeight folded in too, so the caption doesn't eat into the video's own
+                // target height from the box's perspective (positionQueryHintPreview already
+                // subtracted it from `availableBelow` above, for the SAME reason). Inline style
+                // overrides the open-state class's own max-height, but the transition still
+                // animates correctly: it's one value change per open(), from whatever the
                 // previously-rendered max-height was (0, when closed) to this new target, exactly
                 // the same way a class-driven change would animate.
-                queryHintPreview.style.maxHeight = `${imgHeight + 14}px`;
+                queryHintPreview.style.maxHeight = `${imgHeight + captionHeight + 14}px`;
                 queryHintPreview.style.top = `${r.bottom}px`;
                 // Clamped so a hint sitting near the right edge of a narrow task pane never pushes
                 // the (fixed-width) popover itself off-screen to the right.
@@ -2179,11 +2181,11 @@ function applyRibbonView() {
                 queryHintPreview.style.left = `${Math.max(4, Math.min(r.left, window.innerWidth - width - 4))}px`;
             };
             const openQueryHintPreview = () => {
-                if (queryHintCloseTimer) { clearTimeout(queryHintCloseTimer); queryHintCloseTimer = null; }
                 if (!queryHintSrcLoaded) { queryHintPreviewImg.src = "assets/table-builder-tutorial.mp4"; queryHintSrcLoaded = true; }
                 positionQueryHintPreview();
                 queryHintPreview.classList.add("dt-query-hint-preview-open");
                 queryHint.setAttribute("aria-expanded", "true");
+                queryHintOpen = true;
                 // Restart from the beginning on every open (a GIF would've looped the whole time it
                 // was open, however briefly) — rewind before play() rather than relying on autoplay,
                 // which only ever fires once on initial load. play() returns a promise that can
@@ -2202,37 +2204,53 @@ function applyRibbonView() {
                 // from the current open height down to 0, exactly as the class-only version did.
                 queryHintPreview.style.maxHeight = "0";
                 queryHint.setAttribute("aria-expanded", "false");
-                queryHintPinned = false;
+                queryHintOpen = false;
                 queryHintPreviewImg.pause(); // stop decoding/playing while hidden — it was free with a GIF, it isn't with video
             };
-            // Debounced so hovering OUT of the hint and immediately INTO the popover below it (the
-            // normal way of actually watching the GIF) doesn't flash closed first — cancelled by
-            // openQueryHintPreview the instant the pointer re-enters either element.
-            const scheduleQueryHintClose = () => {
-                if (queryHintPinned) return;
-                if (queryHintCloseTimer) clearTimeout(queryHintCloseTimer);
-                queryHintCloseTimer = setTimeout(closeQueryHintPreviewNow, 150);
-            };
-            queryHint.addEventListener("mouseenter", openQueryHintPreview);
-            queryHint.addEventListener("mouseleave", scheduleQueryHintClose);
-            queryHintPreview.addEventListener("mouseenter", openQueryHintPreview);
-            queryHintPreview.addEventListener("mouseleave", scheduleQueryHintClose);
-            queryHint.addEventListener("click", () => {
-                if (queryHintPinned) { closeQueryHintPreviewNow(); return; }
-                queryHintPinned = true;
-                openQueryHintPreview();
-            });
-            // Keyboard equivalent of a click — #dtQueryHint is a plain div given role="button"
-            // tabindex="0" in the HTML precisely so this has something focusable to act on.
-            queryHint.addEventListener("keydown", (ev) => {
-                if (ev.key !== "Enter" && ev.key !== " ") return;
-                ev.preventDefault();
-                queryHint.click();
-            });
             document.addEventListener("click", (ev) => {
-                if (queryHintPinned && !queryHint.contains(ev.target) && !queryHintPreview.contains(ev.target)) closeQueryHintPreviewNow();
+                if (queryHintOpen && !queryHint.contains(ev.target) && !queryHintPreview.contains(ev.target)) closeQueryHintPreviewNow();
             });
             window.addEventListener("resize", () => { if (queryHintPreview.classList.contains("dt-query-hint-preview-open")) positionQueryHintPreview(); });
+
+            // ── Excel Table Outline card — hover-preview (this existing popover, now re-anchored
+            // here instead of the old header icon) + a fuller click/tap modal with its own
+            // independent video (see the plan's own design-decision note on why a second lazy
+            // element is safer than reparenting one between the two). Touch devices never fire
+            // mouseenter/mouseleave at all, so tap always lands on the modal — no feature
+            // detection needed for "mobile: tap-to-open modal only". -->
+            const dtExcelOutlineCardEl = document.getElementById("dtExcelOutlineCard");
+            const dtExcelModalBackdropEl = document.getElementById("dtExcelOutlineModalBackdrop");
+            const dtExcelModalVideoEl = document.getElementById("dtExcelOutlineModalVideo");
+            const dtExcelModalCloseEl = document.getElementById("dtExcelOutlineModalClose");
+            let dtExcelModalVideoLoaded = false;
+            const openExcelOutlineModal = () => {
+                if (!dtExcelModalBackdropEl) return;
+                if (queryHintOpen) closeQueryHintPreviewNow();
+                if (!dtExcelModalVideoLoaded && dtExcelModalVideoEl) { dtExcelModalVideoEl.src = "assets/table-builder-tutorial.mp4"; dtExcelModalVideoLoaded = true; }
+                dtExcelModalBackdropEl.style.display = "flex";
+                if (dtExcelModalVideoEl) {
+                    try { dtExcelModalVideoEl.currentTime = 0; } catch { /* not seekable yet on first load */ }
+                    dtExcelModalVideoEl.play().catch(() => {});
+                }
+            };
+            const closeExcelOutlineModal = () => {
+                if (!dtExcelModalBackdropEl) return;
+                dtExcelModalBackdropEl.style.display = "none";
+                if (dtExcelModalVideoEl) dtExcelModalVideoEl.pause();
+            };
+            if (dtExcelOutlineCardEl) {
+                // #dtQueryHint itself no longer has a click handler of its own — it's now
+                // invisible and pointer-events:none (see its own CSS comment), so every click
+                // anywhere on the card, including where that icon used to sit, lands here.
+                dtExcelOutlineCardEl.addEventListener("click", () => openExcelOutlineModal());
+                dtExcelOutlineCardEl.addEventListener("mouseenter", () => { if (!queryHintOpen) openQueryHintPreview(); });
+                dtExcelOutlineCardEl.addEventListener("mouseleave", () => { if (queryHintOpen) closeQueryHintPreviewNow(); });
+            }
+            if (dtExcelModalCloseEl) dtExcelModalCloseEl.addEventListener("click", closeExcelOutlineModal);
+            if (dtExcelModalBackdropEl) dtExcelModalBackdropEl.addEventListener("click", (e) => { if (e.target === dtExcelModalBackdropEl) closeExcelOutlineModal(); });
+            document.addEventListener("keydown", (e) => {
+                if (e.key === "Escape" && dtExcelModalBackdropEl && dtExcelModalBackdropEl.style.display !== "none") closeExcelOutlineModal();
+            });
 
             const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
             const OPENROUTER_KEY = process.env.OPENROUTER_KEY; // injected at build time from .env — see webpack.config.js
@@ -2255,156 +2273,924 @@ function applyRibbonView() {
                 }
             };
 
-            // ── Blocking "something is happening" overlay ──
-            // Every write/modify/refresh/move on a table shows this — greys out the whole window
-            // with a spinner + status text in a centered modal, rather than a status line the user
-            // can easily miss above the Download button (or, for an AUTO-triggered refresh from
-            // editing a Description/header cell directly, might not even be looking at). Wrapped
-            // around the EXISTING statusEl each flow already updates (see wrapStatusElWithOverlay)
-            // rather than threading a separate call through every individual status line.
-            const showQueryDataOverlay = (text) => {
-                loadingText.textContent = text || "Working…";
-                loadingOverlay.style.display = "flex";
+            // ── Formula + Text, shown together ──────────────────────────────────────────────
+            // Formula replaces the standalone "Functions" ribbon button/view this session — same
+            // company/metric/period picker, same =GIA.GET(company, metric, period) output, just
+            // merged in here instead of its own entry point. Both panels are visible at once —
+            // Text on top, Formula on the bottom (see #dtTextModePanel/#dtFormulaModePanel in
+            // taskpane.html, both plain flex:1 siblings now, no more switch picking one). Whichever
+            // one the user actually starts filling in dims the OTHER (.dt-input-panel-dimmed), so
+            // it's always clear which one will act when the user submits; clearing it back out
+            // un-dims the other. Neither is dimmed while both are empty.
+            const dtTextModePanelEl = document.getElementById("dtTextModePanel");
+            const dtFormulaModePanelEl = document.getElementById("dtFormulaModePanel");
+            const updateInputModeDimming = () => {
+                if (!dtTextModePanelEl || !dtFormulaModePanelEl) return;
+                const usingText = !!(queryInput && queryInput.value.trim()) || gridQueryModeActive;
+                const usingFormula = !!(
+                    (dtFnCompanyInput && dtFnCompanyInput.value.trim())
+                    || dtFnCompanyCellRef // set by picking a cell — see its own declaration further down this closure
+                );
+                dtTextModePanelEl.classList.toggle("dt-input-panel-dimmed", usingFormula && !usingText);
+                dtFormulaModePanelEl.classList.toggle("dt-input-panel-dimmed", usingText && !usingFormula);
+                // The user is back to actively working Formula Picker's own fields — this is the
+                // general "should the teaser be out of the way" signal, not just returning from a
+                // docked chat (see recollapseFormulaGptIfBusy's own declaration for why this is a
+                // hook rather than a direct call: the state it needs lives inside Formula Picker's
+                // own guarded block, not reachable from here). Confirmed live: expanding the teaser
+                // via its collapsed bar WITHOUT ever docking the chat (just to glance at it, then
+                // clicking straight back into the Company/Metric fields) left it sitting there
+                // full-size and merely dimmed — "disabled-looking" — instead of collapsing back.
+                if (usingFormula && !usingText && recollapseFormulaGptIfBusy) recollapseFormulaGptIfBusy();
             };
-            const hideQueryDataOverlay = () => {
-                loadingOverlay.style.display = "none";
-            };
-            // Wraps a real statusEl (or the {style, textContent} adapter an auto-triggered refresh
-            // passes in) so every existing `statusEl.textContent = "..."` line in runTableRefresh/
-            // runTableSimpleRefresh/runTableAddColumns/commitTableMove ALSO drives the overlay, with
-            // no changes needed at each individual call site — only the one line at the top of each
-            // of those functions that does `statusEl = wrapStatusElWithOverlay(statusEl);`. The
-            // wrapped object still updates the real element too, so whatever the last message was
-            // (an error, "Table moved.", etc.) stays visible there after the overlay itself closes.
-            const wrapStatusElWithOverlay = (realStatusEl) => ({
-                get style() { return realStatusEl.style; },
-                set textContent(v) {
-                    realStatusEl.textContent = v;
-                    showQueryDataOverlay(v);
-                },
-            });
+            if (queryInput) {
+                queryInput.addEventListener("input", updateInputModeDimming);
+                // Single-line composer, same as DataGPT's own chat input — Enter sends rather than
+                // inserting a newline (the textarea's "rows" stays 1 either way; this isn't about
+                // wrapping, just not swallowing the keystroke into the box).
+                queryInput.addEventListener("keydown", (e) => {
+                    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); generateBtn.click(); }
+                });
+            }
 
-            // ── Delegating a typed question to DataGPT (see classifyQueryDataIntent) ──
-            // Shows the "Switching to DataGPT" notice (qdDelegateModal, taskpane.html), then — once
-            // the user dismisses it — stashes the question and navigates to the "datagpt" view. That
-            // navigation is a full page reload (same as every other ribbon-view switch in this
-            // file), so the question can't just be held in a JS variable; see
-            // QD_DELEGATED_QUESTION_KEY's own comment for how the other side picks it up.
-            const delegateToDataGpt = (userQuery) => new Promise((resolve) => {
-                const modal = document.getElementById("qdDelegateModal");
-                const continueBtn = document.getElementById("qdDelegateContinue");
-                if (!modal || !continueBtn) {
-                    // No modal in the DOM for some reason — still honor the delegation itself
-                    // rather than silently falling through to a download this request was never
-                    // suited to; the user just doesn't get the notice first.
-                    try { sessionStorage.setItem(QD_DELEGATED_QUESTION_KEY, userQuery); } catch (e) { /* best-effort */ }
-                    location.href = `${location.pathname}?view=datagpt`;
-                    resolve();
-                    return;
-                }
-                modal.style.display = "flex";
-                const onContinue = () => {
-                    continueBtn.removeEventListener("click", onContinue);
-                    modal.style.display = "none";
-                    try { sessionStorage.setItem(QD_DELEGATED_QUESTION_KEY, userQuery); } catch (e) { /* best-effort — the view still switches, just without the prefilled question */ }
-                    location.href = `${location.pathname}?view=datagpt`;
-                    resolve();
+            // ── Docking DataGPT's chat in place of Formula (see the plan file "Table Builder —
+            // dock DataGPT's chat in place of the Formula picker") ──
+            // The real #chatPanel (see __goiaChatBridge, set up in setupAskClaudeChat) is
+            // REPARENTED into #dtChatDock rather than a second chat engine being built — same DOM
+            // node, same JS state (history, any in-flight turn), only its CSS position changes (its
+            // own .dt-docked override in taskpane.html). Formula collapses "upwards" to hand over
+            // its space; Table Builder's own composer hides itself since the real
+            // #chatInput/#chatSend (now visible here) is the active input for further conversation.
+            const dtChatDockEl = document.getElementById("dtChatDock");
+            // #dtOpenChatBtn doubles as a toggle — see its own icon/label swap in dockChatPanel/
+            // undockChatPanel below.
+            const dtOpenChatIconEl = document.getElementById("dtOpenChatIcon");
+            const dtOpenChatLabelEl = document.getElementById("dtOpenChatLabel");
+            const DT_OPEN_CHAT_ICON_MESSAGE = '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>';
+            const DT_OPEN_CHAT_ICON_FORMULA = '<span class="dt-open-chat-f">f</span>';
+            let dtChatIsDocked = false;
+            // ── FormulaGPT teaser's animated example-prompt cycling ──────────────────────────
+            // A classic typewriter-cycling placeholder (type, pause, erase, next example) — shown
+            // ONLY in #dtQuery's own placeholder, so it never fights with real typed text, and
+            // never runs at all once chat is docked (queryInput itself becomes the full-chat's own
+            // input then, not a teaser demo). Paused (not reset) while the field is focused or has
+            // a value, so it can't overwrite something the user is mid-typing.
+            const DT_TEASER_PROMPTS = [
+                "e.g. Add Reliance EBITDA for FY24",
+                "Give me Reliance Industries Ltd revenue for the past 5 years",
+            ];
+            let dtTeaserPlaceholderRunning = false;
+            let dtTeaserPlaceholderTimer = null;
+            const dtStopTeaserPlaceholder = () => {
+                dtTeaserPlaceholderRunning = false;
+                if (dtTeaserPlaceholderTimer) { clearTimeout(dtTeaserPlaceholderTimer); dtTeaserPlaceholderTimer = null; }
+            };
+            const dtRunTeaserPlaceholder = () => {
+                if (dtTeaserPlaceholderRunning || !queryInput) return;
+                dtTeaserPlaceholderRunning = true;
+                let promptIdx = 0;
+                const TYPE_MS = 45, PAUSE_MS = 1400, ERASE_MS = 22, GAP_MS = 400, IDLE_RECHECK_MS = 400;
+                const step = () => {
+                    if (!dtTeaserPlaceholderRunning) return;
+                    if (dtChatIsDocked || document.activeElement === queryInput || queryInput.value) {
+                        dtTeaserPlaceholderTimer = setTimeout(step, IDLE_RECHECK_MS);
+                        return;
+                    }
+                    const text = DT_TEASER_PROMPTS[promptIdx % DT_TEASER_PROMPTS.length];
+                    let i = 0;
+                    const typeNext = () => {
+                        if (!dtTeaserPlaceholderRunning) return;
+                        queryInput.placeholder = text.slice(0, i);
+                        if (i < text.length) { i++; dtTeaserPlaceholderTimer = setTimeout(typeNext, TYPE_MS); return; }
+                        dtTeaserPlaceholderTimer = setTimeout(eraseNext, PAUSE_MS);
+                    };
+                    const eraseNext = () => {
+                        if (!dtTeaserPlaceholderRunning) return;
+                        i--;
+                        queryInput.placeholder = text.slice(0, Math.max(0, i));
+                        if (i > 0) { dtTeaserPlaceholderTimer = setTimeout(eraseNext, ERASE_MS); return; }
+                        promptIdx++;
+                        dtTeaserPlaceholderTimer = setTimeout(step, GAP_MS);
+                    };
+                    typeNext();
                 };
-                continueBtn.addEventListener("click", onContinue);
-            });
-
-            // ── Download Data / Your Tables tabs ──
-            // Separate panels again (an earlier revision merged them into one scrolling view — see
-            // git history). Switching tabs ONLY toggles which panel is visible — both selection
-            // polls (the grid-as-query poll below, and startYtSelectionPolling near
-            // checkYtSelectionOnce) keep running unconditionally regardless of the active tab, same
-            // as the merged view already had it, so a table edited/selected while Download Data is
-            // showing is still picked up and ready the instant the user switches to Your Tables.
-            let activeDtTab = "download";
-            const switchDtTab = (tab) => {
-                activeDtTab = tab;
-                const showingDownload = tab === "download";
-                dtDownloadBodyEl.style.display = showingDownload ? "flex" : "none";
-                dtYourTablesPanelEl.style.display = showingDownload ? "none" : "flex";
-                dtTabDownloadBtn.classList.toggle("active", showingDownload);
-                dtTabYourTablesBtn.classList.toggle("active", !showingDownload);
-                // A row can be rendered (by the background scan/poll) while this panel sits at
-                // display:none — scrollHeight/clientHeight both read 0 on a hidden element, so the
-                // "Show more" toggle it measured at render time may be wrong by the time the user
-                // actually looks at it. Re-measure now that it's genuinely visible. Guarded to the
-                // "yourtables" branch only — this function's own very first call (`switchDtTab
-                // ("download")` right below its definition) runs before remeasureDescOverflow
-                // exists yet, since that's declared later in this same setup block.
-                if (!showingDownload) remeasureDescOverflow();
+                step();
             };
-            dtTabDownloadBtn.addEventListener("click", () => switchDtTab("download"));
-            dtTabYourTablesBtn.addEventListener("click", () => switchDtTab("yourtables"));
-            switchDtTab("download"); // default on open, matching this view's original pre-merge behavior
-
-            // Parses a plain Excel-style cell reference ("B5", "$C$12", …) into 1-indexed
-            // {row, col} — no sheet qualifier supported, since "Custom cell" always means a spot on
-            // whatever sheet is ACTIVE at write time, same as "Current sheet"'s auto-detect does.
-            // Returns null for anything that doesn't match (empty, malformed, a whole-row/column
-            // ref, etc.) so callers can tell "not entered yet" and "entered wrong" apart from a
-            // real target.
-            const parseCellRef = (ref) => {
-                const m = String(ref || "").trim().match(/^\$?([A-Za-z]{1,3})\$?([1-9][0-9]*)$/);
-                if (!m) return null;
-                let col = 0;
-                for (const ch of m[1].toUpperCase()) col = col * 26 + (ch.charCodeAt(0) - 64);
-                return { row: parseInt(m[2], 10), col };
+            dtRunTeaserPlaceholder(); // the view always starts undocked/teaser — begin cycling right away
+            // Formula collapses "upwards" for TWO independent reasons now — chat being docked
+            // (above), and a grid-skeleton table preview taking its place (computeSkeletonPreview,
+            // further down this closure) — either alone should collapse it, and it should only ever
+            // un-collapse once NEITHER reason still applies. A shared flag + this one recomputation
+            // point is what keeps dockChatPanel/undockChatPanel and computeSkeletonPreview/
+            // exitGridQueryMode from fighting over the same class when both happen to be true at
+            // once (e.g. the user clicks the Formula Picker toggle to undock chat while a skeleton
+            // preview is still showing).
+            let skeletonTablePreviewActive = false;
+            const dtSkeletonPreviewPaneEl = document.getElementById("dtSkeletonPreviewPane");
+            const updateFormulaCollapse = () => {
+                if (!dtFormulaModePanelEl) return;
+                dtFormulaModePanelEl.classList.toggle("dt-formula-collapsed", dtChatIsDocked || skeletonTablePreviewActive);
+                // The skeleton-table preview shares Formula's own vacated space with the docked
+                // chat (#dtChatDock) rather than sitting elsewhere — but ONLY when it's the reason
+                // Formula is collapsed; chat docking wins the slot if both ever apply at once (e.g.
+                // the user sends a skeleton-driven message — dockChatPanel runs before
+                // exitGridQueryMode's own cleanup does), so the two never render on top of each
+                // other fighting for the same space.
+                if (dtSkeletonPreviewPaneEl) dtSkeletonPreviewPaneEl.style.display = (skeletonTablePreviewActive && !dtChatIsDocked) ? "flex" : "none";
             };
-
-            // Parses either a plain cell ("B5") or a full "start:end" range ("B5:D20") — used by
-            // the "Your Tables" list's editable range field (see commitTableMove), which shows and
-            // accepts the SAME header-through-last-row range its own badge displays, not a bare
-            // anchor cell, so what's shown while editing always matches what was shown before
-            // editing started. Returns null if either half doesn't parse as a cell.
-            const parseRangeRef = (ref) => {
-                const parts = String(ref || "").trim().split(":");
-                if (parts.length < 1 || parts.length > 2) return null;
-                const start = parseCellRef(parts[0]);
-                if (!start) return null;
-                if (parts.length === 1) return { start, end: null };
-                const end = parseCellRef(parts[1]);
-                if (!end) return null;
-                return { start, end };
+            // The real New-chat/chat-history buttons live in .chat-docked-toolbar by default (shared
+            // with the standalone DataGPT view) — dockChatPanel/undockChatPanel below reparent them
+            // into/out of #dtComposerToolbarSlot (below Table Builder's own composer) rather than
+            // duplicating them, the same technique already used for the whole #chatPanel.
+            const dtComposerToolbarSlotEl = document.getElementById("dtComposerToolbarSlot");
+            const chatThreadNewBtnEl = document.getElementById("chatThreadNewBtn");
+            const chatThreadBtnEl = document.getElementById("chatThreadBtn");
+            const chatToolbarActionsEl = document.querySelector("#chatDockedToolbar .chat-toolbar-actions");
+            // Set below, inside the Formula Picker's own guarded block, where
+            // dtFnSelectedMetric/setTeaserCompact/dtTeaserManuallyExpanded actually live (that
+            // block's own `let`s are scoped to its `if {}`, not reachable from out here) — called
+            // from BOTH undockChatPanel (returning from a docked chat) AND updateInputModeDimming
+            // (the user clicking back into Formula Picker's own fields WITHOUT ever docking a chat
+            // — confirmed live: expanding the teaser via its collapsed bar just to glance at it,
+            // then going straight back to Formula Picker, left it sitting there full-size and
+            // merely dimmed instead of collapsing back). A plain mutable hook rather than hoisting
+            // that state up here, since none of it is otherwise needed outside Formula Picker's own
+            // logic.
+            let recollapseFormulaGptIfBusy = null;
+            // Same cross-scope-hook reasoning as recollapseFormulaGptIfBusy just above, for a
+            // SECOND, independent reason the teaser should auto-collapse: a grid-skeleton preview
+            // becoming ready (computeSkeletonPreview, in the "hand-built Excel selection" section
+            // further down this closure — also outside Formula Picker's own guarded block) takes
+            // over Formula's vacated space exactly the way picking a metric does, and should hand
+            // the teaser's own space over the same way. Assigned to the SAME underlying
+            // maybeAutoCollapseTeaser Formula Picker's own metric-pick trigger uses, so both
+            // reasons share one collapse/manual-expand state instead of two competing ones.
+            let triggerFormulaGptAutoCollapse = null;
+            // Brings the chat to the foreground — ensures the Table-Builder-specific thread/context
+            // is active (never the main DataGPT panel's own conversation — see openThreadForContext),
+            // then shows it in place of Formula. Returns false (no-op) only if the chat feature
+            // itself is unavailable (CHAT_ENABLED=false — see setupAskClaudeChat's own early return).
+            const dockChatPanel = () => {
+                const bridge = window.__goiaChatBridge;
+                if (!bridge || !dtChatDockEl || !dtFormulaModePanelEl) return false;
+                bridge.openThreadForContext("tablebuilder");
+                if (bridge.panelEl.parentElement !== dtChatDockEl) dtChatDockEl.appendChild(bridge.panelEl);
+                bridge.panelEl.classList.add("dt-docked");
+                bridge.panelEl.style.display = "flex";
+                dtChatDockEl.style.display = "flex";
+                dtChatIsDocked = true;
+                updateFormulaCollapse();
+                // Table Builder's OWN composer (#dtQuery/#dtDownload) stays visible and is the one
+                // input surface used throughout — it's the SAME box for every message, first or
+                // tenth, not swapped out for DataGPT's own composer once docked. generateBtn's click
+                // handler already docks unconditionally on every send (a harmless no-op once already
+                // docked) and keeps routing through intent triage, so no other change is needed to
+                // keep using it here. DataGPT's own #chatInput/#chatSend (.chat-composer) is hidden
+                // instead — see .dt-docked .chat-composer in taskpane.html — redundant once this
+                // composer is doing the job. dtQueryHintRowEl itself is NOT hidden here any more —
+                // it now lives in the persistent title bar (.fb-header), not in the content area
+                // Formula/chat trade places in, so there's no reason for it to disappear just
+                // because chat is docked. The thread bar (#chatDockedToolbar — the active thread's
+                // name plus New-chat/history) needs nothing done to it either: it's a permanent part
+                // of #chatPanel in both views now, so it simply comes along with the panel and ends
+                // up as the top strip of the docked area once .chat-header above it is hidden.
+                if (dtOpenChatIconEl) dtOpenChatIconEl.innerHTML = DT_OPEN_CHAT_ICON_FORMULA;
+                if (dtOpenChatLabelEl) dtOpenChatLabelEl.textContent = "Formula Picker";
+                // The teaser's own chrome (icon/heading/info/description) hides once docked — the
+                // docked chat panel gets its own header (#chatDockedHeader) instead — and the
+                // cycling example-prompt placeholder gives way to a plain, real one, since this box
+                // is now an ongoing conversation's actual input, not a demo. See taskpane.html's own
+                // CSS for what .dt-chat-docked hides.
+                if (dtTextModePanelEl) dtTextModePanelEl.classList.add("dt-chat-docked");
+                dtStopTeaserPlaceholder();
+                if (queryInput) queryInput.placeholder = "Ask FormulaGPT anything…";
+                // New chat / chat history move down into the composer's own footer row, alongside
+                // the live selection readout — see #dtComposerToolbarSlot's own HTML comment.
+                if (dtComposerToolbarSlotEl && chatThreadNewBtnEl && chatThreadBtnEl) {
+                    if (chatThreadNewBtnEl.parentElement !== dtComposerToolbarSlotEl) dtComposerToolbarSlotEl.appendChild(chatThreadNewBtnEl);
+                    if (chatThreadBtnEl.parentElement !== dtComposerToolbarSlotEl) dtComposerToolbarSlotEl.appendChild(chatThreadBtnEl);
+                }
+                // The Excel Table Outline entry point is a Formula-Picker-adjacent affordance — out
+                // of place once the view is showing a live conversation instead.
+                if (dtExcelOutlineCardEl) dtExcelOutlineCardEl.style.display = "none";
+                // The teaser's own mini history popover no longer has anything to anchor to once its
+                // trigger hides (see the .dt-chat-docked CSS rule) — closeTeaserHistoryMenu is
+                // declared further down this closure, same forward-reference pattern as
+                // dtStopTeaserPlaceholder/dtFnUpdateFormulaPreview elsewhere in this file: safe since
+                // dockChatPanel itself is only ever CALLED later, well after this whole block
+                // finishes its one synchronous init pass.
+                closeTeaserHistoryMenu();
+                return true;
             };
-
-            // Used by the single-table Move control (the inline editable range field) — defaults
-            // to whichever sheet is ACTIVE right now, with the rest of the workbook's sheets
-            // offered alongside it, rather than only ever targeting the current sheet. The Change
-            // panel doesn't need one of these — it only ever writes to the ACTIVE sheet, same as
-            // every other "write a cell" action in this view.
-            const listSheetNames = async () => {
-                let names = [];
-                await Excel.run(async (context) => {
-                    const sheets = context.workbook.worksheets;
-                    sheets.load("items/name");
-                    await context.sync();
-                    names = sheets.items.map((s) => s.name);
+            // "Backgrounds" the chat — hides it WITHOUT touching its thread/history/any in-flight
+            // turn (mirrors closePanel's own display-only toggle in setupAskClaudeChat, confirmed
+            // safe to do independently of it), and restores the normal Table Builder view.
+            const undockChatPanel = () => {
+                const bridge = window.__goiaChatBridge;
+                if (bridge && bridge.panelEl) { bridge.panelEl.style.display = "none"; bridge.panelEl.classList.remove("dt-docked"); }
+                if (dtChatDockEl) dtChatDockEl.style.display = "none";
+                dtChatIsDocked = false;
+                updateFormulaCollapse();
+                if (dtOpenChatIconEl) dtOpenChatIconEl.innerHTML = DT_OPEN_CHAT_ICON_MESSAGE;
+                if (dtOpenChatLabelEl) dtOpenChatLabelEl.textContent = "FormulaGPT";
+                if (dtTextModePanelEl) dtTextModePanelEl.classList.remove("dt-chat-docked");
+                dtRunTeaserPlaceholder();
+                // Re-collapse the teaser if Formula Picker still has a metric selected — a user
+                // who manually re-expanded it just to open the chat (see
+                // #dtTeaserCollapsedBar's own click handler) shouldn't come BACK from that chat to
+                // find the full teaser eating Formula Picker's space again.
+                if (recollapseFormulaGptIfBusy) recollapseFormulaGptIfBusy();
+                // Restore New chat / chat history to their normal home in .chat-docked-toolbar, so
+                // the standalone DataGPT view (which never calls dockChatPanel) always finds them
+                // where it expects them.
+                if (chatToolbarActionsEl && chatThreadNewBtnEl && chatThreadBtnEl) {
+                    if (chatThreadNewBtnEl.parentElement !== chatToolbarActionsEl) chatToolbarActionsEl.appendChild(chatThreadNewBtnEl);
+                    if (chatThreadBtnEl.parentElement !== chatToolbarActionsEl) chatToolbarActionsEl.appendChild(chatThreadBtnEl);
+                }
+                if (dtExcelOutlineCardEl) dtExcelOutlineCardEl.style.display = "";
+            };
+            const chatDockedCloseBtnEl = document.getElementById("chatDockedCloseBtn");
+            if (chatDockedCloseBtnEl) chatDockedCloseBtnEl.addEventListener("click", () => undockChatPanel());
+            // Focusing the composer is ONE way to open the full chat without sending anything, same
+            // as clicking a chat app's own input does. A harmless no-op if already docked
+            // (dockChatPanel just re-confirms the thread context in that case).
+            if (queryInput) {
+                queryInput.addEventListener("focus", () => {
+                    if (!dtChatIsDocked && !dockChatPanel()) showDtStatus("err", "Chat isn't available right now.");
                 });
-                return names;
-            };
-            const getActiveSheetName = async () => {
-                let name = "";
-                await Excel.run(async (context) => {
-                    const sheet = context.workbook.worksheets.getActiveWorksheet();
-                    sheet.load("name");
-                    await context.sync();
-                    name = sheet.name;
+            }
+            // The icon/title/description block above the composer is ALSO clickable — opens the
+            // chat the same way, without requiring the user to type or focus the input first. A
+            // div+role="button" (not a real <button> — it contains one, #dtTeaserHistoryBtn, which
+            // a button can't nest), so Enter/Space are wired by hand to match real button semantics.
+            const dtTeaserOpenAreaEl = document.getElementById("dtTeaserOpenArea");
+            if (dtTeaserOpenAreaEl) {
+                const openFormulaGptTeaser = () => {
+                    if (!dockChatPanel()) { showDtStatus("err", "Chat isn't available right now."); return; }
+                    if (queryInput) queryInput.focus();
+                };
+                dtTeaserOpenAreaEl.addEventListener("click", openFormulaGptTeaser);
+                dtTeaserOpenAreaEl.addEventListener("keydown", (e) => {
+                    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openFormulaGptTeaser(); }
                 });
-                return name;
+            }
+            // Top-right corner of that same block — a MINIATURE thread-history popover, opened right
+            // from this icon rather than the full side-panel drawer, and browsable before the chat
+            // is even docked (picking a thread docks it as part of switching). Reuses the real
+            // thread store via window.__goiaChatBridge's listThreads/switchToThread/createNewThread
+            // (see taskpane.js's own __goiaChatBridge definition) — no second thread list of its own.
+            const dtTeaserHistoryBtnEl = document.getElementById("dtTeaserHistoryBtn");
+            const dtTeaserHistoryMenuEl = document.getElementById("dtTeaserHistoryMenu");
+            let dtTeaserHistoryOpen = false;
+            // Grows UPWARD from the button's own top-right corner, not downward — the teaser sits
+            // near the BOTTOM of the view (just above the Excel Table Outline card), so a
+            // fixed-height popover growing down routinely ran past the bottom of a short task-pane
+            // window. `bottom` (not `top`) anchors it there; its own max-height is computed fresh on
+            // every open from the room actually available ABOVE the button, same
+            // compute-available-space approach positionQueryHintPreview already uses for the same
+            // kind of clipping risk. position:fixed (not absolute) for the same reason
+            // #dtQueryHintPreview is — .fb-box's own overflow:hidden would otherwise clip this past
+            // the box's edge regardless of direction.
+            const DT_TEASER_HISTORY_IDEAL_HEIGHT = 260;
+            const DT_TEASER_HISTORY_MARGIN = 8; // breathing room kept clear above the very top of the window
+            const positionTeaserHistoryMenu = () => {
+                if (!dtTeaserHistoryBtnEl || !dtTeaserHistoryMenuEl) return;
+                const r = dtTeaserHistoryBtnEl.getBoundingClientRect();
+                const width = dtTeaserHistoryMenuEl.offsetWidth || 230;
+                const availableAbove = r.top - DT_TEASER_HISTORY_MARGIN;
+                dtTeaserHistoryMenuEl.style.maxHeight = `${Math.max(80, Math.min(DT_TEASER_HISTORY_IDEAL_HEIGHT, availableAbove))}px`;
+                dtTeaserHistoryMenuEl.style.bottom = `${window.innerHeight - r.top + 4}px`;
+                dtTeaserHistoryMenuEl.style.left = `${Math.max(4, Math.min(r.right - width, window.innerWidth - width - 4))}px`;
             };
-            // Fills a <select> with every sheet name, selecting `preferredName` if it's still one
-            // of them (falls back to whichever sheet is actually active otherwise — e.g. a table's
-            // OWN sheet might have been deleted since it was last scanned).
-            const populateSheetSelect = async (selectEl, preferredName) => {
-                const [names, activeName] = await Promise.all([listSheetNames(), getActiveSheetName()]);
-                const selected = names.includes(preferredName) ? preferredName : activeName;
-                selectEl.innerHTML = names.map((n) => `<option value="${escapeHtml(n)}"${n === selected ? " selected" : ""}>${escapeHtml(n)}</option>`).join("");
+            const closeTeaserHistoryMenu = () => {
+                if (!dtTeaserHistoryMenuEl) return;
+                // Inline override, not just removing the open class — positionTeaserHistoryMenu sets
+                // a fresh max-height on every open (see its own comment), so this has to explicitly
+                // collapse that same inline value back to 0 for the close transition to animate
+                // correctly, the same way closeQueryHintPreviewNow does for #dtQueryHintPreview.
+                dtTeaserHistoryMenuEl.classList.remove("dt-teaser-history-menu-open");
+                dtTeaserHistoryMenuEl.style.maxHeight = "0";
+                if (dtTeaserHistoryBtnEl) dtTeaserHistoryBtnEl.setAttribute("aria-expanded", "false");
+                dtTeaserHistoryOpen = false;
+            };
+            const renderTeaserHistoryMenu = () => {
+                if (!dtTeaserHistoryMenuEl) return;
+                const bridge = window.__goiaChatBridge;
+                const threads = (bridge && bridge.listThreads) ? bridge.listThreads() : [];
+                const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+                const rows = threads.length
+                    ? threads.map((t) => `
+                        <div class="dt-teaser-history-item${t.active ? " active" : ""}" data-thread-id="${esc(t.id)}">
+                            <span class="dt-teaser-history-item-title">${esc(t.title)}</span>
+                            <span class="dt-teaser-history-item-meta">${esc(t.updatedAtLabel)}</span>
+                        </div>
+                    `).join("")
+                    : `<div class="dt-teaser-history-empty">No conversations yet</div>`;
+                dtTeaserHistoryMenuEl.innerHTML = `<div class="dt-teaser-history-new" id="dtTeaserHistoryNew">+ New chat</div>${rows}`;
+            };
+            const openTeaserHistoryMenu = () => {
+                if (!dtTeaserHistoryMenuEl) return;
+                renderTeaserHistoryMenu();
+                dtTeaserHistoryMenuEl.style.display = "block";
+                positionTeaserHistoryMenu();
+                // Reflow before adding the open class, so the max-height transition actually
+                // animates from 0 instead of jumping straight to its open value.
+                void dtTeaserHistoryMenuEl.offsetHeight;
+                dtTeaserHistoryMenuEl.classList.add("dt-teaser-history-menu-open");
+                if (dtTeaserHistoryBtnEl) dtTeaserHistoryBtnEl.setAttribute("aria-expanded", "true");
+                dtTeaserHistoryOpen = true;
+            };
+            if (dtTeaserHistoryBtnEl && dtTeaserHistoryMenuEl) {
+                // stopPropagation so this never also fires the open-area's own click underneath it.
+                dtTeaserHistoryBtnEl.addEventListener("click", (e) => {
+                    e.stopPropagation();
+                    if (dtTeaserHistoryOpen) closeTeaserHistoryMenu(); else openTeaserHistoryMenu();
+                });
+                dtTeaserHistoryMenuEl.addEventListener("click", (e) => {
+                    e.stopPropagation();
+                    const isNew = !!e.target.closest("#dtTeaserHistoryNew");
+                    const item = isNew ? null : e.target.closest(".dt-teaser-history-item[data-thread-id]");
+                    if (!isNew && !item) return;
+                    closeTeaserHistoryMenu();
+                    // Dock FIRST — docking is what sets the chat engine's active CONTEXT to
+                    // "tablebuilder" (via bridge.openThreadForContext, inside dockChatPanel), and
+                    // createNewThread/switchToThread below both act on whatever context is
+                    // CURRENTLY active. Calling them before docking would tag a fresh thread (or
+                    // validate a switch) against whatever context was last active instead — e.g.
+                    // the standalone DataGPT panel's "main" — defeating the whole point of keeping
+                    // FormulaGPT's and DataGPT's threads separate.
+                    if (!dtChatIsDocked) dockChatPanel();
+                    const bridge = window.__goiaChatBridge;
+                    if (isNew) {
+                        if (bridge && bridge.createNewThread) bridge.createNewThread();
+                    } else if (bridge && bridge.switchToThread) {
+                        bridge.switchToThread(item.dataset.threadId);
+                    }
+                });
+                document.addEventListener("click", (e) => {
+                    if (!dtTeaserHistoryOpen) return;
+                    if (dtTeaserHistoryBtnEl.contains(e.target) || dtTeaserHistoryMenuEl.contains(e.target)) return;
+                    closeTeaserHistoryMenu();
+                });
+                window.addEventListener("resize", () => { if (dtTeaserHistoryOpen) positionTeaserHistoryMenu(); });
+            }
+            const dtOpenChatBtnEl = document.getElementById("dtOpenChatBtn");
+            if (dtOpenChatBtnEl) {
+                // Toggle: backgrounded -> dock (shows "Open Chat"); already docked -> undock (shows
+                // "Formula Picker" right up until the click, since the icon/label already reflect
+                // whichever state is CURRENT, not the state a click would produce).
+                dtOpenChatBtnEl.addEventListener("click", () => {
+                    if (dtChatIsDocked) { undockChatPanel(); return; }
+                    if (!dockChatPanel()) showDtStatus("err", "Chat isn't available right now.");
+                });
+            }
+            // Live "Cell X selected" / "Cell range X selected" readout — same wording/element
+            // shape as #chatSelectionIndicator in the DataGPT panel. Fed from checkGridSelectionOnce
+            // below (which already reads the current selection on its own poll for the skeleton
+            // fast-path) rather than a second independent poller, so this doesn't double the Excel
+            // round trips every tick.
+            const renderDtComposerSelection = (text) => {
+                if (!composerSelectionEl || !composerSelectionTextEl) return;
+                if (text) {
+                    composerSelectionTextEl.textContent = text;
+                    composerSelectionEl.style.display = "flex";
+                } else {
+                    composerSelectionEl.style.display = "none";
+                }
             };
 
+            // ── Formula mode's own picker — moved here from the old standalone "Functions" ribbon
+            // view verbatim (see git history for that view). GIA.GET() resolves metric->table/
+            // column and the period's literal stored value ITSELF now (src/functions/functions.js),
+            // precisely so the formula stays hand-typeable with just company/metric/period — this
+            // picker only ever constructs and writes that same simple 3-argument shape.
+            const dtFnCompanyInput = document.getElementById("fnCompanyInput");
+            const dtFnCompanyList = document.getElementById("fnCompanyList");
+            const dtFnCompanyCellRefPreview = document.getElementById("fnCompanyCellRefPreview");
+            const dtFnCompanyRowEl = document.querySelector("#fnEntityField .fn-company-row");
+            const dtFnMetricInputEl = document.getElementById("fnMetricInput");
+            const dtFnMetricListEl = document.getElementById("fnMetricList");
+            const dtFnEntityFieldEl = document.getElementById("fnEntityField");
+            const dtFnEntityLabelEl = document.getElementById("fnEntityLabel");
+            const dtFnEntityUnsupportedEl = document.getElementById("fnEntityUnsupported");
+            const dtFnPeriodFieldEl = document.getElementById("fnPeriodField");
+            const dtFnPeriodTypeSelectEl = document.getElementById("fnPeriodTypeSelect");
+            const dtFnQuarterSelectEl = document.getElementById("fnQuarterSelect");
+            const dtFnYearInput = document.getElementById("fnYearInput");
+            const dtFnStatusEl = document.getElementById("fnStatus");
+            const dtFnInsertBtn = document.getElementById("fnInsertBtn");
+            // Assigned inside the picker's own block below, and called from checkGridSelectionOnce's
+            // poll (a different block) when a SINGLE cell gets selected — that poll is already
+            // reading the selection every tick, so clicking a cell needs no watcher of its own.
+            // Stays null when the picker's markup isn't present, which is the poll's cue to skip it.
+            let dtFnCaptureArmedCell = null;
+            // Sheet-qualified ref behind the company readout, set only by dtFnCaptureArmedCell
+            // (below, inside the guard this sits next to) — declared out HERE, not inside that
+            // block, because updateInputModeDimming (defined further up this same closure) reads it
+            // on every keystroke in BOTH composers; a block-scoped `let` inside the guard would be
+            // invisible to it and throw "dtFnCompanyCellRef is not defined" the moment the user
+            // typed anything (confirmed live — exactly that crash, on backspace in the company box).
+            let dtFnCompanyCellRef = "";
+            if (dtFnCompanyInput && dtFnCompanyList && dtFnCompanyCellRefPreview && dtFnCompanyRowEl
+                && dtFnMetricInputEl && dtFnMetricListEl
+                && dtFnEntityFieldEl && dtFnEntityLabelEl && dtFnEntityUnsupportedEl
+                && dtFnPeriodFieldEl && dtFnPeriodTypeSelectEl && dtFnQuarterSelectEl && dtFnYearInput && dtFnStatusEl && dtFnInsertBtn) {
+                dtFnYearInput.value = new Date().getFullYear();
+                // Own local copy — NOT the escapeHtml declared further down in this same block
+                // (different name, so no redeclaration clash), since this code runs at view-init
+                // time, before that declaration's own line has executed yet.
+                const dtFnEscapeHtml = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+                const metricNames = (METRIC_REGISTRY.metrics || []).map((m) => m.name).filter(Boolean).sort((a, b) => a.localeCompare(b));
+                // Nothing is pre-selected on load, so Entity/Period (and Insert) stay hidden (see
+                // dtFnOnMetricChange below) until the user actually picks one. The input's own
+                // displayed text can disagree with this mid-edit (typing to search) — only an
+                // actual LIST-ITEM CLICK ever changes dtFnSelectedMetric itself; see its own
+                // "click" handler below.
+                let dtFnSelectedMetric = "";
+                // Renders the list filtered to `filterText` (a case-insensitive substring match,
+                // empty = every metric — the full ~700-item browse view) rather than the fuzzy/
+                // ranked search a dedicated widget might do: this is a closed, already-in-memory
+                // list, so a plain substring filter is instant and the common case (typing part of
+                // the exact name you already know) is served just as well as anything fancier.
+                const dtFnRenderMetricList = (filterText) => {
+                    const q = String(filterText || "").trim().toLowerCase();
+                    const matches = q ? metricNames.filter((n) => n.toLowerCase().includes(q)) : metricNames;
+                    dtFnMetricListEl.innerHTML = matches.length
+                        ? matches.map((n) => `<li class="fn-suggest-item${n === dtFnSelectedMetric ? " active" : ""}" data-metric="${dtFnEscapeHtml(n)}">${dtFnEscapeHtml(n)}</li>`).join("")
+                        : `<li class="fn-suggest-empty">No matching metric</li>`;
+                    dtFnMetricListEl.style.display = "block";
+                };
+                // Persistent "compact bar" collapse (see #dtTeaserCollapsedBar's own HTML comment) —
+                // a DIFFERENT, still-visible state from the metric-list's own temporary full-hide
+                // below: this one kicks in once a metric is actually picked (Formula Picker's own
+                // Company/Period/Formula fields just grew), and stays collapsed until the user
+                // manually clicks the bar, not just whenever the list happens to close again.
+                let dtTeaserCompactActive = false;
+                // Sticks once the user has manually re-expanded, so picking a DIFFERENT metric
+                // afterward doesn't yank the teaser shut on them again — only clearing back to no
+                // metric (see dtFnOnMetricChange's own empty branch) resets this, so the next fresh
+                // pick still auto-collapses.
+                let dtTeaserManuallyExpanded = false;
+                const dtTeaserCollapsedBarEl = document.getElementById("dtTeaserCollapsedBar");
+                const setTeaserCompact = (compact) => {
+                    dtTeaserCompactActive = compact;
+                    if (dtTextModePanelEl) dtTextModePanelEl.classList.toggle("dt-teaser-compact", compact);
+                    if (dtTeaserCollapsedBarEl) dtTeaserCollapsedBarEl.setAttribute("aria-expanded", compact ? "false" : "true");
+                    if (dtExcelOutlineCardEl) dtExcelOutlineCardEl.classList.toggle("dt-excel-collapsed", compact || dtMetricListOpenForExpand);
+                };
+                if (dtTeaserCollapsedBarEl) {
+                    dtTeaserCollapsedBarEl.addEventListener("click", () => {
+                        dtTeaserManuallyExpanded = true;
+                        setTeaserCompact(false);
+                    });
+                }
+                // See recollapseFormulaGptIfBusy's own declaration (near dockChatPanel) for why this
+                // assignment exists and who calls it. A metric is still selected -> the room
+                // constraint that triggered the FIRST auto-collapse is still in effect, so BOTH
+                // returning from a docked chat AND the user clicking back into Formula Picker's own
+                // fields clear the manual-expand flag and re-collapse, the same as a fresh pick
+                // would — "manually expanded" was only ever a means to glance at/open FormulaGPT,
+                // not a standing preference to keep displacing Formula Picker's own fields.
+                recollapseFormulaGptIfBusy = () => {
+                    if (dtFnSelectedMetric && !dtTeaserCompactActive) {
+                        dtTeaserManuallyExpanded = false;
+                        setTeaserCompact(true);
+                    }
+                };
+                // The ONE auto-collapse rule, shared by every trigger — a metric just picked
+                // (below) and a grid-skeleton preview just becoming ready (computeSkeletonPreview,
+                // via triggerFormulaGptAutoCollapse) both call this same function rather than each
+                // having their own copy of the "already compact, or user already expanded it by
+                // hand" guard.
+                const maybeAutoCollapseTeaser = () => {
+                    if (!dtTeaserCompactActive && !dtTeaserManuallyExpanded) setTeaserCompact(true);
+                };
+                triggerFormulaGptAutoCollapse = maybeAutoCollapseTeaser;
+                // While the metric list is open, FULLY collapse the FormulaGPT teaser and Excel Table
+                // Outline card below it — Formula Picker is already flex:1, so shrinking its
+                // siblings to nothing hands their space over to it, giving the ~700-item list more
+                // room to drop before #dtFormulaModePanel's own overflow:hidden would otherwise clip
+                // it. Restored the instant the list closes (a pick, an outside click, or Escape) —
+                // independent of (and layered UNDER) the teaser's own persistent compact-bar state
+                // above: #dtTextModePanel's own opacity/max-height collapse here hides everything
+                // inside it regardless of which of its children (full teaser or the compact bar)
+                // would otherwise be showing.
+                let dtMetricListOpenForExpand = false;
+                const setMetricPickerExpanded = (expanded) => {
+                    dtMetricListOpenForExpand = expanded;
+                    if (dtTextModePanelEl) dtTextModePanelEl.classList.toggle("dt-teaser-collapsed", expanded);
+                    if (dtExcelOutlineCardEl) dtExcelOutlineCardEl.classList.toggle("dt-excel-collapsed", expanded || dtTeaserCompactActive);
+                };
+                // Focusing (click OR tab-in) opens the list showing whatever's already typed —
+                // empty on first use, so this is the "browse all ~700" entry point; re-focusing
+                // after a metric is already chosen shows just that one name filtered down to
+                // itself, scrolled into view, rather than dumping the full list again.
+                dtFnMetricInputEl.addEventListener("focus", () => {
+                    setMetricPickerExpanded(true);
+                    dtFnRenderMetricList(dtFnMetricInputEl.value);
+                    const activeEl = dtFnMetricListEl.querySelector(".fn-suggest-item.active");
+                    if (activeEl) activeEl.scrollIntoView({ block: "nearest" });
+                });
+                dtFnMetricInputEl.addEventListener("input", () => dtFnRenderMetricList(dtFnMetricInputEl.value));
+                dtFnMetricListEl.addEventListener("click", (e) => {
+                    const item = e.target.closest(".fn-suggest-item[data-metric]");
+                    if (!item) return;
+                    dtFnSelectedMetric = item.dataset.metric;
+                    dtFnMetricInputEl.value = dtFnSelectedMetric;
+                    dtFnMetricListEl.style.display = "none";
+                    setMetricPickerExpanded(false);
+                    dtFnOnMetricChange();
+                });
+                // Same outside-click-closes convention the company suggestion list already uses
+                // (see its own comment further down) — kept as a separate listener since the two
+                // lists are otherwise unrelated and either can be open without the other. Also
+                // reverts any typed-but-never-clicked text back to the last real selection, so the
+                // box never sits there showing something that isn't actually what Insert will use.
+                document.addEventListener("click", (e) => {
+                    if (dtFnMetricInputEl.contains(e.target) || dtFnMetricListEl.contains(e.target)) return;
+                    dtFnMetricListEl.style.display = "none";
+                    setMetricPickerExpanded(false);
+                    if (dtFnMetricInputEl.value !== dtFnSelectedMetric) dtFnMetricInputEl.value = dtFnSelectedMetric;
+                });
+                dtFnMetricInputEl.addEventListener("keydown", (e) => {
+                    if (e.key === "Escape") { dtFnMetricListEl.style.display = "none"; setMetricPickerExpanded(false); dtFnMetricInputEl.blur(); return; }
+                    // Enter picks the first (closest) match currently showing — the same shortcut
+                    // the company search box's own suggestion list doesn't need (it only ever
+                    // shows a handful of server-ranked matches, clicking is already quick there),
+                    // but earns its keep here against a filtered-down subset of ~700.
+                    if (e.key === "Enter") {
+                        const first = dtFnMetricListEl.querySelector(".fn-suggest-item[data-metric]");
+                        if (first) { e.preventDefault(); first.click(); }
+                    }
+                });
+
+                // ── Progressive disclosure driven by the selected metric ───────────────────────
+                // Metric alone is visible on load (dtFnSelectedMetric starts "" — nothing picked).
+                // Once one is picked, this looks up that metric's own table(s) in
+                // metric-registry.json (its "annual"/"quarterly" keys) to decide: (1) what entity
+                // type the Entity field should show, via table-entity-map.json
+                // (getEntityTypeForShortTable, defined further down this same closure — fine to
+                // reference here since this only ever RUNS later, on a user "change" event, by
+                // which point the whole script has finished its synchronous init), and (2) whether
+                // a period-granularity choice (Annual vs Quarterly) is even needed.
+                let dtFnHasAnnual = false;
+                let dtFnHasQuarterly = false;
+                const dtFnEffectivePeriodType = () => {
+                    if (dtFnHasAnnual && dtFnHasQuarterly) return dtFnPeriodTypeSelectEl.value || "annual";
+                    return dtFnHasQuarterly ? "quarterly" : "annual";
+                };
+                const dtFnUpdatePeriodGranularityUI = () => {
+                    dtFnQuarterSelectEl.style.display = dtFnEffectivePeriodType() === "quarterly" ? "" : "none";
+                };
+                dtFnPeriodTypeSelectEl.addEventListener("change", dtFnUpdatePeriodGranularityUI);
+
+                // Builds exactly what Insert would write, from the fields' CURRENT state — shared by
+                // the live preview (#fnFormulaPreview) and the Insert click handler itself, so
+                // there's one place that knows how to assemble a GIA.GET() call, not two copies that
+                // could drift apart. Returns null when there isn't enough picked yet to build
+                // anything (the preview just shows blank in that case — Insert's own click handler
+                // keeps its separate, more specific validation messages for exactly what's missing).
+                // References dtFnYearCellRef/dtFnNumberFormatFor, both declared FURTHER DOWN this
+                // same closure — safe: the only call that can happen before those finish
+                // initializing is dtFnOnMetricChange's own "establish the initial state" call right
+                // below, which always has an empty metric and returns null on its very first line,
+                // never reaching those references.
+                const dtFnBuildFormulaText = () => {
+                    const cellRef = dtFnCompanyCellRef;
+                    const company = dtFnCompanyInput.value.trim();
+                    const metric = dtFnSelectedMetric;
+                    if (!metric || (!cellRef && !company)) return null;
+                    const year = parseInt(dtFnYearInput.value, 10);
+                    const periodType = dtFnEffectivePeriodType();
+                    const quarter = periodType === "quarterly" ? parseInt(dtFnQuarterSelectEl.value, 10) : null;
+                    if (!dtFnYearCellRef && !Number.isFinite(year)) return null;
+                    if (periodType === "quarterly" && !Number.isFinite(quarter)) return null;
+                    const esc = (s) => String(s).replace(/"/g, '""');
+                    const companyArg = cellRef ? cellRef : `"${esc(company)}"`;
+                    const periodArg = dtFnYearCellRef || year;
+                    const formula = quarter
+                        ? `=GIA.GET(${companyArg},"${esc(metric)}",${periodArg},${quarter})`
+                        : `=GIA.GET(${companyArg},"${esc(metric)}",${periodArg})`;
+                    return { formula, numberFormat: dtFnNumberFormatFor(metric) };
+                };
+                const dtFnFormulaPreviewEl = document.getElementById("fnFormulaPreview");
+                const dtFnFormulaFieldEl = document.getElementById("fnFormulaField");
+                const dtFnUpdateFormulaPreview = () => {
+                    if (!dtFnFormulaPreviewEl) return;
+                    const built = dtFnBuildFormulaText();
+                    dtFnFormulaPreviewEl.value = built ? built.formula : "";
+                    if (dtFnFormulaFieldEl) dtFnFormulaFieldEl.style.display = built ? "" : "none";
+                };
+
+                const dtFnOnMetricChange = async () => {
+                    const metric = dtFnSelectedMetric;
+                    dtFnStatusEl.style.display = "none";
+                    if (!metric) {
+                        dtFnEntityFieldEl.style.display = "none";
+                        dtFnPeriodFieldEl.style.display = "none";
+                        dtFnInsertBtn.style.display = "none";
+                        dtFnUpdateFormulaPreview();
+                        // A fresh pick later should auto-collapse the teaser again — see
+                        // setTeaserCompact's own comment on why this flag only resets here.
+                        dtTeaserManuallyExpanded = false;
+                        return;
+                    }
+                    const entry = (METRIC_REGISTRY.metrics || []).find((m) => m.name === metric);
+                    dtFnHasAnnual = !!(entry && entry.annual);
+                    dtFnHasQuarterly = !!(entry && entry.quarterly);
+                    const primaryShortTable = (entry && ((entry.annual && entry.annual.prefer) || (entry.quarterly && entry.quarterly.prefer))) || null;
+
+                    // Entity field — table-entity-map.json miss (or no registry entry at all) falls
+                    // back to Company rather than blocking the field outright, since that's what
+                    // every metric in today's registry actually resolves to (see TABLE_ENTITY_MAP.md).
+                    const entityRow = await getEntityTypeForShortTable(primaryShortTable);
+                    const entityType = entityRow ? entityRow.entity_type : "Company";
+                    // A newer pick could have resolved out of order while this await was in flight —
+                    // bail if the selection no longer agrees with what this call started for.
+                    if (dtFnSelectedMetric !== metric) return;
+                    // Formula Picker just grew its own Company/Period/Formula fields — hand the
+                    // teaser's space over by default (once), unless the user has already manually
+                    // expanded it back out this "session" (see maybeAutoCollapseTeaser's own
+                    // comment).
+                    maybeAutoCollapseTeaser();
+                    dtFnEntityFieldEl.style.display = "";
+                    dtFnEntityLabelEl.textContent = entityType;
+                    const isCompanyEntity = entityType === "Company";
+                    dtFnCompanyRowEl.style.display = isCompanyEntity ? "flex" : "none";
+                    if (isCompanyEntity) {
+                        dtFnEntityUnsupportedEl.style.display = "none";
+                    } else {
+                        dtFnEntityUnsupportedEl.className = "fb-status err";
+                        dtFnEntityUnsupportedEl.textContent = `Formulas for ${entityType} entities aren't supported yet — GIA.GET() only resolves companies right now.`;
+                        dtFnEntityUnsupportedEl.style.display = "block";
+                    }
+
+                    // Period field
+                    dtFnPeriodFieldEl.style.display = "";
+                    dtFnPeriodTypeSelectEl.style.display = (dtFnHasAnnual && dtFnHasQuarterly) ? "" : "none";
+                    if (!(dtFnHasAnnual && dtFnHasQuarterly)) dtFnPeriodTypeSelectEl.value = dtFnHasQuarterly ? "quarterly" : "annual";
+                    dtFnUpdatePeriodGranularityUI();
+
+                    dtFnInsertBtn.style.display = isCompanyEntity ? "" : "none";
+                    dtFnUpdateFormulaPreview();
+                };
+                dtFnOnMetricChange(); // establish the initial (nothing picked yet) hidden state
+
+                // Live company search — same /goindiastock/company_search endpoint the main Get
+                // Financials dropdown uses, but a plain text input + rendered <ul> here rather than
+                // that dropdown's Choices.js-driven widget, since this only ever needs a company
+                // NAME string (the LIKE match GIA.GET's own SQL already does), not a fincode.
+                let dtFnCompanySearchTimer = null;
+                let dtFnCompanySearchSeq = 0; // discards a stale response that resolves after a newer search already started
+                const dtFnRenderCompanySuggestions = (matches) => {
+                    if (!matches.length) { dtFnCompanyList.style.display = "none"; dtFnCompanyList.innerHTML = ""; return; }
+                    dtFnCompanyList.innerHTML = matches.map((m) => `<li class="fn-suggest-item" data-name="${dtFnEscapeHtml(m)}">${dtFnEscapeHtml(m)}</li>`).join("");
+                    dtFnCompanyList.style.display = "block";
+                };
+                dtFnCompanyInput.addEventListener("input", () => {
+                    const q = dtFnCompanyInput.value.trim();
+                    updateInputModeDimming();
+                    if (dtFnCompanySearchTimer) clearTimeout(dtFnCompanySearchTimer);
+                    if (q.length < 2) { dtFnRenderCompanySuggestions([]); return; }
+                    const seq = ++dtFnCompanySearchSeq;
+                    dtFnCompanySearchTimer = setTimeout(async () => {
+                        try {
+                            const res = await fetch("https://api.goindiastocks.com/goindiastock/company_search", {
+                                method: "POST",
+                                headers: gapiHeaders({ "Content-Type": "application/json" }),
+                                body: JSON.stringify({ searchtxt: q }),
+                            });
+                            const data = await res.json();
+                            if (seq !== dtFnCompanySearchSeq) return; // a newer keystroke already superseded this
+                            const names = (data?.data || []).map((d) => d.label).filter(Boolean);
+                            dtFnRenderCompanySuggestions(names);
+                        } catch (e) {
+                            console.warn("[Formula] company search failed:", e.message);
+                        }
+                    }, 250);
+                });
+                dtFnCompanyList.addEventListener("click", (e) => {
+                    const item = e.target.closest(".fn-suggest-item");
+                    if (!item) return;
+                    dtFnCompanyInput.value = item.dataset.name;
+                    dtFnRenderCompanySuggestions([]);
+                    dtFnUpdateFormulaPreview();
+                });
+                // Dismiss the suggestion list on an outside click — a blur listener alone would
+                // also fire when clicking a suggestion itself (blur happens before the list's own
+                // click), which is why that case is handled separately above via an explicit item
+                // click instead of relying on this one.
+                document.addEventListener("click", (e) => {
+                    if (!dtFnCompanyInput.contains(e.target) && !dtFnCompanyList.contains(e.target)) dtFnRenderCompanySuggestions([]);
+                });
+
+                // ── Pick a cell by clicking it ──
+                // Click into Company (or Period), then click a cell in the sheet: that cell's value
+                // and address are read into the field ("Reliance Industries Ltd. (A15)") and the
+                // formula references the cell rather than baking the text in.
+                //
+                // Focus ARMS a field; it is never disarmed by blur. Clicking the worksheet moves host
+                // focus out of the task pane entirely, so a blur-based "is this field still active"
+                // test would disarm at the exact moment the feature is supposed to fire. Armed state
+                // is therefore explicit, and cleared by: capturing a cell, typing into the field by
+                // hand (that's a typed value, not a reference), Escape, arming the other field, or
+                // inserting. Capturing disarms deliberately — the user's NEXT sheet click is normally
+                // them choosing where the formula goes, and that click must not overwrite the field
+                // they just filled.
+                let dtFnArmedPick = null; // "company" | "period" | null
+                // dtFnCompanyCellRef itself is declared further up this closure (see its own
+                // comment for why) — this is its period counterpart, scoped here since nothing
+                // outside this guard ever needs to read it.
+                let dtFnYearCellRef = "";
+                const dtFnCompanyPickHintEl = document.getElementById("fnCompanyPickHint");
+                const dtFnPeriodPickHintEl = document.getElementById("fnPeriodPickHint");
+                const dtFnYearCellRefPreviewEl = document.getElementById("fnYearCellRefPreview");
+                const dtFnSetArmedPick = (which) => {
+                    dtFnArmedPick = which;
+                    dtFnCompanyInput.classList.toggle("fn-pick-armed", which === "company");
+                    dtFnYearInput.classList.toggle("fn-pick-armed", which === "period");
+                    if (dtFnCompanyPickHintEl) dtFnCompanyPickHintEl.classList.toggle("on", which === "company");
+                    if (dtFnPeriodPickHintEl) dtFnPeriodPickHintEl.classList.toggle("on", which === "period");
+                };
+                const dtFnClearCompanyCellRef = () => {
+                    dtFnCompanyCellRef = "";
+                    dtFnCompanyCellRefPreview.style.display = "none";
+                };
+                const dtFnClearYearCellRef = () => {
+                    dtFnYearCellRef = "";
+                    if (dtFnYearCellRefPreviewEl) dtFnYearCellRefPreviewEl.style.display = "none";
+                };
+                dtFnCompanyInput.addEventListener("focus", () => dtFnSetArmedPick("company"));
+                dtFnYearInput.addEventListener("focus", () => dtFnSetArmedPick("period"));
+                // Typing by hand always means "not this picked cell any more" — the overlay is
+                // pointer-events:none precisely so a click lands here, on the real input, rather than
+                // being swallowed by the readout sitting over it.
+                dtFnCompanyInput.addEventListener("input", () => { if (dtFnArmedPick === "company") dtFnSetArmedPick(null); dtFnClearCompanyCellRef(); });
+                dtFnYearInput.addEventListener("input", () => { if (dtFnArmedPick === "period") dtFnSetArmedPick(null); dtFnClearYearCellRef(); });
+                [dtFnCompanyInput, dtFnYearInput].forEach((el) => el.addEventListener("keydown", (e) => { if (e.key === "Escape") dtFnSetArmedPick(null); }));
+
+                // Called from checkGridSelectionOnce's poll (see dtFnCaptureArmedCell's own
+                // declaration) for every newly-selected SINGLE cell. A no-op unless a field is armed.
+                dtFnCaptureArmedCell = async (sheetName, cellPart) => {
+                    const which = dtFnArmedPick;
+                    if (!which) return;
+                    let text = "";
+                    try {
+                        await Excel.run(async (context) => {
+                            const range = context.workbook.worksheets.getItem(sheetName).getRange(cellPart);
+                            range.load("text");
+                            await context.sync();
+                            text = range.text[0][0];
+                        });
+                    } catch (e) {
+                        console.warn("[Formula] couldn't read the picked cell:", e.message);
+                        return;
+                    }
+                    if (dtFnArmedPick !== which) return; // armed elsewhere while that read was in flight
+                    // Sheet-QUALIFIED behind the scenes: the formula usually ends up on whatever sheet
+                    // the user clicks next, which isn't necessarily the one they picked from, and a
+                    // bare "A15" would then silently read the wrong sheet. The readout still shows the
+                    // short address they actually clicked.
+                    const qualified = /^[A-Za-z_][A-Za-z0-9_]*$/.test(sheetName)
+                        ? `${sheetName}!${cellPart}`
+                        : `'${String(sheetName).replace(/'/g, "''")}'!${cellPart}`;
+                    const readout = `${text === "" || text == null ? "(empty)" : text} (${cellPart})`;
+                    if (which === "company") {
+                        // Input stays ENABLED underneath the readout (overlay is pointer-events:none)
+                        // — clicking it re-arms picking, typing overrides with a name instead; no
+                        // separate "clear the pick" control needed either way.
+                        dtFnCompanyCellRef = qualified;
+                        dtFnCompanyInput.value = "";
+                        dtFnRenderCompanySuggestions([]);
+                        dtFnCompanyCellRefPreview.className = "fn-cell-ref-preview";
+                        dtFnCompanyCellRefPreview.textContent = readout;
+                        dtFnCompanyCellRefPreview.style.display = "block";
+                    } else {
+                        dtFnYearCellRef = qualified;
+                        if (dtFnYearCellRefPreviewEl) {
+                            dtFnYearCellRefPreviewEl.className = "fn-cell-ref-preview";
+                            dtFnYearCellRefPreviewEl.textContent = readout;
+                            dtFnYearCellRefPreviewEl.style.display = "block";
+                        }
+                    }
+                    dtFnSetArmedPick(null);
+                    updateInputModeDimming();
+                    dtFnUpdateFormulaPreview();
+                };
+
+                // Same classification + Indian-grouped format convention Table Builder's own cell
+                // number-formatting already uses (see isPercentRatioColumn/the conditional-sections
+                // numberFormat in writeDownloadedTableToSheet), with one explicit difference: up to
+                // 2 decimals for a percent/ratio metric ("0.##", trimming trailing zeros) instead of
+                // Table Builder's own flat 1 decimal ("0.0"). A custom function can only ever RETURN
+                // a value, never set its own cell's format, so GIA.GET always returns the bare
+                // number — this picker applies the format, at the moment it writes the formula, the
+                // one place that actually knows which metric was chosen.
+                const dtFnIsPercentRatioMetric = (name) => /%|\bratio\b|\bcagr\b/i.test(String(name || ""));
+                const dtFnNumberFormatFor = (metric) => dtFnIsPercentRatioMetric(metric)
+                    ? "0.##"
+                    : "[>=10000000]##\\,##\\,##\\,##0;[>=100000]##\\,##\\,##0;#,##0";
+
+                // dtFnBuildFormulaText/dtFnUpdateFormulaPreview are declared further UP this closure
+                // (right before dtFnOnMetricChange) — see that declaration's own comment for why.
+                // Additive listeners only — the existing input/change handlers above (search,
+                // cell-pick, dimming) are untouched; this just also keeps the preview current on
+                // every field that feeds dtFnBuildFormulaText, including fnQuarterSelect, which had
+                // no listener of its own before since only the Insert click used to read it.
+                ["input", "change"].forEach((evt) => {
+                    dtFnCompanyInput.addEventListener(evt, dtFnUpdateFormulaPreview);
+                    dtFnYearInput.addEventListener(evt, dtFnUpdateFormulaPreview);
+                });
+                dtFnPeriodTypeSelectEl.addEventListener("change", dtFnUpdateFormulaPreview);
+                dtFnQuarterSelectEl.addEventListener("change", dtFnUpdateFormulaPreview);
+
+                // Pending "go back to the Insert button" timer after a successful insert (see its
+                // own use below) — tracked so a NEW insert started before it fires (however it got
+                // triggered) cancels the old one, rather than that stale timer later hiding whatever
+                // status/visibility the new attempt just set.
+                let dtFnStatusRevertTimer = null;
+                const dtFnClearStatusRevertTimer = () => {
+                    if (dtFnStatusRevertTimer) { clearTimeout(dtFnStatusRevertTimer); dtFnStatusRevertTimer = null; }
+                };
+
+                dtFnInsertBtn.addEventListener("click", async () => {
+                    dtFnClearStatusRevertTimer();
+                    // dtFnCompanyCellRef is only ever set by dtFnCaptureArmedCell, from a real sheet
+                    // name + Excel-validated cell address — no hand-typed syntax to check any more
+                    // (that was the OLD separate #fnCompanyCellRef text box's job, removed in favor
+                    // of click-to-pick covering it too).
+                    const cellRef = dtFnCompanyCellRef;
+                    const company = dtFnCompanyInput.value.trim();
+                    const metric = dtFnSelectedMetric;
+                    const year = parseInt(dtFnYearInput.value, 10);
+                    const periodType = dtFnEffectivePeriodType();
+                    const quarter = periodType === "quarterly" ? parseInt(dtFnQuarterSelectEl.value, 10) : null;
+                    dtFnStatusEl.style.display = "none";
+                    if (!cellRef && !company) { dtFnStatusEl.className = "fb-status err"; dtFnStatusEl.textContent = "Pick a company, or click a cell containing one, first."; dtFnStatusEl.style.display = "block"; return; }
+                    if (!metric) { dtFnStatusEl.className = "fb-status err"; dtFnStatusEl.textContent = "Pick a metric first."; dtFnStatusEl.style.display = "block"; return; }
+                    // A picked cell stands in for a typed year — its VALUE is the period at recalc
+                    // time, so there's nothing numeric to validate here.
+                    if (!dtFnYearCellRef && !Number.isFinite(year)) { dtFnStatusEl.className = "fb-status err"; dtFnStatusEl.textContent = "Enter a valid year."; dtFnStatusEl.style.display = "block"; return; }
+                    if (periodType === "quarterly" && !Number.isFinite(quarter)) { dtFnStatusEl.className = "fb-status err"; dtFnStatusEl.textContent = "Pick a quarter."; dtFnStatusEl.style.display = "block"; return; }
+
+                    dtFnInsertBtn.disabled = true;
+                    try {
+                        // The checks above already guarantee enough is picked, so this is always
+                        // non-null here — same builder the live preview (#fnFormulaPreview) uses, so
+                        // what gets written is always exactly what was just shown.
+                        const { formula, numberFormat } = dtFnBuildFormulaText();
+
+                        await Excel.run(async (context) => {
+                            const range = context.workbook.getSelectedRange();
+                            range.formulas = [[formula]];
+                            range.numberFormat = [[numberFormat]];
+                            await context.sync();
+                        });
+                        // Neutral grey, not the green "ok" banner — an insert that worked is just a
+                        // result to read back (and copy), not a verdict worth celebrating every
+                        // time. innerHTML, so dtFnEscapeHtml has to run over the formula: it
+                        // carries the user's own company name and the metric name, both of which
+                        // can contain characters that would otherwise be parsed as markup.
+                        dtFnStatusEl.className = "fb-status neutral";
+                        dtFnStatusEl.innerHTML = `<span class="fb-status-label">Formula:</span><span class="fb-status-formula">${dtFnEscapeHtml(formula)}</span>`;
+                        dtFnStatusEl.style.display = "block";
+                        // Stands IN FOR the Insert button for a few seconds rather than sitting
+                        // alongside it — the button reappears on its own once the formula has had
+                        // time to be read, no click needed to dismiss it.
+                        dtFnInsertBtn.style.display = "none";
+                        dtFnStatusRevertTimer = setTimeout(() => {
+                            dtFnStatusRevertTimer = null;
+                            dtFnStatusEl.style.display = "none";
+                            dtFnInsertBtn.style.display = "";
+                        }, 3000);
+                        // Clear the company row so a successful insert doesn't leave
+                        // dtFnCompanyInput/dtFnCompanyCellRef holding text forever — those two are
+                        // exactly what updateInputModeDimming reads to decide "the user is using
+                        // Formula," so leaving either populated kept .dt-input-panel-dimmed
+                        // (opacity + pointer-events:none, see taskpane.html) stuck on #dtTextModePanel
+                        // permanently after the FIRST insert — the composer (and the chat input it
+                        // hosts once docked) looked and behaved disabled from then on, with no way to
+                        // clear it short of reloading the task pane. Re-running the dimming check
+                        // after clearing is what actually lifts it.
+                        dtFnCompanyInput.value = "";
+                        dtFnClearCompanyCellRef();
+                        dtFnRenderCompanySuggestions([]);
+                        dtFnUpdateFormulaPreview();
+                        // The period deliberately survives (the next formula is usually the same
+                        // period, a different metric) — only the arming is reset, so the click that
+                        // picks the next destination cell doesn't get read as a pick.
+                        dtFnSetArmedPick(null);
+                        updateInputModeDimming();
+                    } catch (e) {
+                        dtFnStatusEl.className = "fb-status err";
+                        dtFnStatusEl.textContent = e.message || "Couldn't insert the formula — please try again.";
+                        dtFnStatusEl.style.display = "block";
+                    } finally {
+                        dtFnInsertBtn.disabled = false;
+                    }
+                });
+            }
 
             // Column letter for a 1-based index (27 -> AA), and the A1-style address of an
             // rows×cols block anchored at (row, col) — both 1-indexed, matching Excel's own
@@ -2529,9 +3315,8 @@ function applyRibbonView() {
             // Table Builder action makes (a fresh Download alone can be intent-triage + Stage
             // 1+2a + Stage 2 — three calls), so the whole action bills as a single wallet-history
             // line instead of one row per internal step. Reset+flushed by flushQueryDataCost at the
-            // end of each top-level action (generateBtn's click handler, runTableRefresh,
-            // runTableSimpleRefresh, runTableAddColumns, runTableDataRowEdit,
-            // runTableHeaderRename) — mirrors totalCostUsd in the DataGPT chat loop exactly.
+            // end of generateBtn's click handler — mirrors totalCostUsd in the DataGPT chat loop
+            // exactly.
             let qdPendingCostUsd = 0;
             const flushQueryDataCost = (question) => {
                 const costUsd = qdPendingCostUsd;
@@ -2632,6 +3417,10 @@ function applyRibbonView() {
             // derive their own representation from, so the fetch + templated-column resolution only
             // ever happens once per session regardless of which caller needs it first.
             let catalogEntriesCache = null;
+            // table name (e.g. "GIAStock_Data.dbo.sc_year_data") -> its entity-type record from
+            // TABLE_ENTITY_MAP_URL (entity_type/entity_id_column/entity_name_column/etc. — see that
+            // file's own _comment). null until getTableEntityMap()'s first successful load.
+            let tableEntityMapCache = null;
             // A column name containing "<...>" is a TEMPLATE placeholder (e.g. "<filter_name where
             // Type='Y'> (e.g. Revenue, ROAE)") rather than a real column — the catalog's own
             // convention for a table whose real per-metric columns are dynamically registered
@@ -2818,6 +3607,65 @@ function applyRibbonView() {
                 }
                 console.log(`[QueryData timing][${QD_AUTOFILL_TAG}]     catalog: network fetch (${catalogEntriesCache.length} table(s)): ${(performance.now() - tFetch).toFixed(0)}ms`);
                 return catalogEntriesCache;
+            };
+            // Same fetch-once-cache-24h shape as getCatalogEntries above, but far cheaper — this is
+            // one small static JSON file (no per-table templated-column resolution needed) — so it's
+            // a flat function rather than split into its own load/cache-storage helpers. Returns a
+            // Map keyed by table name for O(1) lookup (getTableEntityMap(tableName) convenience
+            // overload below), or null entries/a rejected promise never happens — on any failure
+            // this falls back to an empty Map so a lookup just misses rather than throwing, same
+            // "the feature still works, just degraded" convention as the catalog's own loader.
+            const TABLE_ENTITY_MAP_CACHE_KEY = "qd_table_entity_map_cache_v1";
+            const TABLE_ENTITY_MAP_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+            const getTableEntityMap = async () => {
+                if (tableEntityMapCache) return tableEntityMapCache;
+                try {
+                    const raw = localStorage.getItem(TABLE_ENTITY_MAP_CACHE_KEY);
+                    if (raw) {
+                        const parsed = JSON.parse(raw);
+                        if (parsed && Array.isArray(parsed.tables) && Date.now() - parsed.timestamp < TABLE_ENTITY_MAP_CACHE_TTL_MS) {
+                            tableEntityMapCache = new Map(parsed.tables.map((t) => [t.table, t]));
+                            return tableEntityMapCache;
+                        }
+                    }
+                } catch (e) { /* corrupt/unavailable storage — fall through to a real fetch */ }
+                try {
+                    const res = await fetch(TABLE_ENTITY_MAP_URL);
+                    if (!res.ok) throw new Error(`table-entity-map fetch returned ${res.status}`);
+                    const data = await res.json();
+                    const tables = Array.isArray(data.tables) ? data.tables : [];
+                    try { localStorage.setItem(TABLE_ENTITY_MAP_CACHE_KEY, JSON.stringify({ timestamp: Date.now(), tables })); }
+                    catch (e) { /* storage full/unavailable — in-memory cache still covers this session */ }
+                    tableEntityMapCache = new Map(tables.map((t) => [t.table, t]));
+                } catch (e) {
+                    console.warn("[QueryData] couldn't load table-entity-map:", e.message);
+                    tableEntityMapCache = new Map();
+                }
+                return tableEntityMapCache;
+            };
+            // Convenience overload: given the table a selected metric resolves to (metric-registry.
+            // json's annual.prefer/quarterly.prefer, or the catalog's own tableName for a non-
+            // registry metric), look up what kind of Entity dropdown it should show. Returns null on
+            // a miss (an unmapped table, or a non-entity reference/metadata table — see
+            // is_entity_table:false rows in table-entity-map.json) rather than throwing, so a caller
+            // can fall back to "Company" or hide the dropdown without a try/catch of its own.
+            const getEntityTypeForTable = async (tableName) => {
+                const map = await getTableEntityMap();
+                const row = map.get(tableName);
+                return row && row.is_entity_table ? row : null;
+            };
+            // Same lookup, but by a SHORT table name (e.g. "basic_info") — what metric-registry.
+            // json's own annual.prefer/quarterly.prefer values actually are, unlike
+            // table-entity-map.json's keys which are the fully-qualified "<db>.dbo.<table>" names
+            // index.json itself uses. Matches on the part after the last "." so the Formula picker
+            // never has to hardcode which database/schema a given short name lives in.
+            const getEntityTypeForShortTable = async (shortTable) => {
+                if (!shortTable) return null;
+                const map = await getTableEntityMap();
+                for (const row of map.values()) {
+                    if (row.table.split(".").pop() === shortTable) return row.is_entity_table ? row : null;
+                }
+                return null;
             };
             // Markdown rendering of the catalog's COLUMN NAMES (not summaries/descriptions) — used
             // both by refreshSqlFromPrevious's fallback (a combined "rewrite this SQL, and pick a
@@ -3078,272 +3926,6 @@ function applyRibbonView() {
                 return result;
             };
 
-            // ── Refresh: update a previously generated query for a new scope ──
-            // Not a fresh Stage 1/1.5/2 run from scratch — the table already EXISTS, was already
-            // answering a real question, and already picked real table(s)/columns that worked.
-            // Re-deriving all of that from zero would risk a DIFFERENT table or column shape than
-            // what the user already has (and may have built formulas on top of). Instead, the
-            // model is shown exactly what it wrote last time and asked to adjust it to the new
-            // scope the user just typed — same tables, same columns, same shape, unless the new
-            // request genuinely needs a column from elsewhere (e.g. "also show the sector"), in
-            // which case the light catalog below (column NAMES only, no summaries, no per-table
-            // schema docs/examples — cheap, worth paying on every Modify call rather than only
-            // escalating to it after a decline) gives it somewhere real to look instead of
-            // inventing one. A STATIC table's column list there is still just catalog-declared, NOT
-            // INFORMATION_SCHEMA-verified the way generateSqlFromSchemas'/addColumnsToTable's REAL
-            // COLUMNS blocks are (a table with dynamically-registered columns IS resolved straight
-            // from INFORMATION_SCHEMA instead — see resolveTemplatedTableColumns — every real
-            // column, not a sample), so a join against
-            // a newly-added table still needs the same "don't invent a shared key" discipline (see
-            // addColumnsToTable's own comment for the "mode" column it made up 3 times in a row
-            // before that guidance existed).
-            const refreshSqlFromPrevious = async (priorSql, priorUserQuery, priorDescription, refreshInstruction, sampleText) => {
-                if (!lightCatalogText) lightCatalogText = await loadLightCatalog();
-                const systemPrompt = "You previously wrote the SQL query below (in a SQL Server / T-SQL financial-data "
-                    + "warehouse) to answer a user's original request. The user is now looking at the table that query "
-                    + "produced and wants it refreshed for a different scope — e.g. more recent periods, a different "
-                    + "count, a wider date range — described in their own words below (this may be free text typed "
-                    + "into a box, OR the user may have directly edited the table's own description sentence in the "
-                    + "sheet to say what they now want — treat both the same way). Produce an UPDATED version of "
-                    + "the SAME query: keep its overall shape (same table(s), same columns, same general structure) "
-                    + "unless the new request genuinely requires otherwise, and adjust only what needs to change (a "
-                    + "TOP N count, a date/period filter, an ORDER BY) to satisfy it. Trust that the original query's "
-                    + "table and column names were already real and correct — this is an adjustment, not a redesign. "
-                    + "A sample of the table's CURRENT data (its header plus a few real data rows, exactly as "
-                    + "they're actually displayed in the sheet right now) may be given below — use it to ground "
-                    + "what the real columns and their value formats actually look like (this is especially useful "
-                    + "for a period/date column's real on-screen representation), but the ORIGINAL SQL remains the "
-                    + "authoritative source for exact column names and query logic.\n\n"
-                    + "If — and only if — the request genuinely can't be satisfied from the table(s) already in the "
-                    + "query (it asks for something those columns don't have), the light data catalog below lists "
-                    + "every other available table's EXACT fully-qualified name and EVERY real column NAME (no "
-                    + "description). Pick whichever REAL table actually holds that data, using its EXACT "
-                    + "fully-qualified name and column names from the catalog, and JOIN it "
-                    + "in. A STATIC table's column list there is NOT verified against the live database the way "
-                    + "the original query's own columns were — so when joining in a new table, "
-                    + "only use a join key you can see listed, by exact name, in BOTH tables' column lists (fincode "
-                    + "and a period column, commonly year, are the usual shared keys). NEVER assume two tables "
-                    + "share some extra flag column (a \"mode\", \"period type\", or similar) just because that "
-                    + "sounds like a plausible way financial data might be organized — only ever join on a column "
-                    + "actually confirmed, by name, on both sides. If that newly-joined table (or any table already "
-                    + "in the query) is clearly an analyst-estimates/consensus-forecast table (its name or "
-                    + "description says so, e.g. containing \"estimate\" or \"consensus\") while another candidate "
-                    + "table holds actual/historical data for the same metric, prefer the actual-data table unless "
-                    + "the refresh request explicitly asks for forecast/consensus estimates or a future fiscal "
-                    + "year.\n\n"
-                    + "You will ONLY ever submit ONE statement, which is executed as-is: NEVER use DECLARE, SET, "
-                    + "dynamic SQL, or EXEC/sp_executesql — those are rejected outright before execution. NEVER "
-                    + "use a CTE (a \"WITH x AS (...)\" clause) either — the query is executed inside an outer "
-                    + "row-capping wrapper, and a leading WITH is not valid there. This matters most exactly when "
-                    + "a refresh request asks to reshape the table (e.g. \"move period into columns\", \"pivot "
-                    + "companies into columns\") — reach for a derived table in the FROM clause instead (\"SELECT "
-                    + "... FROM (SELECT ...) AS alias\"), which gives the identical result and is always safe to "
-                    + "nest. If you touch a numeric comparison, ORDER BY, or cast (adjusting a TOP N count or a "
-                    + "date/period filter often does), keep using TRY_CAST/TRY_CONVERT, never a plain CAST/CONVERT "
-                    + "— many numeric-looking columns here are stored as text with a non-numeric placeholder (e.g. "
-                    + "\"-\") for missing data, and a plain CAST throws a hard error on that row instead of just "
-                    + "treating it as NULL. If the adjustment touches \"the latest/most recent period\" for a "
-                    + "multi-entity table (e.g. each company), remember that's usually a PER-ENTITY notion, not "
-                    + "one shared across every row — different companies report on their own schedules — so that "
-                    + "lookup should stay scoped to the SAME entity the surrounding row is about, never a single "
-                    + "ungrouped aggregate applied uniformly to everyone.\n\n"
-                    + "Also update the title and the one-sentence description to reflect the refreshed scope — same "
-                    + "conventions as before: the description reads naturally and covers both which company/companies "
-                    + "the data is about AND the period(s) it covers, using the exact value(s) your own query now "
-                    + "filters or sorts by.\n\n"
-                    + "If the refresh request genuinely can't be satisfied this way, don't guess — say so instead.\n\n"
-                    + "Return STRICT JSON, nothing else, no markdown fences: "
-                    + "{\"sql\": \"<the updated T-SQL query, or an empty string if impossible>\", "
-                    + "\"title\": \"<updated short (<=8 word) title>\", "
-                    + "\"description\": \"<updated one-sentence description covering company/companies AND period>\", "
-                    + "\"explanation\": \"<empty string if sql is non-empty — don't waste effort narrating a "
-                    + "query that worked; only if sql is empty, 1 sentence on why it's impossible>\"}";
-                const sampleBlock = sampleText ? `\n\nSAMPLE OF THE TABLE'S CURRENT DATA (header + a few real rows, as shown in the sheet right now):\n${sampleText}` : "";
-                const userPrompt = `ORIGINAL QUESTION: ${priorUserQuery || "(not recorded)"}\n\nORIGINAL SQL:\n${priorSql}\n\nORIGINAL DESCRIPTION: ${priorDescription || "(none recorded)"}${sampleBlock}\n\nREFRESH REQUEST: ${refreshInstruction}\n\nDATA CATALOG (for picking a table NOT already in use, only if the request genuinely needs one):\n${lightCatalogText}`;
-                return callQueryDataLLM("Refresh: SQL update", systemPrompt, userPrompt, 6000);
-            };
-
-            // ── Header-row edit: add column(s) the user typed directly into the sheet ──
-            // Triggered when the user types new text directly into the table's HEADER ROW — e.g.
-            // "EBITDA" into a blank cell just past the last real column — rather than through the
-            // Modify box. Unlike refreshSqlFromPrevious above, this is explicitly allowed to bring
-            // in a DIFFERENT table: the new column might not exist anywhere in the query's current
-            // table(s) at all (the user never said what table to use, they just typed a label).
-            //
-            // Takes VERIFIED schemaMarkdown (the same REAL COLUMNS-backed doc generateSqlFromSchemas
-            // itself uses — see loadSchemaAndColumns), covering BOTH the table(s) the original query
-            // already used and whichever table runTableAddColumns' own extractPlanAndTables call
-            // matched the new column(s) to — never just the light catalog's unverified column-NAME
-            // lists. An
-            // earlier version of this call only had the light catalog and, with no ground truth to
-            // check against, repeatedly invented a shared "mode" join column between sc_year_data
-            // and ratios_ind that doesn't actually exist in either — confirmed live, 3 times in a
-            // row, always the exact same invented column. Verified columns close that gap the same
-            // way they already do for a fresh Download.
-            const addColumnsToTable = async (priorSql, priorUserQuery, priorDescription, newColumnLabels, sampleText, schemaMarkdown) => {
-                const systemPrompt = "You previously wrote the SQL query below (in a SQL Server / T-SQL financial-data "
-                    + "warehouse) to answer a user's original request. The user has now typed new column header(s) "
-                    + "DIRECTLY into the table's header row in the sheet, without going through any other box — this "
-                    + "means they want the table to ALSO include this additional data, while everything already "
-                    + "there (the existing rows, columns, filters, and scope) stays exactly as it was unless "
-                    + "satisfying the new column(s) genuinely requires a small adjustment.\n\n"
-                    + "Below is the FULL schema — each table's Identifier/Data Columns plus a REAL COLUMNS block "
-                    + "read directly from the database's own metadata — for every table now potentially relevant: "
-                    + "the one(s) the original query already used, AND whichever table the new column(s) matched to "
-                    + "in the catalog. If the requested data is on a table already in the original query, add it "
-                    + "there. If it requires the newly-added table, JOIN it in — but EVERY column name you use, on "
-                    + "either side of that join, must appear VERBATIM in that table's own REAL COLUMNS block below. "
-                    + "Never invent a column, and never assume two tables share some extra join key (a \"mode\", "
-                    + "\"period type\", or similar flag) just because that sounds like a plausible way financial "
-                    + "data might be organized — only join on a column confirmed, by exact name, in BOTH tables' "
-                    + "REAL COLUMNS blocks (fincode and a period column, commonly year, are the usual shared keys; "
-                    + "add anything beyond that ONLY if it's actually listed on both sides). If the matched new "
-                    + "table is clearly an analyst-estimates/consensus-forecast table (its name or description "
-                    + "says so, e.g. containing \"estimate\" or \"consensus\") while another available table holds "
-                    + "actual/historical data for the same metric, prefer the actual-data table instead — unless "
-                    + "the new column(s) explicitly ask for forecast/consensus estimates or a future fiscal "
-                    + "year.\n\n"
-                    + "A sample of the table's CURRENT data (its header plus a few real data rows, exactly as "
-                    + "they're actually displayed in the sheet right now) may be given below — use it to ground "
-                    + "what the existing columns/values actually look like.\n\n"
-                    + "You will ONLY ever submit ONE statement, which is executed as-is: NEVER use DECLARE, SET, "
-                    + "dynamic SQL, or EXEC/sp_executesql. NEVER use a CTE (a \"WITH x AS (...)\" clause) either "
-                    + "— the query is executed inside an outer row-capping wrapper, and a leading WITH is not "
-                    + "valid there; nest a derived table in the FROM clause instead (\"SELECT ... FROM (SELECT "
-                    + "...) AS alias\") for the same effect. Many numeric-looking columns here are stored as text "
-                    + "with a non-numeric placeholder (e.g. \"-\") for missing data — use TRY_CAST/TRY_CONVERT for "
-                    + "any numeric comparison or cast you add, never a plain CAST/CONVERT, which throws a hard "
-                    + "error on that row instead of just treating it as NULL. If the new column's \"latest period\" "
-                    + "for a multi-entity table needs resolving, that's usually a PER-ENTITY notion (different "
-                    + "companies report on different schedules) — scope it to the same entity the surrounding row "
-                    + "is about, never a single ungrouped aggregate applied to everyone.\n\n"
-                    + "Also update the title and one-sentence description to mention the added data — same "
-                    + "conventions as elsewhere: the description covers both which company/companies the data is "
-                    + "about AND the period(s) it covers.\n\n"
-                    + "If NONE of the typed header(s) correspond to any real column in the schema below, don't "
-                    + "guess — decline with an explanation instead. If only SOME do, go ahead and add just those, "
-                    + "and say in your explanation which one(s) you could not find.\n\n"
-                    + "Return STRICT JSON, nothing else, no markdown fences: "
-                    + "{\"sql\": \"<the updated T-SQL query, or an empty string if none of the new columns could be found>\", "
-                    + "\"title\": \"<updated short (<=8 word) title>\", "
-                    + "\"description\": \"<updated one-sentence description covering company/companies AND period>\", "
-                    + "\"explanation\": \"<empty string if EVERY requested column was found and added — don't "
-                    + "waste effort narrating a clean success; otherwise 1-2 sentences on which weren't found, or "
-                    + "why none could be added>\"}";
-                const sampleBlock = sampleText ? `\n\nSAMPLE OF THE TABLE'S CURRENT DATA (header + a few real rows, as shown in the sheet right now):\n${sampleText}` : "";
-                const userPrompt = `ORIGINAL QUESTION: ${priorUserQuery || "(not recorded)"}\n\nORIGINAL SQL:\n${priorSql}\n\nORIGINAL DESCRIPTION: ${priorDescription || "(none recorded)"}${sampleBlock}\n\nNEW COLUMN HEADER(S) THE USER TYPED INTO THE SHEET: ${newColumnLabels.join(", ")}\n\nTABLE SCHEMA(S):\n${schemaMarkdown || "(none loaded — rely on the original SQL and sample data above only)"}`;
-                return callQueryDataLLM("Header edit: add column(s)", systemPrompt, userPrompt, 6000);
-            };
-
-            // ── Plain Refresh: rewrite a literal period filter into "latest per entity" ──
-            // Refresh (as opposed to Modify above) never changes what a table is ABOUT — it only
-            // ever means "pull the latest data this exact same query would return right now." Most
-            // of the time that's already automatic (a query that resolves "latest" via a correlated
-            // per-entity lookup just returns whatever's newest when re-run) — but a query that
-            // instead hardcodes a LITERAL year/date would keep returning that same stale period
-            // forever. This call's only job is to find and fix that one case.
-            //
-            // Deliberately does NOT ask the model to compute or guess a period to filter on — giving
-            // it "today's date" and asking it to reason toward "so filter on year = 2027" is exactly
-            // how a refresh would start returning zero rows for every company that hasn't reported
-            // yet (annual results land months after fiscal year-end). Instead it's told to rewrite a
-            // literal filter into the SAME correlated-latest-per-entity pattern generateSqlFromSchemas
-            // already produces — self-limiting by construction, since it only ever returns whatever
-            // is ACTUALLY newest per entity, correct regardless of what the period is without the
-            // model ever computing one. Today's date/FY is passed only as a tiebreaker for a
-            // genuinely ambiguous ORIGINAL intent, never as something to derive a literal period from.
-            //
-            // Deliberately does NOT hardcode which period FORMATS to expect (quarterly vs. annual,
-            // a combined code vs. split year+quarter columns, a real date vs. text) — the prompt
-            // instead tells the model to read the original query's own literal filter value to see
-            // how THIS table represents a period, since that's always right there in the SQL being
-            // rewritten and generalizes to any table without this code needing to special-case one.
-            //
-            // The caller (runTableSimpleRefresh) independently re-checks that the rewritten query
-            // still references the same tables and the same SELECT list as the original (see
-            // sqlShapeUnchanged) — this call is trusted for WHETHER/HOW to rewrite the period logic,
-            // not blindly trusted to have touched ONLY that.
-            const rewriteSqlForLatestPeriod = async (priorSql, priorUserQuery, priorDescription, sampleText) => {
-                const now = new Date();
-                const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
-                const fyEndYear = now.getMonth() >= 3 ? now.getFullYear() + 1 : now.getFullYear(); // Indian FY: Apr-Mar
-                const fy = (y) => `FY${String(y).slice(-2)}`;
-                const systemPrompt = "You previously wrote the read-only SQL query below (SQL Server / T-SQL, "
-                    + "financial-data warehouse) to answer a user's request. The user has now clicked \"Refresh\" "
-                    + "on the table it produced — this ALWAYS means \"get the latest data this exact same query "
-                    + "would return right now,\" never a request to change what the query is about (that's a "
-                    + "separate \"Modify\" feature, not this one).\n\n"
-                    + "Check whether the query ties a row's period (a fiscal year, quarter, or date column — "
-                    + "whatever form of period THIS table actually uses) to a LITERAL, HARDCODED value (e.g. "
-                    + "\"= 2024\", \"BETWEEN 2022 AND 2023\", a literal date, a specific quarter) instead of "
-                    + "resolving to whatever is actually the newest period available per entity. If it does: "
-                    + "rewrite ONLY that condition into a correlated subquery that finds each entity's own latest "
-                    + "period — the same pattern this codebase always uses: scope a lookup for the MAXIMUM period "
-                    + "value to the SAME entity key the surrounding row joins on (commonly fincode), keeping the "
-                    + "result in the SAME column(s)/representation the original query already used there (don't "
-                    + "switch to a different period column or format).\n\n"
-                    + "Look at the ORIGINAL literal value itself — and, if given below, the SAMPLE of the table's "
-                    + "current real data, which shows the period column's value exactly as it's actually "
-                    + "displayed in the sheet (sometimes a more reliable signal than the SQL literal alone, e.g. "
-                    + "if the query filters on a raw code but the sheet shows it already formatted/labeled) — to "
-                    + "see exactly how this table represents a period. Don't assume it's a plain integer year. A "
-                    + "quarterly table may split period into two columns (year AND quarter together, not year "
-                    + "alone), or combine both into one coded value; a period may also be stored as TEXT rather "
-                    + "than a true date/number, sometimes in a form that does NOT sort correctly with a plain "
-                    + "MAX() on the raw text — e.g. a month-name-plus-year string sorts ALPHABETICALLY by default "
-                    + "(\"Nov2025\" > \"Mar2026\" as plain text, despite Nov 2025 being chronologically EARLIER). "
-                    + "Whatever the representation turns out to be, derive an expression that orders rows by their "
-                    + "TRUE chronological recency (not just lexicographic/numeric order on the raw stored value) "
-                    + "before picking the maximum, while still filtering/returning using that SAME original "
-                    + "column(s) and format so the rest of the query keeps working unchanged.\n\n"
-                    + "Keep any existing exclusion of estimated/forecast rows (e.g. \"estimate = 'no'\") in BOTH "
-                    + "the outer query AND the correlated subquery, so a refresh can never start pulling in "
-                    + "forecasts the original query was already excluding. Never replace one literal period with "
-                    + "ANOTHER literal period — the whole point is that the query keeps finding whatever is newest "
-                    + "on its own, indefinitely, every time it's refreshed, without anyone (you included) ever "
-                    + "having to know or guess the right one.\n\n"
-                    + "If the query ALREADY resolves its period this way (a correlated \"latest per entity\" "
-                    + "lookup, not a bare literal), OR it isn't period-based at all (nothing to make \"latest\"), "
-                    + "return it EXACTLY UNCHANGED — do not touch the SELECT list, table names, joins, other "
-                    + "filters, or formatting, and set \"changed\" to false.\n\n"
-                    + `FOR CONTEXT ONLY (a tiebreaker if the ORIGINAL query's own intent is genuinely ambiguous `
-                    + `about which period counts as "latest" — NEVER a value to compute a literal year toward): `
-                    + `today is ${todayStr}. Current Indian fiscal year: ${fy(fyEndYear)} (April-March). Last `
-                    + `fully-completed fiscal year: ${fy(fyEndYear - 1)}. Companies typically report months after `
-                    + "their fiscal year-end, so \"latest available\" per company is almost always an EARLIER year "
-                    + "than the current fiscal year — that's exactly why this must be resolved per-entity against "
-                    + "real data in SQL, never asserted as a specific year here.\n\n"
-                    + "You will ONLY ever submit ONE statement, which is executed as-is: NEVER use DECLARE, SET, "
-                    + "dynamic SQL, or EXEC/sp_executesql. NEVER use a CTE (a \"WITH x AS (...)\" clause) either "
-                    + "— the query is executed inside an outer row-capping wrapper, and a leading WITH is not "
-                    + "valid there; nest a derived table in the FROM clause instead (\"SELECT ... FROM (SELECT "
-                    + "...) AS alias\") if you need one. Keep using TRY_CAST/TRY_CONVERT (never a plain "
-                    + "CAST/CONVERT) anywhere you touch a numeric comparison — many numeric-looking columns here "
-                    + "are stored as text with a non-numeric placeholder for missing data.\n\n"
-                    + "A plain refresh doesn't change what a table is ABOUT, but it can easily make the "
-                    + "description's stated PERIOD stale (e.g. it said \"for FY25\" and the query now resolves to "
-                    + "FY26 for companies that have reported it) — so also update the title and one-sentence "
-                    + "description to accurately reflect the query as it now stands, same conventions as before "
-                    + "(the description covers both which company/companies the data is about AND the period(s) "
-                    + "it covers). If you rewrote a literal period into a correlated latest-per-entity lookup, the "
-                    + "period is no longer one single shared value — describe it generically instead of naming a "
-                    + "year that won't apply to every row (e.g. \"using each company's latest available period\" "
-                    + "or \"as of the most recent fiscal year available per company\"), since different companies "
-                    + "report on different schedules. If nothing needed changing in the query (\"changed\": "
-                    + "false) and the existing title/description already describe it accurately, return them "
-                    + "unchanged.\n\n"
-                    + "Return STRICT JSON, nothing else, no markdown fences: "
-                    + "{\"sql\": \"<the query, rewritten only if needed, or EXACTLY the original if not>\", "
-                    + "\"changed\": <true if you rewrote a literal period filter, false if returned as-is>, "
-                    + "\"title\": \"<short (<=8 word) title, updated only if it needs to be>\", "
-                    + "\"description\": \"<one-sentence description covering company/companies AND period, "
-                    + "updated to reflect the query as it now stands>\"}";
-                const sampleBlock = sampleText ? `\n\nSAMPLE OF THE TABLE'S CURRENT DATA (header + a few real rows, as shown in the sheet right now):\n${sampleText}` : "";
-                const userPrompt = `ORIGINAL QUESTION: ${priorUserQuery || "(not recorded)"}\n\nORIGINAL SQL:\n${priorSql}\n\nORIGINAL DESCRIPTION: ${priorDescription || "(none recorded)"}${sampleBlock}`;
-                return callQueryDataLLM("Refresh: latest-period check", systemPrompt, userPrompt, 6000);
-            };
-
-
             // Fetches each table's full schema doc + its mandatory real-column verification (see
             // loadColumnsFromInformationSchema's own comment) and concatenates them — shared by
             // both the initial pass and the one re-fetch a table-selection revision triggers below.
@@ -3512,37 +4094,6 @@ function applyRibbonView() {
                 const calendarYear = requested.quarterNo === 4 ? requested.fiscalYear : requested.fiscalYear - 1;
                 return `${month}${calendarYear}`;
             };
-            // The exact inverse of literalPeriodValue — given a literal already sitting in a
-            // deterministically-built query (e.g. reconstructPeriodFromSql, used by runTableAddColumns'
-            // rebuild to preserve a table's EXISTING period untouched), recovers the
-            // {fiscalYear, quarterNo} that produced it. Returns null when the literal doesn't match
-            // the stated format at all (shouldn't happen for a literal buildDeterministicQuery itself
-            // wrote, but never guess).
-            // A real fiscal year, not merely "parses as an integer" — without this bound a cell
-            // holding an Excel DATE SERIAL (46174, what Excel turns a "Jun 2026" label into the
-            // moment it's typed into an unformatted cell) read straight through as fiscal year
-            // 46174 on a plain-year table, and a query would be built for it.
-            const asFiscalYear = (n) => (Number.isFinite(n) && n >= 1900 && n <= 2100 ? n : null);
-            const parseLiteralPeriodValue = (periodInfo, rawLiteral) => {
-                // Coerced because a cell Excel has converted to a date comes back as a NUMBER, and
-                // the string methods below would throw on it rather than simply not matching.
-                const literal = String(rawLiteral == null ? "" : rawLiteral);
-                if (periodInfo.format === PERIOD_FORMAT_PLAIN_YEAR) {
-                    const fiscalYear = asFiscalYear(parseInt(literal, 10));
-                    return fiscalYear ? { fiscalYear, quarterNo: null } : null;
-                }
-                if (periodInfo.format === PERIOD_FORMAT_MONTH_YEAR_ANNUAL) {
-                    if (!literal.startsWith(periodInfo.monthPrefix)) return null;
-                    const fiscalYear = asFiscalYear(parseInt(literal.slice(periodInfo.monthPrefix.length), 10));
-                    return fiscalYear ? { fiscalYear, quarterNo: null } : null;
-                }
-                const monthPrefix = literal.slice(0, 3);
-                const calendarYear = parseInt(literal.slice(3), 10);
-                const quarterNo = Number(Object.keys(QUARTER_MONTH_BY_NO).find((q) => QUARTER_MONTH_BY_NO[q] === monthPrefix));
-                if (!quarterNo) return null;
-                const fiscalYear = asFiscalYear(quarterNo === 4 ? calendarYear : calendarYear + 1);
-                return fiscalYear ? { fiscalYear, quarterNo } : null;
-            };
             const escapeSqlLiteral = (s) => String(s).replace(/'/g, "''");
 
             // Raw Identifier-Column reader capturing name/example/format per row — collapseColumnTables
@@ -3641,44 +4192,6 @@ function applyRibbonView() {
                 }
             };
 
-            // Same triage idea as classifyQueryDataIntent above, for the OTHER free-text entry
-            // point — the per-table Edit box ("Apply change") — but with the opposite framing. That
-            // one asks "does this belong here at all, or does it actually need DataGPT's broader
-            // reach" for a box that can only ever build something NEW. This one's box does the
-            // opposite: it can only ever REWRITE the one table it's already attached to (companies/
-            // metrics/periods/columns), via refreshSqlFromPrevious's own live SQL+sample-rows
-            // context — so "modify something that already exists" is exactly the NORMAL case here,
-            // not a mismatch. What doesn't belong is an instruction about something ELSE in the
-            // workbook (a different table, a cell, a formula, a chart, a model) or a general
-            // question unrelated to this table's own query — refreshSqlFromPrevious has no way to
-            // act on any of that and would otherwise either decline outright or (worse) try to force
-            // it into a SQL rewrite that doesn't actually answer what was asked.
-            const classifyTableEditIntent = async (instruction) => {
-                const systemPrompt = "This box can ONLY rewrite the query behind ONE already-existing result "
-                    + "table — which companies/metrics/periods it shows, its columns (add/rename/remove). It "
-                    + "cannot touch anything ELSE in the workbook (a different table, a cell, a formula, a "
-                    + "chart, a model) and cannot answer a general question — DataGPT is the assistant for "
-                    + "that, since it can see and edit the whole sheet.\n\n"
-                    + "Classify the instruction into exactly one of:\n"
-                    + "- \"edit\": a change to THIS table's own data — its companies, metrics, periods, or "
-                    + "columns (add/rename/remove one). The normal case — assume this unless the instruction "
-                    + "clearly names something else.\n"
-                    + "- \"other\": about something ELSE in the workbook (a different table, a cell, a "
-                    + "formula, a chart, a model) — OR a general question/request with no real connection to "
-                    + "changing this table's own companies/metrics/periods/columns.\n\n"
-                    + "Return STRICT JSON, nothing else, no markdown fences: {\"intent\": \"edit\"|\"other\"}";
-                try {
-                    const result = await callQueryDataLLM("Table-edit intent triage", systemPrompt, instruction, 30, QD_INTENT_CLASSIFIER_MODEL, "minimal");
-                    return result && result.intent === "other" ? "other" : "edit";
-                } catch (e) {
-                    // Same rule as classifyQueryDataIntent's own catch — a classifier hiccup must
-                    // never block the real feature, so an unclassified instruction just proceeds
-                    // through the ordinary table-edit path exactly as it always has.
-                    console.warn("[QueryData] table-edit intent triage failed, proceeding as an edit:", e.message);
-                    return "edit";
-                }
-            };
-
             // ── Merged Stage 1 + Stage 2a: table selection + structured extraction ──
             // Fed the full catalog's real column names (no summaries/descriptions — loadLightCatalog,
             // same representation the Modify flow's own fallback already uses) rather than the full
@@ -3704,6 +4217,14 @@ function applyRibbonView() {
                     + "requested metric maps to — pick the SMALLEST set of tables that together cover every "
                     + "requested metric (most requests need only one). Don't worry about a company-identifier "
                     + "join table — that's resolved automatically afterward, never include it yourself.\n\n"
+                    + "\"companies\" must hold ONLY the company's own proper name — strip the metric phrase and "
+                    + "any connecting word around it (\"of\", \"for\", a possessive \"'s\"), never include them "
+                    + "as part of the name. This matters most when the connecting word is \"of\": \"revenue of "
+                    + "Reliance Industries Ltd\" names company \"Reliance Industries Ltd\" (everything after "
+                    + "\"of\"), metric Revenue — NOT company \"Revenue of Reliance Industries Ltd\", which "
+                    + "isn't a company at all and will fail to resolve downstream. Same idea either order: "
+                    + "\"Reliance Industries Ltd's revenue\" and \"revenue for Reliance Industries Ltd\" both "
+                    + "still name the same one company, with the same metric phrase stripped out.\n\n"
                     + "The period has FOUR possible shapes — picking the right one matters, since \"range\" and "
                     + "\"years\" are NOT interchangeable:\n"
                     + "- \"specific\": exactly ONE literal period named or impliable from context — fiscal_year "
@@ -3806,9 +4327,9 @@ function applyRibbonView() {
                 // this exact model with its own "minimal".
                 const result = await callQueryDataLLM("Stage 1+2a: table + structured extraction", systemPrompt, userPrompt, 1500, DOWNLOADTABLE_PLAN_MODEL, "low");
                 console.log(`[QueryData timing]   Stage 1+2a LLM call (${DOWNLOADTABLE_PLAN_MODEL}), prompt ${userPrompt.length.toLocaleString()} chars: ${(performance.now() - tLlm).toFixed(0)}ms`);
-                // buildDeterministicQuery's "years" mode (shared with the skeleton-grid fast path
-                // and runTableDataRowEdit's period-change rebuild, where this exact shape already
-                // flows through) reads each entry as camelCase { fiscalYear, quarter } — but the
+                // buildDeterministicQuery's "years" mode (shared with the skeleton-grid fast path,
+                // where this exact shape already flows through) reads each entry as camelCase
+                // { fiscalYear, quarter } — but the
                 // prompt above, like every other field in this schema, asked the model for
                 // snake_case "fiscal_year" (consistent naming is what keeps a small model reliable
                 // across a dozen other fields). Normalize here rather than trust the model to break
@@ -4162,7 +4683,275 @@ function applyRibbonView() {
                 // use of literalPeriodValue in tryGridSkeletonFastPath) knows which table's period
                 // format to use, without having to re-run this whole function's own anchor-picking
                 // logic a second time.
-                return { sql, title: title.slice(0, 80), description, explanation: "", anchorTable };
+                //
+                // metrics/companies/period/anchorIsQuarterly/ranking are ALSO exposed (not just used
+                // internally) for the same reason, one level further: buildFormulaGrid (below) needs
+                // this exact validated/standardized/expanded shape — including the bare-quarterly-
+                // year-to-4-quarters expansion just above — to build GIA.GET() formulas instead of
+                // SQL, without re-deriving or re-validating any of it a second time. Every existing
+                // caller that only reads .sql/.title/.description/.anchorTable is unaffected.
+                return { sql, title: title.slice(0, 80), description, explanation: "", anchorTable, metrics, companies, period, anchorIsQuarterly, ranking };
+            };
+
+            // ── Resolving company names BEFORE they ever reach SQL/formula-building ──
+            // extractPlanAndTables (and the skeleton-grid path's own classifyGridCells) extract a
+            // company name exactly as written — neither has any concept of "is this a real
+            // company." In the literal-value SQL path a typo was forgiving: companyFilter's LIKE
+            // just matched zero rows, "no data," mildly wrong but self-correcting next time. In the
+            // formula-building path a typo gets baked PERMANENTLY into the formula text (and the
+            // written company cell) — it doesn't fail once, it fails forever, since the formula
+            // always asks for that same wrong string. This is a deterministic, non-LLM correction
+            // step for exactly that — not a model-callable tool, since the "create a table" request
+            // that breaks never enters the tool-calling loop at all (only "modify" does — see
+            // classifyQueryDataIntent); a tool is useless if nothing ever decides to call it here.
+            //
+            // Exact cache hit first (companyNamesCache — every real CompName from
+            // GIAStock_Data.dbo.basic_info, the SAME universe buildDeterministicQuery's own LIKE
+            // match targets, already loaded at Table Builder startup — zero network cost for the
+            // common "spelled it right" case). Only on a miss does this fall back to one
+            // /goindiastock/company_search call (the SAME endpoint the Formula picker's own company
+            // autocomplete already trusts directly as a GIA.GET() companyName argument), taking its
+            // top result. A name that matches neither comes back in `unresolved` — callers decline
+            // the whole request rather than silently building formulas around a name that can never
+            // match anything.
+            const resolvePlanCompanies = async (companies) => {
+                const resolved = [];
+                const unresolved = [];
+                await Promise.all((companies || []).filter(Boolean).map(async (name) => {
+                    if (companyNamesCache.has(name)) { resolved.push(name); return; }
+                    try {
+                        const res = await fetch("https://api.goindiastocks.com/goindiastock/company_search", {
+                            method: "POST",
+                            headers: gapiHeaders({ "Content-Type": "application/json" }),
+                            body: JSON.stringify({ searchtxt: name }),
+                        });
+                        const data = await res.json();
+                        const top = (data?.data || []).map((d) => d.label).filter(Boolean)[0];
+                        if (top) resolved.push(top); else unresolved.push(name);
+                    } catch (e) {
+                        console.warn(`[QueryData] company search failed for "${name}":`, e.message);
+                        unresolved.push(name);
+                    }
+                }));
+                return { resolved, unresolved };
+            };
+
+            // ── Formula-grid builder — the GIA.GET() alternative to buildDeterministicQuery's SQL
+            // text. Given that SAME validated/standardized plan (buildDeterministicQuery's own
+            // return, just above — this is always called with its result, never a raw plan),
+            // builds a table of live =GIA.GET(...) formulas instead of one compound SELECT. See the
+            // plan file "Table Builder — emit live GIA.GET() formulas instead of hardcoded values."
+            // Returns null for a ranking (no formula equivalent) or anything else that doesn't
+            // resolve to a concrete per-cell (company, metric, period) — the caller falls back to
+            // the unchanged literal-value SQL path in that case, exactly as today.
+            //
+            // A table column header has to be a concrete label ("FY26") regardless of output mode,
+            // so "latest"/"the last N years" already have to resolve to explicit fiscal years at
+            // BUILD time either way — this expands them via the same calendar-based
+            // lastCompletedFiscalQuarter()/lastCompletedFiscalYear() buildDeterministicQuery's own
+            // future-period guards already use, rather than SQL's ROW_NUMBER() windowing. A company
+            // that hasn't yet reported that exact calendar period shows blank until it does, then
+            // self-corrects on Excel's next recalculation — more "live" than a snapshot, not a bug.
+            const expandPeriodToList = (period, anchorIsQuarterly) => {
+                const describeEntry = (fiscalYear, quarterNo) => ({
+                    fiscalYear, quarterNo: quarterNo || null,
+                    label: quarterNo ? `Q${quarterNo} FY${String(fiscalYear).slice(-2)}` : `FY${String(fiscalYear).slice(-2)}`,
+                });
+                if (period.mode === "specific") {
+                    if (!period.fiscal_year) return null;
+                    return [describeEntry(period.fiscal_year, period.quarter || null)];
+                }
+                if (period.mode === "years") {
+                    if (!Array.isArray(period.values) || !period.values.length) return null;
+                    return period.values.map((v) => describeEntry(v.fiscalYear, v.quarter || null));
+                }
+                if (period.mode === "latest" || period.mode === "range") {
+                    const n = period.mode === "range" ? period.range_count : 1;
+                    if (!(n > 0)) return null;
+                    const list = [];
+                    if (anchorIsQuarterly) {
+                        let { fiscalYear, quarterNo } = lastCompletedFiscalQuarter();
+                        for (let i = 0; i < n; i++) {
+                            list.push(describeEntry(fiscalYear, quarterNo));
+                            quarterNo -= 1;
+                            if (quarterNo < 1) { quarterNo = 4; fiscalYear -= 1; }
+                        }
+                    } else {
+                        let fiscalYear = lastCompletedFiscalYear();
+                        for (let i = 0; i < n; i++) { list.push(describeEntry(fiscalYear, null)); fiscalYear -= 1; }
+                    }
+                    // Descending (most recent first) — same convention buildDeterministicQuery's own
+                    // ORDER BY ... DESC uses for "latest"/"range" results.
+                    return list;
+                }
+                return null; // "since" or an unrecognized mode — never emitted by extractPlanAndTables or the skeleton path, stays on the literal-value path
+            };
+            // Excel formula-text escaping (embedded double quotes), same convention the Formula
+            // picker's own `esc()` helper uses (taskpane.js, fnInsertBtn's click handler) — distinct
+            // from escapeSqlLiteral, which escapes for SQL text, not formula text.
+            const escFormulaText = (s) => String(s == null ? "" : s).replace(/"/g, '""');
+            // One cell's formula — the simple 3/4-arg form (company, display name, period[, quarter])
+            // whenever the metric is a known registry concept (matches the Formula picker's own
+            // convention exactly, letting GIA.GET() resolve table/column lazily at Excel-eval time);
+            // the explicit table/column override form otherwise (e.g. a column the LLM resolved that
+            // the registry doesn't know) — GIA.GET() already supports both. `companyArg` is either an
+            // unquoted cell reference (e.g. "A5") or an already-quoted literal string — the caller
+            // decides which, since that depends on whether the company column is being collapsed.
+            // `periodArg` is the SAME split: either a plain fiscal-year NUMBER, embedded literally
+            // (buildFormulaGridPivoted's own convention — each column there IS one fixed period,
+            // nothing in the row to reference instead), or an unquoted CELL REFERENCE string to this
+            // row's own Period column (buildFormulaGrid's convention) — whose "FY26"/"Q3 FY26" label
+            // text GIA.GET's own period-argument parsing now understands directly (see
+            // parseFiscalLabel in functions.js), so `quarterArg` is never passed alongside one; it
+            // only ever accompanies a literal numeric `periodArg`.
+            const buildGetFormula = (companyArg, m, periodArg, quarterArg) => {
+                if (m.literalNull) return ""; // grain-mismatched metric — no data at this plan's grain, same blank the literal-value path shows
+                const quarterPart = (typeof periodArg === "number" && quarterArg) ? `,${quarterArg}` : "";
+                if (m.display) {
+                    return `=GIA.GET(${companyArg},"${escFormulaText(m.display)}",${periodArg}${quarterPart})`;
+                }
+                const cols = (Array.isArray(m.columns) && m.columns.length ? m.columns : [m.column]).join("|");
+                const quarterCell = typeof periodArg === "number" ? (quarterArg || "") : "";
+                return `=GIA.GET(${companyArg},"",${periodArg},${quarterCell},"${escFormulaText(m.table)}","${escFormulaText(cols)}")`;
+            };
+            // Builds the "long" shape: one row per (company, period), one column per metric — the
+            // SAME natural column order buildDeterministicQuery's own SELECT uses, so headers/
+            // titles/descriptions read the same regardless of which path produced the table. The
+            // skeleton-grid fast path's "periods across columns" layout uses a separate wide/pivoted
+            // builder (see tryGridSkeletonFastPath) that calls buildGetFormula directly instead.
+            //
+            // Needs writeTarget (not just detResult) because each row's metric formulas reference
+            // real cells by address rather than re-embedding a literal:
+            //   - company: that SAME row's own company-name cell (e.g. "A5") — UNLESS the request
+            //     collapses to a single company, in which case there's no per-row cell, so it
+            //     references the "Company: X" meta-row's own name cell instead (see
+            //     writeDownloadedTableToSheet) — every row still points at ONE real cell, just a
+            //     shared one rather than its own.
+            //   - period: that SAME row's own Period cell — GIA.GET() parses its "FY26"/"Q3 FY26"
+            //     label text directly (see parseFiscalLabel in functions.js).
+            // Editing either cell re-targets every formula that references it on the next
+            // recalculation — the "genuinely live, not a snapshot" property this whole feature is
+            // built around, and (confirmed from a live report) the one piece that was missing: the
+            // single-company case had been using a literal quoted name/year instead of referencing
+            // the very cells sitting right there in the sheet.
+            const buildFormulaGrid = (detResult, writeTarget) => {
+                if (!detResult || detResult.ranking) return null;
+                const companies = Array.isArray(detResult.companies) ? detResult.companies.filter(Boolean) : [];
+                const metrics = Array.isArray(detResult.metrics) ? detResult.metrics : [];
+                if (!companies.length || !metrics.length) return null;
+                const periods = expandPeriodToList(detResult.period, detResult.anchorIsQuarterly);
+                if (!periods || !periods.length) return null;
+
+                // Same de-dup convention as buildDeterministicQuery's own selectParts loop — two
+                // metrics that happen to share a display name (e.g. resolved from different tables)
+                // get the table name appended so the header stays unique.
+                const seenColumns = new Set();
+                const metricOutNames = metrics.map((m) => {
+                    const baseName = m.display || m.column || "Value";
+                    const outName = seenColumns.has(baseName) ? `${baseName} (${String(m.table || "").split(".").pop()})` : baseName;
+                    seenColumns.add(baseName);
+                    return outName;
+                });
+
+                const collapseCompany = companies.length === 1;
+                const columns = [];
+                if (!collapseCompany) columns.push({ name: "CompName", type: "text" });
+                columns.push({ name: "Period", type: "text" });
+                metricOutNames.forEach((name) => columns.push({ name, type: "number" }));
+
+                // 1-indexed sheet address of this grid's first DATA row — mirrors
+                // writeDownloadedTableToSheet's own layout exactly (title row, then the header row,
+                // then data — see QD_TABLE_META_ROWS), with the ONE extra "Company: X" meta row
+                // single-company requests get folded in (collapseCompany is exactly when that row
+                // gets written, see detectSingleCompanyColumn/singleCompanyName below).
+                const firstDataRow = writeTarget.row + QD_TABLE_META_ROWS + (collapseCompany ? 1 : 0) + 1;
+                const companyColLetter = collapseCompany ? null : colLetter(writeTarget.col);
+                // The Period column's own sheet column — right after CompName when present,
+                // otherwise the grid's own first column (see the `columns` push order above).
+                const periodColLetter = colLetter(writeTarget.col + (collapseCompany ? 0 : 1));
+                // The "Company: X" meta row's own NAME cell (one column right of the "Company"
+                // label — see writeDownloadedTableToSheet) — every row references this SAME cell
+                // when collapsed, since there's no per-row company cell to point at instead.
+                const collapsedCompanyCellRef = collapseCompany
+                    ? `${colLetter(writeTarget.col + 1)}${writeTarget.row + QD_TABLE_META_ROWS}`
+                    : null;
+
+                const rows = [];
+                companies.forEach((company) => {
+                    periods.forEach((p) => {
+                        const rowIdx = rows.length;
+                        const rowNum = firstDataRow + rowIdx;
+                        const companyArg = collapseCompany ? collapsedCompanyCellRef : `${companyColLetter}${rowNum}`;
+                        const periodCellRef = `${periodColLetter}${rowNum}`;
+                        const row = [];
+                        if (!collapseCompany) row.push(company);
+                        row.push(p.label);
+                        metrics.forEach((m) => row.push(buildGetFormula(companyArg, m, periodCellRef, null)));
+                        rows.push(row);
+                    });
+                });
+
+                const periodDesc = periods.length === 1 ? periods[0].label : `${periods[periods.length - 1].label} to ${periods[0].label}`;
+                const title = `${metricOutNames.slice(0, 3).join(", ")}${metricOutNames.length > 3 ? " + more" : ""} — `
+                    + `${companies.length === 1 ? companies[0] : `${companies.length} companies`}`;
+                const description = `${metricOutNames.join(", ")} for ${companies.join(", ")}, ${periodDesc}. `
+                    + "Live GIA.GET() formulas — recalculates automatically.";
+
+                return {
+                    title: title.slice(0, 80),
+                    description,
+                    columns,
+                    rows,
+                    singleCompanyName: collapseCompany ? companies[0] : null,
+                };
+            };
+
+            // The wide/pivoted counterpart to buildFormulaGrid above — one row per company, one
+            // column per the skeleton-grid fast path's own detected (metric, period) pair, matching
+            // a hand-drawn "periods across columns" layout instead of the default long shape. Mirrors
+            // pivotQueryResultByPeriodColumns's reshape, except it builds formulas straight from
+            // `pivotSpec` rather than reshaping an executed query's rows — there's no execution in
+            // the formula path at all. Only ever called with a pivotSpec tryGridSkeletonFastPath's
+            // own deterministic result produced (same companies/metrics source as buildFormulaGrid).
+            const buildFormulaGridPivoted = (detResult, pivotSpec, writeTarget) => {
+                if (!detResult || detResult.ranking || !pivotSpec || !Array.isArray(pivotSpec.pivotColumns) || !pivotSpec.pivotColumns.length) return null;
+                const companies = Array.isArray(detResult.companies) ? detResult.companies.filter(Boolean) : [];
+                if (!companies.length) return null;
+                const metricByOutputName = new Map((detResult.metrics || []).map((m) => [m.display || m.column, m]));
+
+                const collapseCompany = companies.length === 1;
+                const columns = [];
+                if (!collapseCompany) columns.push({ name: "CompName", type: "text" });
+                pivotSpec.pivotColumns.forEach((pc) => columns.push({ name: pc.label, type: "number" }));
+
+                const firstDataRow = writeTarget.row + QD_TABLE_META_ROWS + 1;
+                const companyColLetter = collapseCompany ? null : colLetter(writeTarget.col);
+                // Same "Company: X" meta-row cell reference as buildFormulaGrid's own collapsed
+                // case (see its comment) — period stays a literal here regardless, since each
+                // COLUMN in this pivoted shape is its own fixed period with no per-row cell (or
+                // single shared one) that could stand in for all of them at once.
+                const collapsedCompanyCellRef = collapseCompany
+                    ? `${colLetter(writeTarget.col + 1)}${writeTarget.row + QD_TABLE_META_ROWS}`
+                    : null;
+
+                const rows = companies.map((company, idx) => {
+                    const companyArg = collapseCompany ? collapsedCompanyCellRef : `${companyColLetter}${firstDataRow + idx}`;
+                    const row = [];
+                    if (!collapseCompany) row.push(company);
+                    pivotSpec.pivotColumns.forEach((pc) => {
+                        const m = metricByOutputName.get(pc.metricColumn);
+                        row.push(m ? buildGetFormula(companyArg, m, pc.fiscalYear, pc.quarterNo) : "");
+                    });
+                    return row;
+                });
+
+                const metricNames = Array.from(new Set(pivotSpec.pivotColumns.map((pc) => pc.metricColumn)));
+                const title = `${metricNames.slice(0, 3).join(", ")}${metricNames.length > 3 ? " + more" : ""} — `
+                    + `${companies.length === 1 ? companies[0] : `${companies.length} companies`}`;
+                const description = `${metricNames.join(", ")} for ${companies.join(", ")}, across ${pivotSpec.pivotColumns.length} periods. `
+                    + "Live GIA.GET() formulas — recalculates automatically.";
+
+                return { title: title.slice(0, 80), description, columns, rows, singleCompanyName: collapseCompany ? companies[0] : null };
             };
 
             // Everything buildDeterministicQuery emits ends in exactly one ORDER BY, on its own
@@ -4314,6 +5103,17 @@ function applyRibbonView() {
                 let plan = await extractPlanAndTables(userQuery);
                 console.log(`[QueryData timing] Table selection + structured extraction — TOTAL: ${(performance.now() - tPlanStart).toFixed(0)}ms`
                     + (typeof clickTime === "number" ? ` (${(performance.now() - clickTime).toFixed(0)}ms since the Download click)` : ""));
+                // Correct/verify company names BEFORE anything downstream (schema loads, SQL/
+                // formula building) spends work on a request that can never actually match — see
+                // resolvePlanCompanies' own comment for why this has to happen here, in code, not
+                // as a model-callable tool.
+                if (plan.companies && plan.companies.length) {
+                    const { resolved, unresolved } = await resolvePlanCompanies(plan.companies);
+                    if (unresolved.length) {
+                        return { sql: "", tables_used: [], explanation: `Couldn't find a company matching "${unresolved.join('", "')}" — check the spelling?` };
+                    }
+                    plan.companies = resolved;
+                }
                 let tables = deriveTablesFromPlan(plan);
                 if (!tables) return { sql: "", tables_used: [], explanation: plan.reason_if_infeasible || "Couldn't map that request onto any real table/column in the catalog." };
 
@@ -4408,79 +5208,6 @@ function applyRibbonView() {
                 return res.json();
             };
 
-            // Turns a refresh-tag token (the ciphertext sitting in a table's title-cell comment)
-            // back into the original {sql, user_query, tables_used, title, description} —
-            // decryption happens entirely server-side (backend/routers/wallet.py), using a key this client
-            // never holds; only the account that originally created the table can read it back
-            // (enforced there too, not just here).
-            const decryptRefreshToken = async (token) => {
-                const { userId, isEnterprise, enterpriseId } = getWalletIdentity();
-                const res = await fetch(`${QUERY_DATA_WALLET_BASE_URL}/excel_decrypt_refresh_token`, {
-                    method: "POST",
-                    headers: gapiHeaders({ "Content-Type": "application/json" }),
-                    body: JSON.stringify({
-                        user_id: isEnterprise ? null : (Number(userId) || null),
-                        enterprise_id: enterpriseId,
-                        token,
-                    }),
-                });
-                if (!res.ok) {
-                    let detail = "";
-                    try { detail = (await res.json()).detail || ""; } catch (e) { /* body wasn't JSON */ }
-                    // .status lets decryptRefreshTokenWithFallback tell "token unreadable" (400 —
-                    // see InvalidRefreshToken in wallet.py) apart from "wrong account" (403) or
-                    // anything else, without string-matching the message text.
-                    const err = new Error(detail || `Server returned ${res.status}`);
-                    err.status = res.status;
-                    throw err;
-                }
-                return res.json();
-            };
-
-            // Fallback for decryptRefreshToken when a table's refresh tag can't be decrypted —
-            // tampered, corrupted, or minted under a key/scheme an older or newer version of the
-            // add-in used (see InvalidRefreshToken in wallet.py; this is exactly the gap a key or
-            // encryption-library change on the backend opens up). Rather than hard-failing the
-            // whole Refresh/Modify/Update, treats the table's own visible Description text as a
-            // fresh natural-language request and runs it through the SAME pipeline a brand-new
-            // Download uses — producing a `prior`-shaped {sql, user_query, tables_used, title,
-            // description} object every caller below already knows how to use, so nothing
-            // downstream needs to know this came from regeneration instead of decryption. Once this
-            // succeeds, the refresh/update that follows writes a FRESH, correctly-encrypted token
-            // back into the table's comment (see writeDownloadedTableToSheet) — so this table
-            // self-heals and won't need regenerating again next time.
-            const regenerateQueryFromDescription = async (entry, onProgress) => {
-                const description = (entry.descriptionText || "").trim();
-                if (!description) {
-                    throw new Error("This table's refresh tag can't be read, and it has no description to rebuild the query from — please re-download it.");
-                }
-                if (onProgress) onProgress("Refresh tag unreadable — rebuilding the query from the table's description…");
-                const result = await generateSql(description, onProgress);
-                if (!result.sql) {
-                    throw new Error(result.explanation || "Couldn't rebuild this table's query from its description — please re-download it.");
-                }
-                return {
-                    sql: result.sql,
-                    user_query: description,
-                    tables_used: result.tables_used || [],
-                    title: result.title || entry.title,
-                    description: result.description || description,
-                };
-            };
-            // What every Refresh/Modify/Add-column/data-row-edit/rename flow below should call
-            // instead of decryptRefreshToken directly — only the "couldn't be read" case (400)
-            // falls through to regeneration; a wrong-account 403 or a plain network failure surface
-            // exactly as before, since regenerating the query wouldn't fix either of those.
-            const decryptRefreshTokenWithFallback = async (entry, onProgress) => {
-                try {
-                    return await decryptRefreshToken(entry.token);
-                } catch (e) {
-                    if (e.status !== 400) throw e;
-                    console.warn("[QueryData] refresh tag couldn't be decrypted — regenerating the query from the table's description instead:", e.message);
-                    return await regenerateQueryFromDescription(entry, onProgress);
-                }
-            };
-
             // Renders the full trajectory for one question — every LLM call's exact system/user
             // prompt and exact raw output, every deterministic lookup's SQL and result, in the
             // order they actually happened, plus how it all ended — into plain text for the saved
@@ -4520,8 +5247,7 @@ function applyRibbonView() {
             };
 
             // Escapes text pulled from the query result (column names) before it goes into any
-            // rendered HTML — not hardcoded, so treated as untrusted. Used broadly (Your Tables
-            // list, modals, the selection-grid echo below), not just one flow.
+            // rendered HTML — not hardcoded, so treated as untrusted.
             const escapeHtml = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
             // ── Using a hand-built Excel selection as the query input ──
@@ -4538,21 +5264,171 @@ function applyRibbonView() {
             let cachedGridSelectionAnchor = null; // {sheetName, row, col, rows, cols} — the detected selection's top-left + full extent — frozen into gridAnchor at Download-click time
             let cachedGridTextRows = null; // the raw 2D cell text — what the code-side skeleton resolver (below) classifies, cell by cell
             let lastSeenGridSelectionAddress = undefined; // undefined = never checked yet; "" counts as a real "no address" result
-            let gridQueryUserOverride = false; // true after "Type a request instead", until the selection actually changes again
             const GRID_SELECTION_MAX_CELLS = 500;
-            const GRID_SELECTION_MAX_ROWS = 20;
-            const GRID_SELECTION_MAX_COLS = 10;
+            // ── Skeleton preview — resolved ONCE per qualifying selection (see computeSkeletonPreview
+            // below, kicked off from checkGridSelectionOnce), not on every poll tick: tryGridSkeletonFastPath
+            // can do real network/LLM work (company-name resolution, schema loads, and a genuine LLM
+            // call on its own fallback path), so this only ever runs again when the selection's
+            // ADDRESS actually changes — the same guard checkGridSelectionOnce already applies before
+            // calling it. #dtSkeletonInsertBtn (shown via setInsertReady once this is READY) reuses
+            // this cached result directly instead of re-resolving blind, so what gets written always
+            // matches exactly what was previewed.
+            let skeletonPreviewResult = null; // the resolved {sql, metrics, companies, ...} once ready, or null
+            let skeletonPreviewAddress = null; // which selection address skeletonPreviewResult belongs to
+            let skeletonPreviewSeq = 0; // discards a stale resolution if the selection moved again mid-flight
+            const renderSkeletonPreview = (state, text) => {
+                if (!skeletonPreviewEl || !skeletonPreviewTextEl) return;
+                if (!state) { skeletonPreviewEl.style.display = "none"; return; }
+                skeletonPreviewEl.className = `dt-skeleton-preview ${state}`;
+                skeletonPreviewTextEl.textContent = text;
+                skeletonPreviewEl.style.display = "flex";
+            };
+            // The actual mini TABLE preview — replaces Formula (collapsed via updateFormulaCollapse,
+            // skeletonTablePreviewActive) rather than the plain text box above, once a grid resolves
+            // cleanly enough for buildFormulaGrid/buildFormulaGridPivoted to produce real
+            // columns/rows. Reuses those two builders verbatim (same shape that will actually get
+            // WRITTEN — collapsed single-company column, pivoted layout, etc.) rather than a second,
+            // separate "what does this look like" guess. A cell whose value is a live formula shows a
+            // small "ƒx" badge (the formula text itself is a technical detail for a preview, not
+            // something worth rendering raw) with the real formula as its title/tooltip; a plain
+            // label (company/period) renders as-is.
+            const renderSkeletonPreviewTable = (grid) => {
+                if (!skeletonPreviewTableEl) return;
+                if (!grid) { skeletonPreviewTableEl.style.display = "none"; skeletonPreviewTableEl.innerHTML = ""; return; }
+                const theadCells = grid.columns.map((c) => `<th>${escapeHtml(c.name)}</th>`).join("");
+                const bodyRows = grid.rows.map((row) => {
+                    const cells = row.map((val, i) => {
+                        const isNumberCol = grid.columns[i] && grid.columns[i].type === "number";
+                        const isFormula = typeof val === "string" && val.startsWith("=");
+                        const display = isFormula ? `<span class="dt-skeleton-preview-fx" title="${escapeHtml(val)}">ƒx</span>` : escapeHtml(val);
+                        return `<td${isNumberCol ? ' class="num"' : ""}>${display}</td>`;
+                    }).join("");
+                    return `<tr>${cells}</tr>`;
+                }).join("");
+                skeletonPreviewTableEl.innerHTML = `<table><thead><tr>${theadCells}</tr></thead><tbody>${bodyRows}</tbody></table>`;
+                skeletonPreviewTableEl.style.display = "block";
+            };
+            // Standalone — a skeleton drawn directly in the sheet needs no AI/chat involvement, so
+            // it gets its OWN button (see its own HTML comment) rather than relabeling the
+            // composer's shared Send button into double duty the way this used to.
+            const dtSkeletonInsertBtn = document.getElementById("dtSkeletonInsertBtn");
+            const dtSkeletonInsertStatusEl = document.getElementById("dtSkeletonInsertStatus");
+            const setInsertReady = (ready) => {
+                if (dtSkeletonInsertBtn) dtSkeletonInsertBtn.style.display = ready ? "" : "none";
+                if (!ready && dtSkeletonInsertStatusEl) dtSkeletonInsertStatusEl.style.display = "none";
+            };
+            // Writes the already-previewed skeleton grid (skeletonPreviewResult) straight to the
+            // sheet, at the exact selection it was previewed from (cachedGridSelectionAnchor) —
+            // same build/write calls generateBtn's own grid-skeleton branch makes, just without
+            // ANY of that path's chat involvement (no dockChatPanel, no bridge.narrate, no intent
+            // triage): this is a direct, local action, reported with its own status line instead
+            // of a chat message.
+            const insertSkeletonFormulaGrid = async () => {
+                if (!skeletonPreviewResult || !cachedGridSelectionAnchor) return;
+                const result = skeletonPreviewResult;
+                const gridAnchor = cachedGridSelectionAnchor;
+                if (dtSkeletonInsertBtn) dtSkeletonInsertBtn.disabled = true;
+                if (dtSkeletonInsertStatusEl) dtSkeletonInsertStatusEl.style.display = "none";
+                try {
+                    // Clear the user's FULL original skeleton rectangle first — same reasoning as
+                    // generateBtn's own comment on this exact call: a skeleton drawn wider than
+                    // the table that actually gets written would otherwise leave unused header
+                    // cells behind.
+                    if (gridAnchor.rows && gridAnchor.cols) {
+                        await clearTableBlock(gridAnchor.sheetName, gridAnchor.row - 1, gridAnchor.col - 1, gridAnchor.rows, gridAnchor.cols);
+                    }
+                    const grid = result.pivotSpec
+                        ? buildFormulaGridPivoted(result, result.pivotSpec, gridAnchor)
+                        : buildFormulaGrid(result, gridAnchor);
+                    if (!grid) throw new Error("Couldn't build formulas for this layout.");
+                    const singleCompanyInfo = grid.singleCompanyName ? { companyName: grid.singleCompanyName } : null;
+                    const metaRows = QD_TABLE_META_ROWS + (singleCompanyInfo ? 1 : 0);
+                    const neededRows = grid.rows.length + 1 + metaRows; // +1 header
+                    const sheetName = await writeDownloadedTableToSheet(grid, gridAnchor, singleCompanyInfo, true);
+                    const whereText = `"${sheetName}" at ${blockAddress(gridAnchor.row, gridAnchor.col, neededRows, grid.columns.length)} (overwrote the table you selected)`;
+                    if (dtSkeletonInsertStatusEl) {
+                        dtSkeletonInsertStatusEl.className = "fb-status ok";
+                        dtSkeletonInsertStatusEl.textContent = `Wrote ${grid.rows.length} live formula row${grid.rows.length === 1 ? "" : "s"} to ${whereText}.`;
+                        dtSkeletonInsertStatusEl.style.display = "block";
+                    }
+                } catch (e) {
+                    console.warn("[QueryData] skeleton insert failed:", e.message);
+                    if (dtSkeletonInsertStatusEl) {
+                        dtSkeletonInsertStatusEl.className = "fb-status err";
+                        dtSkeletonInsertStatusEl.textContent = e.message || "Couldn't insert the formulas — please try again.";
+                        dtSkeletonInsertStatusEl.style.display = "block";
+                    }
+                } finally {
+                    if (dtSkeletonInsertBtn) dtSkeletonInsertBtn.disabled = false;
+                    exitGridQueryMode();
+                }
+            };
+            if (dtSkeletonInsertBtn) dtSkeletonInsertBtn.addEventListener("click", insertSkeletonFormulaGrid);
+            const computeSkeletonPreview = async (address, textRows, fallbackQueryText) => {
+                const seq = ++skeletonPreviewSeq;
+                skeletonPreviewResult = null;
+                skeletonPreviewAddress = null;
+                setInsertReady(false);
+                skeletonTablePreviewActive = false;
+                updateFormulaCollapse();
+                renderSkeletonPreviewTable(null);
+                renderSkeletonPreview("loading", "Reading your selection…");
+                let result = null;
+                try {
+                    result = await tryGridSkeletonFastPath(textRows, fallbackQueryText, () => {});
+                } catch (e) {
+                    console.warn("[QueryData] skeleton preview failed:", e.message);
+                }
+                if (seq !== skeletonPreviewSeq) return; // a newer selection already superseded this
+                if (!result || !result.sql) {
+                    renderSkeletonPreview("err", (result && result.explanation) || "Couldn't make sense of this layout yet — press Send to try the full request anyway.");
+                    return;
+                }
+                skeletonPreviewResult = result;
+                skeletonPreviewAddress = address;
+                // Dummy writeTarget — only ever used here to shape a multi-company row's company-cell
+                // REFERENCE (e.g. "A2"), never actually written anywhere, so where it points doesn't
+                // matter for a preview; the real target is computed fresh at Insert time regardless.
+                const grid = result.pivotSpec
+                    ? buildFormulaGridPivoted(result, result.pivotSpec, { row: 1, col: 1 })
+                    : buildFormulaGrid(result, { row: 1, col: 1 });
+                if (grid) {
+                    renderSkeletonPreview(null); // the table itself replaces this text box
+                    renderSkeletonPreviewTable(grid);
+                    skeletonTablePreviewActive = true;
+                    updateFormulaCollapse();
+                    // Same room-handover FormulaGPT already gives Formula Picker once a metric is
+                    // picked — a resolved skeleton preview takes over Formula's own vacated space
+                    // exactly the same way, so it hands the teaser's space over too. See
+                    // triggerFormulaGptAutoCollapse's own declaration for why this is a hook.
+                    if (triggerFormulaGptAutoCollapse) triggerFormulaGptAutoCollapse();
+                } else {
+                    // Resolved, but not into a shape buildFormulaGrid can build (e.g. a ranking/
+                    // aggregate request) — no table to show, fall back to the plain-text summary.
+                    renderSkeletonPreview("ready", result.description || result.title || "Ready — press Insert to write the formulas.");
+                }
+                setInsertReady(true);
+            };
             const exitGridQueryMode = () => {
                 gridQueryModeActive = false;
                 cachedGridQueryText = null;
                 cachedGridSelectionAnchor = null;
                 cachedGridTextRows = null;
-                selectionField.style.display = "none";
-                queryField.style.display = "flex";
+                skeletonPreviewSeq++; // invalidate any in-flight computeSkeletonPreview for the selection just left
+                skeletonPreviewResult = null;
+                skeletonPreviewAddress = null;
+                renderSkeletonPreview(null);
+                renderSkeletonPreviewTable(null);
+                skeletonTablePreviewActive = false;
+                updateFormulaCollapse();
+                setInsertReady(false);
                 // Download itself is the one shared submit button for both modes — only the hint
                 // next to it toggles, since "or select headers" doesn't make sense once a selection
-                // is already the thing actually being used.
+                // is already the thing actually being used. The composer's own selection indicator
+                // (#dtComposerSelection) is independent of this — it keeps reflecting whatever's
+                // currently selected regardless of whether it qualifies as a skeleton.
                 queryHint.style.display = "flex";
+                updateInputModeDimming();
             };
 
             // Wraps the selected grid's own text in a short framing sentence rather than hand-
@@ -4567,53 +5443,6 @@ function applyRibbonView() {
                 + "layout as the request: infer the named compan(ies), the requested metrics, and the "
                 + "period/year range it implies.\n\n" + gridText;
 
-            // Renders an honest echo of what's actually selected (real address + real cell text,
-            // capped) — not a pretend semantic breakdown, since the real interpretation only
-            // happens once the request is actually sent. Reuses the same .dt-grid/colLetter/
-            // escapeHtml styling convention as the rest of this view.
-            const renderGridSelectionPreview = (addressLabel, rowIndex, colIndex, textRows) => {
-                selectionAddressEl.textContent = addressLabel;
-                const shownRows = Math.min(textRows.length, GRID_SELECTION_MAX_ROWS);
-                const shownCols = Math.min(textRows[0]?.length || 0, GRID_SELECTION_MAX_COLS);
-                const extraRows = textRows.length - shownRows;
-                const extraCols = (textRows[0]?.length || 0) - shownCols;
-                let html = '<div class="dt-grid-wrap"><table class="dt-grid"><thead><tr><th class="dt-grid-corner"></th>';
-                for (let c = 0; c < shownCols; c++) html += `<th class="dt-grid-colhead">${colLetter(colIndex + c + 1)}</th>`;
-                if (extraCols > 0) html += `<th class="dt-grid-colhead">+${extraCols} more</th>`;
-                html += "</tr></thead><tbody>";
-                for (let r = 0; r < shownRows; r++) {
-                    html += `<tr><th class="dt-grid-rowhead">${rowIndex + r + 1}</th>`;
-                    for (let c = 0; c < shownCols; c++) html += `<td>${escapeHtml(textRows[r][c] ?? "")}</td>`;
-                    if (extraCols > 0) html += `<td class="dt-grid-placeholder">…</td>`;
-                    html += "</tr>";
-                }
-                if (extraRows > 0) {
-                    html += `<tr><th class="dt-grid-rowhead">+${extraRows}</th>`;
-                    for (let c = 0; c < shownCols; c++) html += `<td class="dt-grid-placeholder">⋮</td>`;
-                    if (extraCols > 0) html += `<td class="dt-grid-placeholder">⋮</td>`;
-                    html += "</tr>";
-                }
-                html += "</tbody></table></div>";
-                selectionGridEl.innerHTML = html;
-            };
-
-            // True when the given range overlaps ANY table this feature has already scanned (see
-            // scanYourTables/lastScannedTables) — a selection on top of one of those is a real,
-            // already-downloaded RESULT, not raw material someone laid out by hand to describe a
-            // NEW query, so it must never be offered up through the grid-selection fast path (see
-            // checkGridSelectionOnce). Same rectangle-overlap test, generalized from the single-cell
-            // containment check checkYtSelectionOnce already uses to find which table owns one cell.
-            const selectionOverlapsKnownTable = (sheetName, rowIndex, colIndex, rowCount, columnCount) => {
-                const selR0 = rowIndex, selR1 = rowIndex + rowCount - 1;
-                const selC0 = colIndex, selC1 = colIndex + columnCount - 1;
-                return lastScannedTables.some((t) => {
-                    if (t.sheetName !== sheetName) return false;
-                    const tR0 = t.titleRow, tR1 = t.titleRow + t.metaRows + t.tableRows - 1;
-                    const tC0 = t.titleCol, tC1 = t.titleCol + Math.max(1, t.tableCols) - 1;
-                    return selR0 <= tR1 && selR1 >= tR0 && selC0 <= tC1 && selC1 >= tC0;
-                });
-            };
-
             // One poll tick: a CHEAP read first (address/dimensions only); the fuller .text read
             // only runs when the address actually changed, so steady-state cost is one tiny
             // Excel.run regardless of how long a selection sits still.
@@ -4627,7 +5456,7 @@ function applyRibbonView() {
                 // simply accumulated on Office.js's one request channel. That backlog is what made
                 // every unrelated Excel operation progressively slower the longer the pane stayed
                 // open (a 1-round-trip scan measured at 17s, then 76s). See qdWithExcelBusy.
-                if (gridSelectionPollInFlight || qdExcelBusy > 0) return;
+                if (gridSelectionPollInFlight || qdExcelBusy > 0 || qdPaneHidden) return;
                 gridSelectionPollInFlight = true;
                 try {
                     let address = null, rowIndex = 0, colIndex = 0, rowCount = 0, columnCount = 0, isSingleMergedCell = false, sheetName = null;
@@ -4656,24 +5485,27 @@ function applyRibbonView() {
                     });
                     if (address === lastSeenGridSelectionAddress) return; // nothing moved — skip the fuller work entirely
                     lastSeenGridSelectionAddress = address;
-                    gridQueryUserOverride = false; // a genuinely new selection always re-enables auto-detection
+
+                    // Composer's own "what's selected" readout — same wording DataGPT's indicator
+                    // uses, and shown for ANY selection (not just ones that qualify as a skeleton
+                    // below), so it stays purely informational.
+                    const cellPart = address.includes("!") ? address.slice(address.indexOf("!") + 1) : address;
+                    const isSingularCell = (rowCount === 1 && columnCount === 1) || isSingleMergedCell;
+                    renderDtComposerSelection(isSingularCell ? `Cell ${cellPart} selected` : `Cell range ${cellPart} selected`);
+
+                    // A single clicked cell feeds the Formula picker, when one of its fields is
+                    // armed — before the skeleton checks below, which discard single cells outright.
+                    // Awaited (not fired off) so its own Excel read stays inside this tick's
+                    // in-flight guard rather than racing the next one.
+                    if (isSingularCell && dtFnCaptureArmedCell) await dtFnCaptureArmedCell(sheetName, cellPart);
 
                     const tooSmall = (rowCount <= 1 && columnCount <= 1) || isSingleMergedCell;
                     const tooBig = rowCount * columnCount > GRID_SELECTION_MAX_CELLS;
                     if (tooSmall || tooBig) { if (gridQueryModeActive) exitGridQueryMode(); return; }
 
-                    // A selection sitting on an already-downloaded table (e.g. the user just clicked
-                    // into its data to look at it, or to use the Your Tables selection highlight —
-                    // see checkYtSelectionOnce) is never a hand-built skeleton — exit before the
-                    // heavier second sync below even runs.
-                    if (selectionOverlapsKnownTable(sheetName, rowIndex, colIndex, rowCount, columnCount)) {
-                        if (gridQueryModeActive) exitGridQueryMode();
-                        return;
-                    }
-
                     // (The autofill dropdown itself follows the ACTIVE sheet — see
-                    // moveAutofillToSheet, driven by checkYtSelectionOnce's own poll below, not this
-                    // one — so there's nothing to do here for it specifically.)
+                    // moveAutofillToSheet, driven by the active-sheet poll below, not this one — so
+                    // there's nothing to do here for it specifically.)
                     let textRows = null;
                     await Excel.run(async (context) => {
                         const range = context.workbook.getSelectedRange();
@@ -4684,11 +5516,6 @@ function applyRibbonView() {
                     const hasContent = (textRows || []).some((row) => row.some((v) => v !== "" && v !== null && v !== undefined));
                     if (!hasContent) { if (gridQueryModeActive) exitGridQueryMode(); return; } // blank selection — the OTHER existing use (picking a destination), leave it alone
 
-                    // gridQueryUserOverride is already guaranteed false here — it was just reset
-                    // above the moment this address was recognized as NEW; it only ever matters
-                    // for the early return above (an unchanged address never reaches this point at
-                    // all), which is exactly what keeps "Type a request instead" in effect for as
-                    // long as the user hasn't actually picked a different selection.
                     const gridText = textRows.map((row) => row.join(" | ")).join("\n");
                     cachedGridQueryText = describeGridSelectionAsQuery(address, gridText);
                     // rows/cols (the FULL selected skeleton's own extent) ride along here too — not
@@ -4699,12 +5526,18 @@ function applyRibbonView() {
                     cachedGridSelectionAnchor = { sheetName, row: rowIndex + 1, col: colIndex + 1, rows: rowCount, cols: columnCount };
                     cachedGridTextRows = textRows;
                     gridQueryModeActive = true;
-                    renderGridSelectionPreview(address, rowIndex, colIndex, textRows);
-                    selectionField.style.display = "flex";
-                    queryField.style.display = "none";
                     queryHint.style.display = "none";
                     closeQueryHintPreviewNow(); // no dangling-open popover once its own trigger is hidden
+                    updateInputModeDimming();
+                    // Fire-and-forget — this poll tick doesn't wait on it (tryGridSkeletonFastPath can
+                    // take a real network/LLM round trip), it just kicks the preview off and moves on;
+                    // the result lands via renderSkeletonPreview/setInsertReady whenever it resolves.
+                    computeSkeletonPreview(address, textRows, cachedGridQueryText);
                 } catch (e) {
+                    // getSelectedRange() throws outright for a multi-area (Ctrl+click) selection —
+                    // nothing valid to show in that case, so the indicator just hides rather than
+                    // showing something wrong or stale (same as DataGPT's own indicator).
+                    renderDtComposerSelection(null);
                     console.warn("[QueryData] couldn't read the current selection for grid-query detection:", e.message);
                 } finally {
                     gridSelectionPollInFlight = false;
@@ -4725,106 +5558,53 @@ function applyRibbonView() {
                 gridSelectionPollTimer = null;
             };
 
-            // ── Your Tables: surface whichever table the current Excel selection belongs to ──
-            // The inverse of the grid-selection poll above — runs continuously alongside it
-            // (neither pauses when its own tab isn't the active one — see switchDtTab), a separate
-            // dedicated poll rather than overloading checkGridSelectionOnce (which is purpose-built
-            // for the Download composer's build-a-query-from-a-selection feature and carries a lot
-            // of logic irrelevant here). Selecting ANY cell inside a known table auto-switches to
-            // the Your Tables tab if Download Data is the one currently showing — same "don't make
-            // the user go find it" reasoning notifyPendingChangeDetected already applies for a
-            // detected EDIT, just triggered by selection instead. Also gives the matching table a
-            // focus-ring highlight + eyebrow label AND floats it to the top of the list (see
-            // renderYourTablesList) — so it's the first thing visible, with no scrolling needed.
-            // That highlight part is left as-is once the selection moves to a cell outside any known
-            // table, only moving again once a DIFFERENT table's cell is selected — but the tab
-            // switch itself re-fires any time a table cell is selected while NOT already on that
-            // tab, even re-selecting the same table after manually switching back to Download Data.
-            let ytSelectionPollTimer = null;
-            let lastSeenYtSelectionKey = undefined; // undefined = never checked yet
-            let ytSelectionPollInFlight = false;
-            const checkYtSelectionOnce = async () => {
+            // ── Active-sheet poll, for the metric/company autofill dropdown ──
+            // The autofill dropdown follows whichever sheet is currently ACTIVE (see
+            // moveAutofillToSheet) — this just notices when the active sheet changes and moves it
+            // there. Deliberately its own tiny poll rather than folded into checkGridSelectionOnce
+            // (which is purpose-built for the Download composer's build-a-query-from-a-selection
+            // feature and carries a lot of logic irrelevant here).
+            let activeSheetPollTimer = null;
+            let lastSeenActiveSheetName = undefined; // undefined = never checked yet
+            let activeSheetPollInFlight = false;
+            const checkActiveSheetOnce = async () => {
                 // Same two guards, same reason, as checkGridSelectionOnce above — see its comment.
-                // This one mattered even more: it ALSO fires moveAutofillToSheet on every tick,
-                // so a pileup here could stack validation applies across 104,000 cells on top of
-                // each other.
-                if (ytSelectionPollInFlight || qdExcelBusy > 0) return;
-                ytSelectionPollInFlight = true;
+                // This one mattered even more: it fires moveAutofillToSheet on every tick, so a
+                // pileup here could stack validation applies across 104,000 cells on top of each
+                // other.
+                if (activeSheetPollInFlight || qdExcelBusy > 0 || qdPaneHidden) return;
+                activeSheetPollInFlight = true;
                 try {
-                    let sheetName, row, col;
+                    let sheetName;
                     await Excel.run(async (context) => {
                         const sheet = context.workbook.worksheets.getActiveWorksheet();
                         sheet.load("name");
-                        const range = context.workbook.getSelectedRange();
-                        range.load("rowIndex,columnIndex");
                         await context.sync();
-                        sheetName = sheet.name; row = range.rowIndex; col = range.columnIndex;
+                        sheetName = sheet.name;
                     });
-                    // Fire-and-forget, ahead of the early-return below — this needs to run on every
-                    // tick the ACTIVE SHEET could plausibly have just changed on, not only on a
-                    // genuinely new cell-level key, and it no-ops instantly if the sheet hasn't
-                    // actually changed (see moveAutofillToSheet's own guard), so there's no real
-                    // cost to calling it this often.
+                    if (sheetName === lastSeenActiveSheetName) return; // no-ops instantly via moveAutofillToSheet's own guard too, but skip the call entirely when nothing changed
+                    lastSeenActiveSheetName = sheetName;
                     moveAutofillToSheet(sheetName);
-                    const key = `${sheetName}::${row}::${col}`;
-                    if (key === lastSeenYtSelectionKey) return;
-                    lastSeenYtSelectionKey = key;
-                    // Same "is this address inside this table's footprint" containment math
-                    // wouldMoveOverwriteContent/wouldRefreshOverwriteOtherContent already use,
-                    // inverted here to search across every known table instead of checking one.
-                    const found = lastScannedTables.find((t) =>
-                        t.sheetName === sheetName && row >= t.titleRow && row < t.titleRow + t.metaRows + t.tableRows
-                        && col >= t.titleCol && col < t.titleCol + Math.max(1, t.tableCols));
-                    if (found) {
-                        // Selecting a cell that belongs to a table is as much a reason to see Your
-                        // Tables as an actual edit already is (see notifyPendingChangeDetected's own
-                        // switchDtTab call) — not gated on tableWatchKey below, since re-selecting the
-                        // SAME table after having switched back to Download Data in the meantime
-                        // should still switch over again.
-                        if (activeDtTab !== "yourtables") switchDtTab("yourtables");
-                        if (tableWatchKey(found) !== highlightedTableKey) {
-                            highlightedTableKey = tableWatchKey(found);
-                            await renderYourTablesList(lastScannedTables);
-                            // The newly-selected card is now the FIRST row (see renderYourTablesList) —
-                            // scroll the list itself back to the top rather than scrollIntoView on the
-                            // card, since that card's own position already guarantees it's there; this
-                            // only matters if the user had scrolled further down before selecting it.
-                            yourTablesList.scrollTop = 0;
-                        }
-                    }
                 } catch (e) {
-                    console.warn("[QueryData] couldn't read the current selection for the Your Tables highlight:", e.message);
+                    console.warn("[QueryData] couldn't read the active sheet for the autofill dropdown:", e.message);
                 } finally {
-                    ytSelectionPollInFlight = false;
+                    activeSheetPollInFlight = false;
                 }
             };
-            let ytSelectionPollStartTimer = null;
-            const startYtSelectionPolling = () => {
-                if (ytSelectionPollTimer || ytSelectionPollStartTimer) return;
+            let activeSheetPollStartTimer = null;
+            const startActiveSheetPolling = () => {
+                if (activeSheetPollTimer || activeSheetPollStartTimer) return;
                 // Deliberately offset by half the interval from the grid poll above, so the two
                 // land in the gaps between each other instead of both firing on the same tick and
-                // queueing two round trips back to back. The handle is kept so stopping during
-                // this initial delay can cancel it, rather than letting the interval come up
-                // afterwards with nothing left to stop it.
-                ytSelectionPollStartTimer = setTimeout(() => {
-                    ytSelectionPollStartTimer = null;
-                    ytSelectionPollTimer = setInterval(checkYtSelectionOnce, QD_SELECTION_POLL_MS);
+                // queueing two round trips back to back.
+                activeSheetPollStartTimer = setTimeout(() => {
+                    activeSheetPollStartTimer = null;
+                    activeSheetPollTimer = setInterval(checkActiveSheetOnce, QD_SELECTION_POLL_MS);
                 }, Math.floor(QD_SELECTION_POLL_MS / 2));
             };
-            const stopYtSelectionPolling = () => {
-                clearTimeout(ytSelectionPollStartTimer);
-                ytSelectionPollStartTimer = null;
-                clearInterval(ytSelectionPollTimer);
-                ytSelectionPollTimer = null;
-            };
 
-            selectionUseTextBtn.addEventListener("click", () => {
-                gridQueryUserOverride = true;
-                exitGridQueryMode();
-                queryInput.focus();
-            });
             startGridSelectionPolling();
-            startYtSelectionPolling(); checkYtSelectionOnce(); // both panels are visible together now, not gated by a tab switch
+            startActiveSheetPolling(); checkActiveSheetOnce();
 
             // ── Skeleton-grid fast path — skip the LLM when every value is already known ──
             // When the user built the skeleton using the metric/company autofill dropdown
@@ -4861,8 +5641,7 @@ function applyRibbonView() {
             // for an annual token) or { rangeCount } — or null if it matches none of these. Used
             // for the fast, local pass (classifyGridCells), as the exact shape the scoped LLM call
             // (resolveGridTermsOrNull) is asked to produce for a period phrase these patterns don't
-            // cover, AND as the fallback reader for a period a user typed by hand directly into a
-            // table's Period column (see runTableDataRowEdit's periodChange branch).
+            // cover.
             //
             // Accepts the ways people actually write a quarter rather than one canonical spelling:
             // q4fy26, Q4 FY26, Q4-FY2026, 4QFY26, FY26Q4, Q4 2026, 2026-Q4, Quarter 4 FY26,
@@ -5258,6 +6037,18 @@ function applyRibbonView() {
                     console.log("[QueryData] skeleton-grid resolution:", resolution);
                     const period = resolvePeriodValuesToPeriodPlan(resolution.periodValues);
                     let plan = { feasible: true, companies: resolution.companies, period, metrics: resolution.metrics };
+                    // Same correction/verification step generateSql's own typed-text path uses — see
+                    // resolvePlanCompanies' own comment. Needed here too: a misspelled company term
+                    // that classifyGridCells couldn't exact-match locally falls to
+                    // resolveUnresolvedGridTerms' own scoped LLM guess, which is itself never
+                    // verified against the real company list before this point.
+                    if (plan.companies && plan.companies.length) {
+                        const { resolved, unresolved } = await resolvePlanCompanies(plan.companies);
+                        if (unresolved.length) {
+                            return { sql: "", tables_used: [], explanation: `Couldn't find a company matching "${unresolved.join('", "')}" — check the spelling?` };
+                        }
+                        plan.companies = resolved;
+                    }
                     let tables = deriveTablesFromPlan(plan);
                     if (!tables) { console.warn("[QueryData] skeleton-grid: no usable metrics resolved at all — falling back to the full LLM flow.", plan); return null; }
                     if (onProgress) onProgress(`Reading schema for ${tables.join(", ")}…`);
@@ -5340,7 +6131,12 @@ function applyRibbonView() {
                                 const literal = literalPeriodValue(anchorMeta.period, { fiscalYear: pc.fiscalYear, quarterNo: pc.quarter });
                                 if (literal === null) return null;
                                 const label = `${pc.metricColumn} ${pc.quarter ? `Q${pc.quarter} FY${String(pc.fiscalYear).slice(-2)}` : pc.fiscalYear}`;
-                                return { metricColumn: pc.metricColumn, literal, label };
+                                // fiscalYear/quarterNo (not just the literal DB string) are carried
+                                // through too — buildFormulaGridPivoted needs the plain numbers to
+                                // build a GIA.GET() formula per cell; pivotQueryResultByPeriodColumns
+                                // itself only ever reads metricColumn/literal/label, so this is purely
+                                // additive.
+                                return { metricColumn: pc.metricColumn, literal, label, fiscalYear: pc.fiscalYear, quarterNo: pc.quarter };
                             });
                             if (resolvedColumns.every(Boolean)) {
                                 pivotSpec = { pivotColumns: resolvedColumns, companies: plan.companies };
@@ -5418,14 +6214,22 @@ function applyRibbonView() {
             // cell" are gone entirely now that there's no picker to choose them from.
             generateBtn.addEventListener("click", async () => {
                 const clickTime = performance.now(); // see the "[QueryData timing]" breakdown in extractPlanAndTables/generateSql
-                runYourTablesScan(); // fire-and-forget — never blocks the actual generate flow
                 // Typed text always wins when present — same priority as before this feature
                 // existed. Otherwise, if a qualifying grid selection is active (see
                 // startGridSelectionPolling above), its synthesized description is used instead.
                 const typedQuery = queryInput.value.trim();
-                const usingGridSelection = !typedQuery && gridQueryModeActive && !!cachedGridQueryText;
+                // A selection whose preview is already READY is #dtSkeletonInsertBtn's own job now
+                // (insertSkeletonFormulaGrid) — excluded here so Send never duplicates that insert
+                // through the chat/narrate path. Still treated as a grid selection when the preview
+                // isn't ready yet (still loading, failed, or the address moved since) — exactly the
+                // fallback live-resolve this already did before that dedicated button existed.
+                const hasReadyPreview = !!skeletonPreviewResult && skeletonPreviewAddress === lastSeenGridSelectionAddress;
+                const usingGridSelection = !typedQuery && gridQueryModeActive && !!cachedGridQueryText && !hasReadyPreview;
                 const userQuery = typedQuery || (usingGridSelection ? cachedGridQueryText : "");
                 if (!userQuery) { showDtStatus("err", "Describe what data you want, or select a table in the sheet first."); return; }
+                const bridge = window.__goiaChatBridge;
+                if (!bridge) { showDtStatus("err", "Chat isn't available right now."); return; }
+                if (bridge.isBusy()) { showDtStatus("err", "Still working on the last message — please wait."); return; }
                 // Frozen now, not re-read later — by the time the write target is actually
                 // resolved below, the user may have clicked elsewhere in the sheet, but this
                 // result should still land in the exact spot that was selected when Download was
@@ -5433,55 +6237,111 @@ function applyRibbonView() {
                 const gridAnchor = usingGridSelection ? cachedGridSelectionAnchor : null;
                 generateBtn.disabled = true;
                 showDtStatus("", "");
-                // The label lives in its own <span> (alongside the button's download icon <svg>) —
-                // setting .textContent on the button itself would wipe out that icon too.
-                const generateBtnLabel = generateBtn.querySelector("span");
-                const originalLabel = generateBtnLabel ? generateBtnLabel.textContent : generateBtn.textContent;
-                if (generateBtnLabel) generateBtnLabel.textContent = "Thinking…"; else generateBtn.textContent = "Thinking…";
+                queryInput.value = "";
+                updateInputModeDimming();
+                // Every send opens a real, ongoing chat thread in place of Formula — see
+                // dockChatPanel's own comment. From here on, progress/results are narrated into
+                // that thread (bridge.narrate) rather than this composer's own status line, which
+                // is now hidden.
+                dockChatPanel();
                 let outcome = "(ended before any outcome was recorded)";
                 try {
                     // Intent triage — only for a TYPED question, never the grid-selection fast path
                     // (a hand-built skeleton of cells isn't a "question" this check applies to). A
-                    // request this feature was never going to be able to satisfy (it can only build
-                    // a brand-new table, never touch an existing one) gets handed to DataGPT instead
-                    // of burning a Stage 1+2a call — or worse, the full fallback SQL-writer — on
-                    // something doomed to come back infeasible anyway.
+                    // request the deterministic table-building pipeline was never going to satisfy
+                    // (it can only build a brand-new table, never touch an existing one) routes to
+                    // the real Excel tool-calling loop instead — in THIS same now-docked thread,
+                    // Excel-only for this turn (see excelOnlyNextTurn in setupAskClaudeChat), not by
+                    // navigating away to the standalone DataGPT view the way this used to.
                     if (typedQuery) {
-                        showDtStatus("", "Checking the best way to handle this…");
                         const intent = await classifyQueryDataIntent(typedQuery);
                         if (intent === "modify" || intent === "both") {
-                            outcome = `DELEGATED to DataGPT — intent triage classified this as "${intent}".`;
-                            await delegateToDataGpt(typedQuery);
-                            return; // the page is about to navigate to the "datagpt" view
+                            outcome = `ROUTED to the Excel tool loop — intent triage classified this as "${intent}".`;
+                            bridge.sendExcelOnly(userQuery); // narrates the user's own message itself, via send()'s normal flow
+                            return;
                         }
                     }
+                    // Table-building path — reuses the exact pipeline built earlier this session,
+                    // just narrated into the chat thread instead of a quiet direct write + status
+                    // line. bridge.narrate here (not send()) since this never goes through the LLM
+                    // tool-calling loop at all.
+                    bridge.narrate("user", userQuery);
+                    bridge.narrate("assistant", "Building your table…");
                     // Skeleton-grid fast path first — only when this query came from a selected
                     // grid (never for typed text) — falling through to the ordinary whole-grid LLM
-                    // flow for anything it can't place even with its own scoped LLM assist.
+                    // flow for anything it can't place even with its own scoped LLM assist. (A
+                    // selection whose preview was already READY never reaches here at all — see
+                    // usingGridSelection's own comment above — so this is always a fresh resolve.)
                     const result = (usingGridSelection && cachedGridTextRows
-                        ? await tryGridSkeletonFastPath(cachedGridTextRows, userQuery, (step) => showDtStatus("", step))
-                        : null) || await generateSql(userQuery, (step) => showDtStatus("", step), clickTime);
+                        ? await tryGridSkeletonFastPath(cachedGridTextRows, userQuery, () => {})
+                        : null) || await generateSql(userQuery, () => {}, clickTime);
                     if (!result.sql) {
                         outcome = `DECLINED — no SQL generated.\nExplanation: ${result.explanation || "(none given)"}`;
-                        showDtStatus("err", result.explanation || "Couldn't find data matching that request in the catalog.");
+                        bridge.narrate("assistant", result.explanation || "Couldn't find data matching that request in the catalog.");
                         return;
                     }
+
+                    // A clean company×metric×period shape (no ranking) becomes a table of live
+                    // GIA.GET() formulas instead of a literal-value snapshot — see buildFormulaGrid's
+                    // own comment and the plan file "Table Builder — emit live GIA.GET() formulas
+                    // instead of hardcoded values". `result.metrics` (and friends) are ONLY ever set
+                    // when this came back through buildDeterministicQuery (both generateSql and
+                    // tryGridSkeletonFastPath tag their result with it) — a ranking/aggregate request
+                    // or the freeform-LLM-SQL fallback fall straight through to the unchanged
+                    // literal-value path below, exactly as before this feature existed.
+                    if (Array.isArray(result.metrics) && !result.ranking) {
+                        const periods = expandPeriodToList(result.period, result.anchorIsQuarterly);
+                        if (periods && periods.length) {
+                            const pivotSpec = result.pivotSpec || null;
+                            const collapseCompany = result.companies.length === 1;
+                            const metaRows = QD_TABLE_META_ROWS + (collapseCompany ? 1 : 0);
+                            const dataRowCount = pivotSpec ? result.companies.length : (collapseCompany ? 1 : result.companies.length) * periods.length;
+                            const neededRows = dataRowCount + 1 + metaRows; // +1 header
+                            const neededCols = (collapseCompany ? 0 : 1) + (pivotSpec ? pivotSpec.pivotColumns.length : 1 + result.metrics.length);
+                            let formulaWriteTarget, formulaOverwriteNote = "";
+                            if (gridAnchor) {
+                                // Same "fill the exact spot the user selected" convention the
+                                // literal-value path below uses — see its own comment.
+                                formulaWriteTarget = gridAnchor;
+                                formulaOverwriteNote = " (overwrote the table you selected)";
+                                if (gridAnchor.rows && gridAnchor.cols) {
+                                    await clearTableBlock(gridAnchor.sheetName, gridAnchor.row - 1, gridAnchor.col - 1, gridAnchor.rows, gridAnchor.cols);
+                                }
+                            } else {
+                                const block = (await getSelectedCellAnchor(neededRows, neededCols)) || (await findFirstBlankBlock(neededRows, neededCols));
+                                formulaWriteTarget = { sheetName: block.sheetName, row: block.row, col: block.col };
+                            }
+                            const grid = pivotSpec
+                                ? buildFormulaGridPivoted(result, pivotSpec, formulaWriteTarget)
+                                : buildFormulaGrid(result, formulaWriteTarget);
+                            if (grid) {
+                                const singleCompanyInfo = grid.singleCompanyName ? { companyName: grid.singleCompanyName } : null;
+                                const sheetName = await writeDownloadedTableToSheet(grid, formulaWriteTarget, singleCompanyInfo, true);
+                                const whereText = `"${sheetName}" at ${blockAddress(formulaWriteTarget.row, formulaWriteTarget.col, neededRows, neededCols)}${formulaOverwriteNote}`;
+                                const msg = `Wrote ${grid.rows.length} live formula row${grid.rows.length === 1 ? "" : "s"} to ${whereText}.`;
+                                outcome = `FORMULA TABLE — ${msg}\n(SQL would have been:\n${result.sql})`;
+                                bridge.narrate("assistant", msg);
+                                return;
+                            }
+                            // buildFormulaGrid[Pivoted] declined for some other reason (shouldn't
+                            // normally happen once periods/companies/metrics all checked out above) —
+                            // fall through to the unchanged literal-value path below, reusing the SQL
+                            // already generated.
+                        }
+                    }
+
                     outcome = `SQL generated:\n${result.sql}\n\nExplanation: ${result.explanation || "(none given)"}\nTables used: ${(result.tables_used || []).join(", ") || "(none)"}`;
-                    showDtStatus("", "Running the query…");
                     let data = await runGeneratedSql(result.sql, userQuery, userQuery.slice(0, 31), result.tables_used, result.title, result.description);
-                    // Reshape into a wide table BEFORE title/description/write — see
+                    // Reshape into a wide table BEFORE title/write — see
                     // pivotQueryResultByPeriodColumns's own comment. Only ever set when this came
                     // from the skeleton-grid fast path AND it detected a "periods across columns"
                     // layout; every other request's result passes straight through unchanged.
                     if (result.pivotSpec) data = pivotQueryResultByPeriodColumns(data, result.pivotSpec);
-                    // title/description live on `result` (the SQL-generation output), not the
-                    // execution response — carried on `data` from here on since everything
-                    // downstream (the actual write) only ever deals with one object.
+                    // title lives on `result` (the SQL-generation output), not the execution
+                    // response — carried on `data` from here on since everything downstream (the
+                    // actual write) only ever deals with one object.
                     data.title = result.title || userQuery.slice(0, 60);
-                    data.description = result.description || "";
 
-                    showDtStatus("", "Writing to the sheet…");
-                    showQueryDataOverlay("Writing to the sheet…");
                     // A fresh result with exactly one company across every row gets that company
                     // folded into its own meta row instead of repeating it down every data row —
                     // see detectSingleCompanyColumn/writeDownloadedTableToSheet. Computed once here
@@ -5521,1972 +6381,19 @@ function applyRibbonView() {
                     let msg = `Downloaded ${data.row_count.toLocaleString()} row${data.row_count === 1 ? "" : "s"} to ${whereText}.`;
                     if (data.truncated) msg += ` Stopped at this query's ${data.limit.toLocaleString()}-row limit — more rows exist.`;
                     outcome += `\n\nEXECUTION: success — ${data.row_count} row(s) written to ${whereText}${data.truncated ? " (truncated at the row limit)" : ""}.`;
-                    showDtStatus("ok", msg);
-                    // The request that just got fulfilled shouldn't still be sitting in the box —
-                    // left there, it reads as still pending and invites either a confused re-click
-                    // (downloading the exact same table again) or the user manually deleting it
-                    // themselves before typing the next one. Only on SUCCESS (this line is never
-                    // reached from the catch block below) — a failed request stays in the box so
-                    // the user can edit and retry it rather than retyping from scratch. Harmless
-                    // no-op when this came from a grid selection instead of typed text: usingGridSelection
-                    // is only ever true when queryInput.value was already empty (see its own check above).
-                    queryInput.value = "";
-                    runYourTablesScan(); // the new table just appeared (or changed) — reflect it immediately, fire-and-forget
+                    bridge.narrate("assistant", msg);
                 } catch (e) {
                     console.warn("[QueryData] failed:", e);
                     lightCatalogText = null; catalogEntriesCache = null; clearCatalogCacheStorage(); // don't keep retrying against a possibly-bad cached fetch, in memory or in localStorage
                     outcome = `ERROR: ${e.message}`;
-                    showDtStatus("err", e.message && e.message !== "Failed to fetch" ? e.message : "Something went wrong — please try again.");
+                    bridge.narrate("assistant", "⚠ " + (e.message && e.message !== "Failed to fetch" ? e.message : "Something went wrong — please try again."));
                 } finally {
                     if (currentTrace) saveQueryDataTrace(formatQueryDataTrace(userQuery, currentTrace, outcome), userQuery);
                     exitGridQueryMode();
                     generateBtn.disabled = false;
-                    if (generateBtnLabel) generateBtnLabel.textContent = originalLabel; else generateBtn.textContent = originalLabel;
-                    hideQueryDataOverlay();
                     flushQueryDataCost(userQuery);
                 }
             });
-
-            // ── "Your Tables" — on-demand workbook scan ──
-            // Walks every worksheet's comments looking for one containing
-            // QD_TABLE_ID_COMMENT_PREFIX — that's the ONLY signal used to recognize "this is a
-            // table this feature created": no separate index is kept anywhere, so this can never
-            // drift out of sync with whatever's actually in the workbook. For each match, the
-            // comment sits on the title cell itself, so that cell's own value (and the period cell
-            // right below it) gives the human-readable name — no decryption needed, no backend
-            // call. The data table's own extent (how many columns/rows) isn't known from the
-            // comment alone, so it's inferred the same way findFirstBlankBlock infers blank space,
-            // just inverted: scanning for how far the FILLED block extends from the known header
-            // position, using whatever's already loaded in the sheet's own used range.
-            // Blocks of cells the scan reads around each tagged table's top-left cell, smallest
-            // first. 120x100 is far bigger than any table anyone actually writes; the next sizes
-            // exist only so a freakishly tall or wide one still measures correctly (see the
-            // overflow check in parseScannedTable) rather than being silently reported short.
-            const QD_SCAN_BLOCK_SIZES = [[120, 100], [2000, 200], [20000, 500]];
-
-            // Turns one tagged comment plus the block of cells read around it into a Your-Tables
-            // entry. Pure — no Excel calls — so the scan can re-run it against a bigger block if
-            // the table turned out not to fit (overflow*, below).
-            const parseScannedTable = (values, titleRow, titleCol, sheetName, commentContent) => {
-                const ur0 = titleRow, uc0 = titleCol; // the block starts AT the title cell
-                const blockRows = values.length, blockCols = values[0]?.length || 0;
-                const titleRaw = values[titleRow - ur0]?.[titleCol - uc0];
-                const title = String(titleRaw || "").replace(/^Table:\s*/, "").trim() || "Untitled";
-
-                // token/companyName aren't shown — they're what a refresh needs: the token
-                // to decrypt, and (for a single-company result, see
-                // writeDownloadedTableToSheet) the company name that lives in its own meta
-                // row rather than down every data row. Parsed before anything below, since
-                // whether that extra row exists changes where the header/data actually sit.
-                // Split by line first in case the comment ever carries more than one tag.
-                const commentLines = (commentContent || "").split("\n");
-                const tokenLine = commentLines.find(l => l.startsWith(QD_TABLE_ID_COMMENT_PREFIX)) || "";
-                const token = tokenLine.slice(QD_TABLE_ID_COMMENT_PREFIX.length).trim();
-                const companyLine = commentLines.find(l => l.startsWith(QD_SINGLE_COMPANY_PREFIX));
-                const companyName = companyLine ? companyLine.slice(QD_SINGLE_COMPANY_PREFIX.length).trim() || null : null;
-                const metaRows = QD_TABLE_META_ROWS + (companyName ? 1 : 0);
-
-                const headerRow = titleRow + metaRows;
-                const headerRowValues = values[headerRow - ur0] || [];
-                let cols = 0;
-                while (titleCol + cols - uc0 < headerRowValues.length) {
-                    const v = headerRowValues[titleCol + cols - uc0];
-                    if (v === "" || v === null || v === undefined) break;
-                    cols++;
-                }
-                let dataRows = 0;
-                while (true) {
-                    const rowValues = values[headerRow + 1 + dataRows - ur0];
-                    if (!rowValues) break;
-                    const v = rowValues[titleCol - uc0];
-                    if (v === "" || v === null || v === undefined) break;
-                    dataRows++;
-                }
-                // Either walk above stopped at the edge of the block rather than at a blank cell,
-                // so the real table may well continue past it — the caller re-reads a bigger block
-                // instead of trusting these numbers.
-                const overflow = (cols > 0 && cols >= blockCols) ||
-                    (headerRow + 1 + dataRows - ur0) >= blockRows;
-                // A single-company table's own "Company" / <name> meta row always spans 2
-                // cells, even when the data grid itself is just 1 column wide (e.g. a bare
-                // period column) — the footprint below has to be at least that wide too, or
-                // the move/clear/conflict math would leave that 2nd cell out of account.
-                const totalCols = Math.max(companyName ? 2 : 1, cols);
-                const totalRows = 1 + dataRows; // header + data rows
-                // The shown/editable range spans the table's WHOLE footprint — title and
-                // description (and, for a single-company table, the Company row) included,
-                // not just header+data — so there's no confusion between "the range shown
-                // here" and "the actual cells this table occupies".
-                const range = blockAddress(titleRow + 1, titleCol + 1, metaRows + totalRows, totalCols);
-                // Stripped of our own "Description: " label so a direct edit (which may or
-                // may not keep the label) compares and reads naturally either way — this is
-                // the BASELINE the meta-cell-edit watcher (pollTableMetaEdits) diffs future
-                // reads of this same cell against.
-                const descriptionRaw = values[titleRow + 1 - ur0]?.[titleCol - uc0];
-                const descriptionText = String(descriptionRaw || "").replace(/^Description:\s*/i, "").trim();
-                const entry = { sheetName, title, range, token, titleRow, titleCol, tableRows: totalRows, tableCols: totalCols, descriptionText, metaRows, companyName };
-                // No title text AND no data rows — the comment outlived the table it was tagging
-                // (its cells were deleted under it). The old sheet-by-sheet scan dropped these
-                // implicitly, via the "skip sheets with no used range" check it needed anyway;
-                // this scan never looks at used ranges, so it has to say so explicitly.
-                const dead = !String(titleRaw ?? "").trim() && dataRows === 0;
-                return { entry, overflow, dead };
-            };
-
-            // Two network round trips total, however many sheets the workbook has: one for every
-            // comment's text (workbook-wide — no per-sheet enumeration at all), one for the
-            // location and surrounding cells of just the tagged ones. Each context.sync() is a
-            // real HTTP round trip in Excel for the web (~0.8s), so sync COUNT is what this
-            // scan's wall-clock is actually made of. The old version spent 3 syncs AND read every
-            // sheet's entire used range to find what is usually a single table.
-            //
-            // The cell block rides along on the same sync as the location — read relative to the
-            // comment's own cell (getAbsoluteResizedRange), which needs no knowledge of where
-            // that cell is, so it doesn't cost a third trip to find out first.
-            const scanYourTables = async () => {
-                const tScan = performance.now();
-                const found = [];
-                let blockReads = 0;
-                // Holds the contention gate: this runs at startup (with the whole Your Tables list
-                // waiting on it), after every write, and on a 60s timer — it must not sit behind a
-                // backlog of poll ticks. Measured at 17s and 76s for a ONE-round-trip scan of an
-                // empty workbook before this gate existed; see qdWithExcelBusy.
-                await qdWithExcelBusy(() => Excel.run(async (context) => {
-                    const comments = context.workbook.comments;
-                    comments.load("items/content");
-                    await context.sync();
-
-                    const tagged = comments.items.filter(c => (c.content || "").includes(QD_TABLE_ID_COMMENT_PREFIX));
-                    if (!tagged.length) return;
-
-                    // Each pass reads one block size for whatever tables still don't fit; all but
-                    // the first are vanishingly rare, so in practice this loop runs exactly once.
-                    let pending = tagged.map(comment => ({ comment, content: comment.content }));
-                    for (let attempt = 0; attempt < QD_SCAN_BLOCK_SIZES.length && pending.length; attempt++) {
-                        const [rows, cols] = QD_SCAN_BLOCK_SIZES[attempt];
-                        for (const p of pending) {
-                            if (!p.loc) {
-                                p.loc = p.comment.getLocation();
-                                p.loc.load("rowIndex,columnIndex");
-                                p.sheet = p.loc.worksheet;
-                                p.sheet.load("name");
-                                // Blind on this first pass — resized off the comment's own cell,
-                                // whose position we don't know yet. Kept small enough that it
-                                // can't run off the bottom/right edge of a real sheet.
-                                p.block = p.loc.getAbsoluteResizedRange(rows, cols);
-                            } else {
-                                // Later passes know exactly where the table starts, so they can
-                                // ask for a big block by index and clamp it to the sheet's edges.
-                                p.block = p.sheet.getRangeByIndexes(p.loc.rowIndex, p.loc.columnIndex,
-                                    Math.min(rows, 1048576 - p.loc.rowIndex),
-                                    Math.min(cols, 16384 - p.loc.columnIndex));
-                            }
-                            p.block.load("values");
-                        }
-                        blockReads++;
-                        await context.sync();
-
-                        const stillPending = [];
-                        for (const p of pending) {
-                            const { entry, overflow, dead } = parseScannedTable(
-                                p.block.values, p.loc.rowIndex, p.loc.columnIndex, p.sheet.name, p.content);
-                            if (dead) continue;
-                            // Last size available — take what we measured rather than drop the
-                            // table off the list entirely.
-                            if (overflow && attempt < QD_SCAN_BLOCK_SIZES.length - 1) stillPending.push(p);
-                            else found.push(entry);
-                        }
-                        pending = stillPending;
-                    }
-                }));
-                // Comment order is whatever the workbook happens to store, so sort explicitly —
-                // the list must come back in the same order every scan or the rendered cards
-                // would shuffle under the user on each background tick.
-                found.sort((a, b) => a.sheetName.localeCompare(b.sheetName) || a.titleRow - b.titleRow || a.titleCol - b.titleCol);
-                console.log(`[QueryData timing][${QD_AUTOFILL_TAG}] Your Tables scan — ${found.length} table(s), ${1 + blockReads} round trip(s): ${(performance.now() - tScan).toFixed(0)}ms`);
-                return found;
-            };
-
-            // Scan results are kept here (not just rendered) so the per-item "Refresh" button
-            // click — which only carries a data-idx — can look up that table's token/location
-            // without re-scanning or stuffing a several-hundred-character token into a DOM
-            // attribute.
-            let lastScannedTables = [];
-            // tableWatchKey of whichever table currently owns the selected Excel cell (see
-            // checkYtSelectionOnce) — given a focus-ring highlight + eyebrow label in
-            // renderYourTablesList, scrolled into view rather than moved in the list. null until a
-            // selection inside a known table is seen.
-            let highlightedTableKey = null;
-            // A Delete that's been clicked but hasn't finished its Undo window yet — the row is
-            // hidden immediately (see the .dt-yt-item-pending-delete class) but deleteYourTable
-            // itself is deferred until the window closes with no Undo click (see
-            // startYtPendingDelete below). Kept here (not just as a per-item DOM class) so a
-            // background rescan mid-window still renders it hidden.
-            let pendingDeleteKeys = new Set();
-
-            // A compact row per table (Excel's own Queries & Connections pane, Gmail/Drive lists)
-            // rather than a bordered card. Header: title + two icon-only buttons (Refresh, Delete).
-            // Below that: a full-width Update bar (idle "Up to date" vs. pending "Update table ·
-            // <what changed>", see pollTableMetaEdits' description/data-row watchers) and a
-            // full-width Edit toggle that expands the inline Edit panel. Clicking anywhere on the
-            // row besides an actual control navigates to the table (see navigateToTable), same as
-            // Excel's own query pane.
-            const dtYtRefreshIconSvg = '<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.34-5.66"></path><polyline points="20 3 20 8 15 8"></polyline></svg>';
-            const dtYtModifyIconSvg = '<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"></path><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path></svg>';
-            const dtYtDeleteIconSvg = '<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path><path d="M10 11v6"></path><path d="M14 11v6"></path><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"></path></svg>';
-            // Idle state of the Update bar ("Up to date") — an SVG checkmark, never an emoji.
-            const dtYtCheckIconSvg = '<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
-            // Send button sitting inside the Edit panel's own textarea (chat-composer style).
-            const dtYtSendIconSvg = '<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>';
-            // Cancel, next to the location editor's own confirm tick (dtYtCheckIconSvg, reused from
-            // the Update bar's idle checkmark) — see .dt-yt-loc-cancel-btn.
-            const dtYtCrossIconSvg = '<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>';
-            // A short, human label for whichever kind of pending change classifyDataRowChange (or
-            // the description watcher) detected — shown on the Update bar ("Update table · <this>").
-            const describePendingChangeKind = (kind) => ({
-                description: "Description changed",
-                // More than one of the three slots below is set at once — runTableCombinedEdit (or,
-                // with description also pending, runTableRefresh given all three deltas) applies
-                // every one of them together on a single click; see the pendingKind computation
-                // just below for when this is chosen over any one kind's own specific label.
-                combined: "Multiple changes",
-                companyChange: "Company changed",
-                periodChange: "Period changed",
-                mixedChange: "Company & period changed",
-                headerAdd: "New column added",
-                headerRename: "Column renamed",
-                // A table whose orientation the structured editors don't read positionally (see
-                // isStructuredLayout) — deliberately vague, because the honest answer is "something
-                // in this table changed" and the model works out what from the sheet itself.
-                layoutEdit: "Table edited",
-            }[kind] || "Table changed");
-            // The description is always on the row now (it used to live hidden inside the Edit
-            // form, measured only once the form opened) — its "Show more"/"Show less" toggle has
-            // to be measured here instead: once right after renderYourTablesList's own innerHTML
-            // assignment (reading scrollHeight forces a layout flush, so that's safe to do
-            // immediately, no requestAnimationFrame needed), and AGAIN whenever the Your Tables tab
-            // becomes visible (see switchDtTab) — a row rendered while that tab's panel was
-            // display:none would otherwise measure 0 for both scrollHeight and clientHeight and
-            // wrongly conclude nothing overflows.
-            const remeasureDescOverflow = () => {
-                yourTablesList.querySelectorAll(".dt-yt-item-desc-clamped").forEach((descEl) => {
-                    const toggleBtn = descEl.closest(".dt-yt-item-body")?.querySelector(".dt-yt-desc-toggle-btn");
-                    if (toggleBtn) toggleBtn.style.display = descEl.scrollHeight > descEl.clientHeight + 1 ? "inline-block" : "none";
-                });
-            };
-            const renderYourTablesList = async (tables) => {
-                lastScannedTables = tables;
-                // The tab button itself (#dtTabYourTables) is the only place this count shows now —
-                // it used to also repeat in a section header above the list, removed as a duplicate.
-                dtYtTabCountEl.textContent = String(tables.length);
-                resetTableMetaWatchState(tables);
-                if (!tables.length) {
-                    yourTablesList.innerHTML = '<div class="dt-info">No tables from this feature found in this workbook yet.</div>';
-                    return;
-                }
-                // Whichever table owns the selected Excel cell (see checkYtSelectionOnce) floats to
-                // the top of the list — `i` still points at its ORIGINAL index into `tables`
-                // (data-idx below, and every click handler that reads lastScannedTables[idx], rely
-                // on that), only the RENDER order changes. An earlier revision of this view
-                // deliberately left the list in scan order instead, scrolling the card into view
-                // wherever it already sat — reverted back to floating it on request.
-                const visible = tables.map((t, i) => ({ t, i }));
-                if (highlightedTableKey) {
-                    const selectedPos = visible.findIndex(({ t }) => tableWatchKey(t) === highlightedTableKey);
-                    if (selectedPos > 0) visible.unshift(visible.splice(selectedPos, 1)[0]);
-                }
-                yourTablesList.innerHTML = visible.map(({ t, i }) => {
-                        const pendingClass = pendingDeleteKeys.has(tableWatchKey(t)) ? " dt-yt-item-pending-delete" : "";
-                        // A manual edit to the description cell, to the company/period shown in the
-                        // data rows, and/or to the header row (see pollTableMetaEdits' watchers) is
-                        // surfaced here as ONE pending change for the whole row. Two or even all
-                        // three CAN be set at once — a user who both retypes a header cell and types
-                        // a new period into the blank row below in the same sitting sets both — and
-                        // the Update bar's own click handler applies every one of them together in
-                        // that case (see runTableCombinedEdit); pendingKind below just picks the
-                        // right LABEL for however many are actually pending right now. The Update
-                        // bar below is the ONLY way to apply it; a subtle row highlight echoes the
-                        // same state.
-                        const rowState = tableMetaWatchState.get(tableWatchKey(t));
-                        const pendingDescChange = rowState?.pendingDescriptionChange;
-                        const pendingDataChange = rowState?.pendingDataRowChange;
-                        const pendingHeaderChange = rowState?.pendingHeaderChange;
-                        const pendingSlotCount = [pendingDescChange, pendingDataChange, pendingHeaderChange].filter(Boolean).length;
-                        const pendingKind = pendingSlotCount > 1 ? "combined"
-                            : pendingDescChange ? "description"
-                            : pendingDataChange ? pendingDataChange.kind
-                            : pendingHeaderChange ? pendingHeaderChange.kind : null;
-                        const pendingChangeClass = pendingKind ? " dt-yt-item-pending-change" : "";
-                        const updateBarHtml = pendingKind
-                            ? `<button type="button" class="dt-yt-update-bar dt-yt-update-bar-pending">Update table · ${escapeHtml(describePendingChangeKind(pendingKind))}</button>`
-                            : `<button type="button" class="dt-yt-update-bar" aria-disabled="true">${dtYtCheckIconSvg}<span>Up to date</span></button>`;
-                        // The table whose range currently contains the selected Excel cell (see
-                        // checkYtSelectionOnce) — a separate, visually distinct highlight from the
-                        // pending-change one above (a left accent bar + tint, meaning "needs
-                        // updating"), since a table could be both at once. "Selected" reads as a
-                        // soft focus ring (not another thick border, which would look identical to
-                        // the pending-change state) plus an explicit eyebrow label, so the state
-                        // never depends on color alone.
-                        const isSelected = tableWatchKey(t) === highlightedTableKey;
-                        const selectedClass = isSelected ? " dt-yt-item-cell-selected" : "";
-                        const selectedEyebrowHtml = isSelected ? `<div class="dt-yt-selected-eyebrow"><span class="dt-yt-selected-dot">●</span> Selected in sheet</div>` : "";
-                        return `
-                        <div class="dt-yt-item${pendingClass}${pendingChangeClass}${selectedClass}" data-idx="${i}">
-                            <div class="dt-yt-item-header">
-                                <div class="dt-yt-item-header-left">
-                                    <div class="dt-yt-item-title-group">
-                                        ${selectedEyebrowHtml}
-                                        <button type="button" class="dt-yt-item-title-btn" title="Go to this table">${escapeHtml(t.title)}</button>
-                                        <div class="dt-yt-item-loc-row">
-                                            <button type="button" class="dt-yt-item-loc-badge" title="Go to this table">${escapeHtml(t.sheetName)}!${escapeHtml(t.range)}</button>
-                                        </div>
-                                    </div>
-                                </div>
-                                <div class="dt-yt-item-actions">
-                                    <button type="button" class="dt-yt-icon-action-btn dt-yt-refresh-btn" title="Get latest data" aria-label="Get latest data">${dtYtRefreshIconSvg}</button>
-                                    <button type="button" class="dt-yt-icon-action-btn dt-yt-delete-btn" title="Delete table" aria-label="Delete table">${dtYtDeleteIconSvg}</button>
-                                </div>
-                            </div>
-                            <!-- Full-width, a sibling of the header above rather than nested inside
-                                 its narrower title column — nested there, this row's own content
-                                 (sheet picker + two cell boxes + tick/cross) was wider than the
-                                 space left after the header's fixed-width Refresh/Delete icons, and
-                                 overflowed RIGHT UNDER those buttons instead of shrinking to fit.
-                                 Start/end cell as two separate boxes with a ":" between them (not
-                                 one "B2:D15" text field) — see setLocEditing for how entry.range
-                                 (always "start:end", see blockAddress) splits into these, and
-                                 commitTableMove for how they're rejoined before being parsed/
-                                 validated. Tick commits, cross cancels (see the main click handler)
-                                 — there's no more silent "commit on click away" now that Cancel is
-                                 explicit; blurring INTO the tick/cross buttons used to trigger that
-                                 old focusout-commit behavior, which fought with Cancel ever actually
-                                 cancelling anything. -->
-                            <div class="dt-yt-item-loc-edit" style="display:none;">
-                                <select class="dt-yt-item-loc-sheet-select" title="Destination sheet"></select>
-                                <input type="text" class="fb-input dt-yt-item-loc-cell-input dt-yt-item-loc-start-input" maxlength="10" title="Starting cell">
-                                <span class="dt-yt-item-loc-colon">:</span>
-                                <input type="text" class="fb-input dt-yt-item-loc-cell-input dt-yt-item-loc-end-input" maxlength="10" title="Ending cell (optional — defaults to this table's own size)">
-                                <button type="button" class="dt-icon-btn dt-yt-loc-confirm-btn" title="Move table here" aria-label="Move table here">${dtYtCheckIconSvg}</button>
-                                <button type="button" class="dt-icon-btn dt-btn-danger dt-yt-loc-cancel-btn" title="Cancel" aria-label="Cancel">${dtYtCrossIconSvg}</button>
-                            </div>
-                            <div class="dt-yt-item-body">
-                                <div class="dt-info dt-yt-item-status" style="display:none;"></div>
-                                <!-- Description is always on the row now (it used to live hidden
-                                     inside the Edit form, only shown once Edit was clicked) — the
-                                     pencil button beside it IS the edit toggle (still .dt-yt-modify-
-                                     btn, just moved and restyled as an icon button — see its click
-                                     handler, which now also hides .dt-yt-item-footer below rather
-                                     than just itself, since the Update bar used to stay visible
-                                     alongside an open Edit form and shouldn't any more). -->
-                                <div class="dt-yt-item-desc-row">
-                                    <p class="dt-yt-item-desc dt-yt-item-desc-clamped">${escapeHtml(t.descriptionText || "—")}</p>
-                                    <button type="button" class="dt-icon-btn dt-yt-modify-btn" title="Edit this table" aria-label="Edit this table" aria-expanded="false">${dtYtModifyIconSvg}</button>
-                                </div>
-                                <button type="button" class="dt-yt-desc-toggle-btn" style="display:none;">Show more</button>
-                            </div>
-                            <div class="dt-yt-item-footer">
-                                ${updateBarHtml}
-                            </div>
-                            <div class="dt-yt-refresh-form">
-                                <div class="dt-yt-field-label">Describe the change</div>
-                                <textarea class="fb-textarea dt-yt-refresh-input dt-yt-refresh-input-tall" rows="3" placeholder="e.g. Make this table for Adani Enterprises instead"></textarea>
-                                <div class="dt-yt-refresh-actions">
-                                    <button type="button" class="fb-submit dt-yt-refresh-confirm">${dtYtSendIconSvg}<span>Apply change</span></button>
-                                    <button type="button" class="dt-link dt-yt-refresh-cancel">Cancel</button>
-                                </div>
-                            </div>
-                        </div>
-                    `;
-                }).join("");
-                remeasureDescOverflow();
-            };
-
-            // A cheap fingerprint of everything renderYourTablesList actually displays (or needs
-            // to look up later) for every table — used to skip rebuilding the list's DOM entirely
-            // when a scan finds nothing has actually changed, which is the common case for the
-            // 1-minute background tick below. Rebuilding unconditionally on every tick wiped out
-            // whatever the user had open at that exact moment (an expanded Modify textarea mid-
-            // sentence, an open Delete confirm, the list's own scroll position) every 60 seconds —
-            // visually jarring even though only this one section re-rendered, never "the entire
-            // window". Comparing against this fingerprint instead means a tick with no real change
-            // touches nothing on screen at all.
-            const tablesFingerprint = (tables) => JSON.stringify(tables.map(t => [t.sheetName, t.title, t.range, t.descriptionText, t.token]));
-            let lastRenderedFingerprint = null;
-            let yourTablesEverRendered = false;
-            const runYourTablesScan = async () => {
-                // "Scanning…" only ever replaces genuinely empty/unknown state (the very first
-                // scan after this view opens) — every later call (the 1-minute timer, or the
-                // fire-and-forget rescans after a generate/write/modify/delete) updates silently in
-                // the background instead of flashing a placeholder over an already-populated list.
-                if (!yourTablesEverRendered) yourTablesList.innerHTML = '<div class="dt-info">Scanning…</div>';
-                try {
-                    const tables = await scanYourTables();
-                    const fingerprint = tablesFingerprint(tables);
-                    if (fingerprint === lastRenderedFingerprint && yourTablesEverRendered) {
-                        lastScannedTables = tables; // keep entries fresh (e.g. titleRow/tableCols) without touching the DOM
-                        return;
-                    }
-                    lastRenderedFingerprint = fingerprint;
-                    yourTablesEverRendered = true;
-                    await renderYourTablesList(tables);
-                } catch (e) {
-                    console.warn("[QueryData] Your Tables scan failed:", e);
-                    // A transient failure mid-background-tick shouldn't blow away a perfectly good
-                    // list that's already showing — only ever replace the list with an error
-                    // message if there was nothing good on screen to begin with.
-                    if (!yourTablesEverRendered) yourTablesList.innerHTML = '<div class="dt-info">Couldn\'t scan this workbook — please try again.</div>';
-                }
-            };
-            // No manual "refresh list" button any more — scanning runs on its own: once as soon as
-            // this view's own code runs (which covers the add-in loading, the page reloading, and
-            // the Query Data window being opened, since those are all the same event here — this
-            // code only executes when that happens); on a 1-minute timer thereafter (same plain
-            // setInterval pattern refreshWalletBalance already uses elsewhere in this file);
-            // whenever Generate query is clicked; and after a successful write, Modify, or Delete
-            // (see generateBtn/runTableRefresh/deleteYourTable) — each of those already triggers
-            // its own rescan once it's done.
-            runYourTablesScan();
-            setInterval(runYourTablesScan, 60000);
-
-            // ── Also re-scan whenever a row/column is inserted or deleted anywhere in the workbook ──
-            // Inserting or deleting a row shifts every table BELOW it down/up a row — same for a
-            // column and everything to its RIGHT — without touching any of those cells' CONTENT.
-            // Every scanned entry's titleRow/titleCol is a snapshot from whenever the list last
-            // scanned, though, so a shift like this leaves pollTableMetaEdits reading the table's
-            // Description/header/data cells at their OLD, now-wrong position until the next scan
-            // catches up — misreading whatever unrelated text now happens to sit there as if the
-            // user had just edited the description, a false "update needed". The 60s timer above
-            // would eventually fix it, but only after a stretch where the Update bar is lying.
-            // Re-scanning right away on the event that actually invalidated those positions closes
-            // that window down to effectively nothing instead.
-            //
-            // workbook.worksheets.onChanged (not the per-worksheet Worksheet.onChanged used
-            // elsewhere in Excel's API) fires for a change on ANY sheet, present or future, from
-            // this ONE registration — no per-sheet listener plus a worksheets.onAdded to catch new
-            // sheets, the cross-sheet bookkeeping the grid-selection polling comment above
-            // deliberately avoided for a DIFFERENT event that has no such workbook-wide version.
-            // Filtered to structural changes only (changeType) — CellInserted/CellDeleted covers
-            // "Insert/Delete Cells, shift up/down" too, which reflows positions on just the affected
-            // columns the exact same way a whole-row insert/delete does; a plain cell-VALUE edit
-            // (RangeEdited) is deliberately excluded, since that's exactly what pollTableMetaEdits
-            // already watches for, at a much faster cadence than a full rescan needs to run at.
-            const QD_STRUCTURAL_CHANGE_TYPES = new Set(["RowInserted", "RowDeleted", "ColumnInserted", "ColumnDeleted", "CellInserted", "CellDeleted"]);
-            let yourTablesStructureRescanTimer = null;
-            Excel.run(async (context) => {
-                context.workbook.worksheets.onChanged.add((event) => {
-                    if (!QD_STRUCTURAL_CHANGE_TYPES.has(event.changeType)) return Promise.resolve();
-                    // Debounced, not immediate — inserting/deleting several rows in one go (a
-                    // multi-row selection, or a drag) fires one event per row, and this should
-                    // still add up to just ONE rescan rather than one per row.
-                    clearTimeout(yourTablesStructureRescanTimer);
-                    yourTablesStructureRescanTimer = setTimeout(runYourTablesScan, 300);
-                    return Promise.resolve();
-                });
-                await context.sync();
-            }).catch((e) => console.warn("[QueryData] couldn't register the row/column-change listener for Your Tables — structural shifts will only be caught by the 60s timer:", e));
-
-            // Same blank-block search as findFirstBlankBlock above (including the "leave a blank
-            // row above it" requirement), but scoped to an EXPLICIT sheet rather than whichever one
-            // happens to be active — a refresh's table isn't necessarily on the sheet the user
-            // currently has open (an auto-triggered refresh from editing a Description cell
-            // especially has no guarantee of that).
-            const findFirstBlankBlockInSheet = async (sheetName, neededRows, neededCols) => {
-                let result;
-                await Excel.run(async (context) => {
-                    const sheet = context.workbook.worksheets.getItem(sheetName);
-                    const usedRange = sheet.getUsedRangeOrNullObject();
-                    usedRange.load("rowCount,columnCount,isNullObject");
-                    await context.sync();
-
-                    if (usedRange.isNullObject) {
-                        result = { sheetName, row: 1, col: 1 };
-                        return;
-                    }
-
-                    const searchRows = usedRange.rowCount + neededRows + 1;
-                    const searchCols = Math.max(usedRange.columnCount, neededCols);
-                    const scanRange = sheet.getRangeByIndexes(0, 0, searchRows, searchCols);
-                    scanRange.load("values");
-                    await context.sync();
-
-                    const values = scanRange.values;
-                    const isRowBlank = (r) => {
-                        const row = values[r];
-                        if (!row) return true; // past the scanned range — treat as blank
-                        for (let c = 0; c < neededCols; c++) {
-                            const v = row[c];
-                            if (v !== "" && v !== null && v !== undefined) return false;
-                        }
-                        return true;
-                    };
-                    let foundRow = usedRange.rowCount + 1; // fallback: one blank row after existing content
-                    for (let r = 0; r <= searchRows - neededRows; r++) {
-                        if (r > 0 && !isRowBlank(r - 1)) continue; // no gap above this candidate — skip it
-                        let blank = true;
-                        for (let dr = 0; dr < neededRows && blank; dr++) {
-                            if (!isRowBlank(r + dr)) blank = false;
-                        }
-                        if (blank) { foundRow = r; break; }
-                    }
-                    result = { sheetName, row: foundRow + 1, col: 1 };
-                });
-                return result;
-            };
-
-            // A refresh can need MORE space than the table already occupies (e.g. "top 10" ->
-            // "top 12" needs 2 extra rows) — before overwriting in place, confirms that extra space
-            // is actually free. Only the region OUTSIDE the OLD footprint matters: the old footprint
-            // itself is always about to be cleared and rewritten anyway, intentionally, so content
-            // there is never a conflict. Returns false (never grows past the old footprint) without
-            // reading anything, when the new result is the same size or smaller.
-            //
-            // ignoreHeaderRow: set by the header-row-edit flow (runTableAddColumns) specifically —
-            // there, the NEW columns' header cells are GUARANTEED to already hold whatever the user
-            // just typed (that's literally what triggered this refresh), and that text is always
-            // about to be overwritten with the real header anyway. Without this, typing "EBITDA"
-            // into a blank cell to grow the table right into that exact spot would make this
-            // function see its own trigger text as "existing content" and shift the whole table
-            // elsewhere instead of just replacing it in place. The header ROW (ignoreHeaderRow) and,
-            // separately, the few rows just below the table that the data-row watcher itself keeps
-            // an eye on (ignoreDataRowsBelow — see QD_DATA_ROW_WATCH_EXTRA_ROWS) are exempted for
-            // exactly that same reason: whatever the user typed there (a new column header past the
-            // old width, or a brand-new period/company row right under the table) is the KNOWN edit
-            // that triggered this very refresh, not some unrelated note that happened to be sitting
-            // there, and it's about to be overwritten with the real value regardless. Any OTHER new
-            // row or column the result also grew into is still checked normally.
-            const wouldRefreshOverwriteOtherContent = async (entry, newTotalRows, newTotalCols, ignoreHeaderRow, ignoreDataRowsBelow) => {
-                const oldTotalRows = entry.metaRows + entry.tableRows;
-                const oldTotalCols = entry.tableCols;
-                if (newTotalRows <= oldTotalRows && newTotalCols <= oldTotalCols) return false;
-
-                let conflict = false;
-                await Excel.run(async (context) => {
-                    const sheet = context.workbook.worksheets.getItem(entry.sheetName);
-                    const newFootprint = sheet.getRangeByIndexes(entry.titleRow, entry.titleCol, newTotalRows, newTotalCols);
-                    newFootprint.load("values");
-                    await context.sync();
-
-                    const values = newFootprint.values;
-                    const dataRowsIgnoreUntil = ignoreDataRowsBelow ? oldTotalRows + QD_DATA_ROW_WATCH_EXTRA_ROWS : oldTotalRows;
-                    for (let r = 0; r < newTotalRows && !conflict; r++) {
-                        if (ignoreHeaderRow && r === entry.metaRows) continue;
-                        if (ignoreDataRowsBelow && r >= oldTotalRows && r < dataRowsIgnoreUntil) continue;
-                        for (let c = 0; c < newTotalCols; c++) {
-                            if (r < oldTotalRows && c < oldTotalCols) continue; // inside the OLD footprint — being cleared+rewritten anyway
-                            const v = values[r][c];
-                            if (v !== "" && v !== null && v !== undefined) { conflict = true; break; }
-                        }
-                    }
-                });
-                return conflict;
-            };
-
-            // Reads up to 3 of the table's CURRENT data rows (plus its header) straight from the
-            // sheet — exactly what the user is looking at right now — to give the Modify/Refresh
-            // LLM calls below a concrete sense of the table's real columns and value formats,
-            // instead of reasoning from the SQL text alone. Uses range.text (the DISPLAYED string
-            // per cell, per its own number format), not range.values, so a period/date column comes
-            // through exactly as a human reading the sheet would see it — a literal text format
-            // (e.g. "Mar2026"), a formatted date, whatever it actually is — rather than a
-            // raw/ambiguous underlying value. Returns null if the table has no data rows to sample.
-            const readSampleRows = async (entry) => {
-                const dataRowCount = Math.max(0, entry.tableRows - 1); // entry.tableRows = header + data rows
-                if (!dataRowCount) return null;
-                const sampleRows = Math.min(3, dataRowCount);
-                const headerRow = entry.titleRow + entry.metaRows;
-                try {
-                    let text = null;
-                    await Excel.run(async (context) => {
-                        const sheet = context.workbook.worksheets.getItem(entry.sheetName);
-                        const block = sheet.getRangeByIndexes(headerRow, entry.titleCol, 1 + sampleRows, Math.max(1, entry.tableCols));
-                        block.load("text");
-                        await context.sync();
-                        text = block.text.map(row => row.join(" | ")).join("\n");
-                    });
-                    return text;
-                } catch (e) {
-                    console.warn("[QueryData] couldn't read sample rows for the LLM context (continuing without them):", e);
-                    return null;
-                }
-            };
-
-            // Shared tail end of all refresh flavors below: given the freshly-executed `data`
-            // (title/description already carried onto it by the caller), clears the table's OLD
-            // footprint and writes the result back, either in the SAME spot, or — if the result
-            // needs more space than before AND that extra space isn't actually free — at the next
-            // available blank block on the same sheet instead, with a notice saying so.
-            // writeDownloadedTableToSheet re-tags the result with a fresh token either way. Returns
-            // the outcome-log suffix and updates statusEl itself; callers build their own outcome
-            // prefix (what was asked for/generated) before this runs. ignoreHeaderRow/
-            // ignoreDataRowsBelow are passed straight through to wouldRefreshOverwriteOtherContent
-            // — see its own comment.
-            const writeRefreshedTable = async (entry, data, statusEl, ignoreHeaderRow, ignoreDataRowsBelow) => {
-                // The refreshed result may have a DIFFERENT company shape than the table had
-                // before (e.g. a Modify that narrows "Reliance and TCS" down to just "Reliance")
-                // — detected fresh from `data` rather than reused from `entry`, so the new write's
-                // own layout always matches what's actually about to be written.
-                const singleCompanyInfo = detectSingleCompanyColumn(data);
-                const newMetaRows = QD_TABLE_META_ROWS + (singleCompanyInfo ? 1 : 0);
-                const newTotalRows = newMetaRows + (data.rows?.length || 0) + 1;
-                const newTotalCols = Math.max(singleCompanyInfo ? 2 : 1, (data.columns?.length || 1) - (singleCompanyInfo ? 1 : 0));
-
-                // The WHOLE sequence below holds the contention gate as one unit, not just the
-                // individual steps that already do. It is five or six SEPARATE Excel.runs back to
-                // back (space check, maybe a blank-block search, the old block's clear, the write
-                // itself, then a rescan) — a dozen-odd round trips — and without gating the whole
-                // thing, background poll ticks were free to interleave between every one of them,
-                // each adding its own round trip to what the user sees as a single "Writing the
-                // refreshed table…" step. Nesting is deliberate and safe: clearTableBlock/
-                // writeDownloadedTableToSheet/runYourTablesScan hold it too, and qdExcelBusy is a
-                // counter precisely so an inner one finishing can't release this outer one.
-                return qdWithExcelBusy(async () => {
-                    statusEl.textContent = "Checking available space…";
-                    const mustShift = await wouldRefreshOverwriteOtherContent(entry, newTotalRows, newTotalCols, ignoreHeaderRow, ignoreDataRowsBelow);
-                    let writeTarget;
-                    if (mustShift) {
-                        const newBlock = await findFirstBlankBlockInSheet(entry.sheetName, newTotalRows, newTotalCols);
-                        writeTarget = { sheetName: newBlock.sheetName, row: newBlock.row, col: newBlock.col };
-                    } else {
-                        writeTarget = { sheetName: entry.sheetName, row: entry.titleRow + 1, col: entry.titleCol + 1 };
-                    }
-
-                    statusEl.textContent = "Writing the refreshed table…";
-                    // Clears AT LEAST as far as wouldRefreshOverwriteOtherContent's own
-                    // ignoreHeaderRow/ignoreDataRowsBelow exemption already promises is safe — the
-                    // user's own just-typed header label or new period row, past the OLD footprint
-                    // this would otherwise stop at. Previously relied entirely on the write below
-                    // happening to reach that far on its own, which fails exactly when it doesn't:
-                    // confirmed live 2026-10-29 — a combined edit (new column AND a new period row,
-                    // both typed directly into the sheet at once) resolved correctly, but the new
-                    // period (2024) turned out to have no actual data for this company, so the
-                    // query came back with the SAME row count as before (2) — the new write never
-                    // extended down into the row the user had typed "2024" into, leaving that text
-                    // sitting there uncleared, below the real (correctly refreshed) table, looking
-                    // exactly like a genuine third row that silently failed to populate.
-                    const clearRows = entry.metaRows + entry.tableRows + (ignoreDataRowsBelow ? QD_DATA_ROW_WATCH_EXTRA_ROWS : 0);
-                    const clearCols = entry.tableCols + (ignoreHeaderRow ? QD_HEADER_WATCH_EXTRA_COLS : 0);
-                    await clearTableBlock(entry.sheetName, entry.titleRow, entry.titleCol, clearRows, clearCols);
-                    const sheetName = await writeDownloadedTableToSheet(data, writeTarget, singleCompanyInfo);
-                    const rangeAddr = blockAddress(writeTarget.row, writeTarget.col, newTotalRows, newTotalCols);
-                    const whereText = `"${sheetName}" at ${rangeAddr}`;
-                    const shiftedNotice = mustShift ? ` Your table has been shifted to new range ${rangeAddr} to avoid overwriting data.` : "";
-                    statusEl.textContent = `Refreshed — ${data.row_count.toLocaleString()} row${data.row_count === 1 ? "" : "s"}.${shiftedNotice}`;
-                    await runYourTablesScan(); // ranges may have changed size — re-scan rather than patch the list in place
-                    return `\n\nEXECUTION: success — ${data.row_count} row(s) refreshed at ${whereText}.${shiftedNotice}`;
-                });
-            };
-
-            // Runs a word-based MODIFY for one table: decrypt its tag -> ask the model to update
-            // the ORIGINAL query per the given instruction (not a fresh Stage 1/1.5/2 run — see
-            // refreshSqlFromPrevious) -> execute it (mints a fresh token) -> writeRefreshedTable.
-            // Traced locally the same way a fresh generation is, under the instruction as the
-            // "question".
-            const runTableRefresh = async (entry, instruction, statusEl) => {
-                statusEl = wrapStatusElWithOverlay(statusEl);
-                // Covers a MANUAL click here too, not just the auto-triggered description-cell edit
-                // (which already sets this on itself before calling in) — this function is about to
-                // rewrite the SAME description cell pollTableMetaEdits watches, so it needs the same
-                // "don't mistake my own write for a user edit" guard regardless of how it was invoked.
-                setTableRefreshingFlag(entry, true);
-                currentTrace = [];
-                let outcome = "(ended before any outcome was recorded)";
-                try {
-                    statusEl.style.display = "block";
-                    statusEl.textContent = "Reading the original query…";
-                    const prior = await decryptRefreshTokenWithFallback(entry, (step) => { statusEl.textContent = step; });
-                    traceLookup("Decrypt refresh tag", "(server-side decrypt, no SQL sent from here)", `sql: ${prior.sql}\nuser_query: ${prior.user_query}`);
-                    const sampleText = await readSampleRows(entry);
-                    traceLookup("Read sample rows", "(reads the sheet directly, no SQL)", sampleText ? `${sampleText.split("\n").length} row(s) sampled` : "no data rows to sample");
-
-                    statusEl.textContent = "Asking the model to update the query…";
-                    const updated = await refreshSqlFromPrevious(prior.sql, prior.user_query, prior.description, instruction, sampleText);
-                    if (!updated.sql) {
-                        outcome = `DECLINED — no SQL generated.\nExplanation: ${updated.explanation || "(none given)"}`;
-                        statusEl.textContent = updated.explanation || "Couldn't refresh this table with that request.";
-                        return;
-                    }
-                    outcome = `SQL generated:\n${updated.sql}\n\nExplanation: ${updated.explanation || "(none given)"}`;
-
-                    statusEl.textContent = "Running the updated query…";
-                    const data = await runGeneratedSql(updated.sql, prior.user_query || instruction, (updated.title || "Query Result").slice(0, 31), prior.tables_used, updated.title, updated.description);
-                    // Same as the main generate flow: title/description live on `updated` (the
-                    // refresh-LLM's output), not the execution response — carried onto `data` so
-                    // writeDownloadedTableToSheet below actually reflects the REFRESHED values
-                    // rather than falling back to its own "missing" placeholders.
-                    data.title = updated.title || prior.title || "Query Result";
-                    data.description = updated.description || prior.description || "";
-
-                    outcome += await writeRefreshedTable(entry, data, statusEl);
-                } catch (e) {
-                    console.warn("[QueryData] refresh failed:", e);
-                    outcome = `ERROR: ${e.message}`;
-                    statusEl.textContent = e.message && e.message !== "Failed to fetch" ? e.message : "Couldn't refresh this table — please try again.";
-                } finally {
-                    if (currentTrace) saveQueryDataTrace(formatQueryDataTrace(`Refresh: ${instruction}`, currentTrace, outcome), `refresh-${instruction}`);
-                    hideQueryDataOverlay();
-                    setTableRefreshingFlag(entry, false);
-                    flushQueryDataCost(`Modify "${entry.title}": ${instruction}`);
-                }
-            };
-
-            // Referenced table names (FROM/JOIN targets), normalized for comparison — not a real
-            // SQL parser, just good enough to catch "the model swapped/added/dropped a table" when
-            // it was only ever supposed to touch a period filter.
-            const extractReferencedTables = (sql) => {
-                const names = new Set();
-                const re = /\b(?:FROM|JOIN)\s+([A-Za-z0-9_.[\]]+)/gi;
-                let m;
-                while ((m = re.exec(sql))) names.add(m[1].replace(/[[\]]/g, "").toLowerCase());
-                return names;
-            };
-            // The raw SELECT list text (whitespace-normalized) between SELECT [TOP N] and the first
-            // FROM — a cheap stand-in for "did the result's columns/shape change at all."
-            const extractSelectList = (sql) => {
-                const m = String(sql || "").match(/^\s*SELECT\s+(?:TOP\s*\(?\s*\d+\s*\)?\s+)?([\s\S]*?)\bFROM\b/i);
-                return m ? m[1].replace(/\s+/g, " ").trim().toLowerCase() : null;
-            };
-            // Words that can legally follow a table name but are NOT an alias. Without this, "FROM
-            // tbl WHERE ..." reads "WHERE" as the table's alias — see scanSqlSources below for why
-            // that mattered so much.
-            const SQL_NON_ALIAS_WORDS = new Set(["where", "on", "and", "or", "order", "group", "having",
-                "join", "inner", "left", "right", "full", "outer", "cross", "union", "select", "as", "when",
-                "then", "else", "end", "with", "for", "option"]);
-            // Every FROM/JOIN source in `sql` as { table, alias, body }, where `alias` is the name
-            // the OUTER query can actually reference that table by (null when it has none). Two
-            // shapes matter:
-            //   - a plain source — "FROM db.dbo.tbl b", "JOIN db.dbo.tbl AS y", or no alias at all.
-            //   - a DERIVED table — "JOIN (SELECT *, ROW_NUMBER() ... FROM db.dbo.tbl WHERE ...) y",
-            //     which is exactly what buildDeterministicQuery emits for a "latest"/"range" period.
-            //     The real table is the subquery's own inner FROM, but the only alias anything
-            //     outside the parens can reference is the one AFTER the closing paren.
-            // That second shape is what the old single-regex version got wrong: it took the next
-            // bare word after the inner table name as the alias, which for an anchor subquery
-            // carrying an inner filter is the literal keyword "WHERE". Measured consequences, all
-            // confirmed against real generated SQL: sqlExcludesEstimatesForTables could never match
-            // (so every plain Refresh fell through to the LLM period-check),
-            // reconstructMetricsFromSelectList found no table for the alias actually used in the
-            // SELECT list and returned null (so Add Column and data-row edits fell through to the
-            // LLM rewrite), and trySpliceRenameColumn spliced "WHERE.[Col] AS [Col]" — invalid SQL
-            // it then tried to run. `body` is the derived table's inner text (null otherwise), which
-            // sqlExcludesEstimatesForTables needs to check a filter written INSIDE those parens.
-            const scanSqlSources = (sql) => {
-                const sources = [];
-                const re = /\b(?:FROM|JOIN)\s+/gi;
-                let m;
-                while ((m = re.exec(String(sql || "")))) {
-                    const start = m.index + m[0].length;
-                    const aliasAfter = (text) => {
-                        const a = text.match(/^\s*(?:AS\s+)?([A-Za-z_][A-Za-z0-9_]*)/i);
-                        return a && !SQL_NON_ALIAS_WORDS.has(a[1].toLowerCase()) ? a[1] : null;
-                    };
-                    if (sql[start] === "(") {
-                        let depth = 0, end = start;
-                        for (; end < sql.length; end++) {
-                            if (sql[end] === "(") depth++;
-                            else if (sql[end] === ")" && --depth === 0) break;
-                        }
-                        const body = sql.slice(start + 1, end);
-                        const inner = scanSqlSources(body)[0]; // the derived table's own first real source
-                        if (inner) sources.push({ table: inner.table, alias: aliasAfter(sql.slice(end + 1)) || inner.alias, body });
-                        re.lastIndex = end + 1; // the subquery's innards aren't outer-scope sources
-                        continue;
-                    }
-                    const tbl = sql.slice(start).match(/^([A-Za-z0-9_.[\]]+)/);
-                    if (!tbl) continue;
-                    sources.push({ table: tbl[0].replace(/[[\]]/g, ""), alias: aliasAfter(sql.slice(start + tbl[0].length)), body: null });
-                }
-                return sources;
-            };
-            // Same FROM/JOIN scan as extractReferencedTables, but keeps each table's own ALIAS too
-            // (table name -> alias, lowercased table name as the key) — what the splice helpers
-            // below need to know whether a resolved metric's table is already in the query, and
-            // under what alias to reference it with.
-            const extractTableAliases = (sql) => {
-                const aliases = new Map();
-                // FIRST occurrence wins for a given table name — confirmed live: a correlated
-                // subquery referencing the SAME table again under its OWN alias (e.g. a "last N
-                // periods" query shaped as "... IN (SELECT TOP N x.[year] FROM thistable x WHERE
-                // x.fincode = outer.fincode ...)", a pattern the freeform LLM fallback sometimes
-                // writes) was overwriting the table's real, OUTER-scope alias with the subquery's
-                // alias — that inner alias is only valid INSIDE the subquery's own parentheses, so
-                // splicing a new column against it from the outer SELECT list produced invalid SQL
-                // ("x" isn't a visible table reference out there). The table's first FROM/JOIN
-                // mention is always the outer, splice-safe one.
-                for (const { table, alias } of scanSqlSources(sql)) {
-                    if (!alias) continue; // no outer-scope name to splice against — not usable here
-                    const key = table.toLowerCase();
-                    if (!aliases.has(key)) aliases.set(key, alias);
-                }
-                return aliases;
-            };
-            // Adds ONE new column to an already-correct query, via plain text insertion — deliberately
-            // narrow: only fires when the metric's table is ALREADY joined (so no new JOIN, no
-            // period/mode alignment decision, nothing the deterministic builder would otherwise need
-            // to work out, has to happen here). Returns the new SQL, or null when that condition
-            // isn't met (not an error — the caller falls back to the freeform LLM rewrite instead).
-            const trySpliceNewColumn = (sql, metric) => {
-                const alias = extractTableAliases(sql).get(metric.table.toLowerCase());
-                if (!alias) return null; // table not already in the query — needs a real JOIN, out of scope here
-                const selectList = extractSelectList(sql);
-                if (selectList === null) return null; // couldn't even locate the SELECT list reliably — don't guess
-                const colPattern = new RegExp(`\\[${metric.column.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\]`, "i");
-                if (colPattern.test(selectList)) return sql; // already selected — nothing to add
-                // Same shape buildDeterministicQuery itself emits, so a column added this way is
-                // indistinguishable from one the builder wrote — including the COALESCE across a
-                // standardised metric's alias columns, and the canonical name as its heading.
-                const cols = Array.isArray(metric.columns) && metric.columns.length ? metric.columns : [metric.column];
-                const ref = cols.length > 1
-                    ? `COALESCE(${cols.map((c) => `${alias}.[${c}]`).join(", ")})`
-                    : `${alias}.[${cols[0]}]`;
-                return sql.replace(/\bFROM\b/i, `, ${ref} AS [${metric.display || metric.column}]\nFROM`);
-            };
-            // Renames ONE existing column reference in place — equally narrow: only fires when the
-            // OLD label appears EXACTLY ONCE in the SELECT list (ambiguous or missing -> bail) AND
-            // the new metric's table is already joined (same reasoning as trySpliceNewColumn).
-            const trySpliceRenameColumn = (sql, oldLabel, metric) => {
-                const newAlias = extractTableAliases(sql).get(metric.table.toLowerCase());
-                if (!newAlias) return null;
-                const escapedOld = oldLabel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-                // Two emitted shapes to recognise: a plain "alias.[Old] AS [Old]", and a
-                // standardised metric's "COALESCE(alias.[Col], alias.[Alias]) AS [Old]" — whose
-                // heading is the canonical name, so matching only on the plain shape would send
-                // every rename of a standardised column to the LLM rewrite instead.
-                const fragmentRe = new RegExp(
-                    `(?:COALESCE\\([^()]*\\)|[A-Za-z_][A-Za-z0-9_]*\\.\\[${escapedOld}\\])\\s+AS\\s+\\[${escapedOld}\\]`, "gi");
-                const matches = sql.match(fragmentRe);
-                if (!matches || matches.length !== 1) return null; // missing or ambiguous — don't guess which one
-                const replacementCols = Array.isArray(metric.columns) && metric.columns.length ? metric.columns : [metric.column];
-                const replacementRef = replacementCols.length > 1
-                    ? `COALESCE(${replacementCols.map((c) => `${newAlias}.[${c}]`).join(", ")})`
-                    : `${newAlias}.[${replacementCols[0]}]`;
-                return sql.replace(fragmentRe, `${replacementRef} AS [${metric.display || metric.column}]`);
-            };
-            // Guards against rewriteSqlForLatestPeriod "helpfully" changing more than the period
-            // filter: same referenced tables AND same SELECT list as the original is the cheap,
-            // good-enough signal that nothing besides the period logic actually moved. Does NOT
-            // re-check read-only-ness/single-statement — /excel_run_query's own _qd_validate_select
-            // already enforces that server-side on EVERY execution through runGeneratedSql below,
-            // this path included, so duplicating it here would just be redundant.
-            const sqlShapeUnchanged = (originalSql, rewrittenSql) => {
-                const origTables = extractReferencedTables(originalSql);
-                const newTables = extractReferencedTables(rewrittenSql);
-                if (origTables.size !== newTables.size || ![...origTables].every(t => newTables.has(t))) return false;
-                const origSelect = extractSelectList(originalSql);
-                const newSelect = extractSelectList(rewrittenSql);
-                return origSelect !== null && origSelect === newSelect;
-            };
-
-            // Confirms a table's OWN estimate/forecast exclusion is actually present in `sql`, for
-            // every period-bearing table `metaByTable` currently says carries an estimate column.
-            // Used both before trusting an "already dynamic" prior query as safe to just re-run
-            // as-is, and after a code-side rebuild — a refresh must never start quietly surfacing
-            // forecast rows just because a literal period turned into a dynamic one (or because a
-            // table's metadata changed since it was first built).
-            // Takes the SOURCES (scanSqlSources) rather than bare [table, alias] pairs, because the
-            // two shapes buildDeterministicQuery emits write this filter differently and only one of
-            // them is alias-qualified:
-            //   - a plain JOIN ("specific"/"years" periods) writes "y.[estimate] = 'no'" in the ON
-            //     clause, so the alias-qualified form is what's there to find.
-            //   - the ROW_NUMBER anchor subquery ("latest"/"range") writes a BARE "[estimate] =
-            //     'no'" inside its own parens, since nothing in there is aliased yet.
-            // Only looking for the first form is why this used to return false for every single
-            // latest/range-built table, sending each plain Refresh off to the LLM period-check it
-            // was supposed to be able to skip. The bare form is matched against that source's OWN
-            // subquery body, never the whole query, so one table's filter can't satisfy another's.
-            const sqlExcludesEstimatesForTables = (sql, sources, metaByTable) => {
-                for (const { table, alias, body } of sources) {
-                    const meta = metaByTable.get(table);
-                    if (!meta || !meta.estimateColumn) continue;
-                    const escapedCol = meta.estimateColumn.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-                    const qualified = new RegExp(`${alias}\\.\\[${escapedCol}\\]\\s*=\\s*'no'`, "i");
-                    const bare = new RegExp(`\\[${escapedCol}\\]\\s*=\\s*'no'`, "i");
-                    if (alias && qualified.test(sql)) continue;
-                    if (body && bare.test(body)) continue;
-                    return false;
-                }
-                return true;
-            };
-
-            // Reads the table-name -> alias pairs straight off `sql`'s own FROM/JOIN clauses,
-            // keeping the table name's ORIGINAL case (unlike extractTableAliases, whose map key is
-            // lowercased — fine for a case-insensitive "is this table already joined" lookup, but
-            // tables_used entries and metaByTable's own keys are cased, so a fresh table name is
-            // needed here to look either up correctly). A table wrapped in the ROW_NUMBER-ranked
-            // anchor subquery is reported under the alias that follows the subquery's own closing
-            // paren — the one the outer SELECT list and ON clause actually reference; see
-            // scanSqlSources for what getting that wrong used to cost.
-            const extractTableAliasPairs = (sql) => scanSqlSources(sql)
-                .filter((s) => s.alias)
-                .map((s) => [s.table, s.alias]);
-
-            // Splits a SELECT list on its TOP-LEVEL commas only. A standardised metric is emitted as
-            // COALESCE(t1.[Revenue], t1.[Interest Income]) — whose own argument commas a plain
-            // split(",") would tear into two broken fragments, failing the whole reconstruction and
-            // sending every Refresh of such a table to the LLM. Safe without real SQL parsing
-            // because buildDeterministicQuery's SELECT list never contains string literals.
-            const splitSelectList = (text) => {
-                const parts = [];
-                let depth = 0, start = 0;
-                for (let i = 0; i < text.length; i++) {
-                    const ch = text[i];
-                    if (ch === "(") depth++;
-                    else if (ch === ")") depth--;
-                    else if (ch === "," && depth === 0) { parts.push(text.slice(start, i)); start = i + 1; }
-                }
-                parts.push(text.slice(start));
-                return parts.map((p) => p.trim()).filter(Boolean);
-            };
-            // Reads a deterministically-built query's SELECT list back into {metrics} for the
-            // Refresh fast path (tryCodeSideRefreshToLatest) — the exact fixed, predictable shape
-            // buildDeterministicQuery always produces: "b.CompName" first, an optional
-            // "alias.[Col] AS [Period]" anchor marker (skipped — re-derived by the builder itself,
-            // never a metric), then one "alias.[Col] AS [AnyName]" per metric, or a
-            // "COALESCE(alias.[Col], alias.[Alias]) AS [AnyName]" for a standardised metric that
-            // resolved to several real columns. Returns null (not an error) the instant anything
-            // doesn't match that shape — the caller falls back to its own non-code-side path.
-            const reconstructMetricsFromSelectList = (sql) => {
-                // \bFROM\b, not \nFROM\b — confirmed live that the SQL coming back out of a
-                // decrypted refresh token isn't guaranteed to keep buildDeterministicQuery's own
-                // multi-line formatting (whatever round-trips it through encryption/storage can
-                // normalize whitespace), so anchoring on a literal newline here was silently
-                // declining perfectly good deterministic-shaped SQL. Same lenient boundary
-                // extractSelectList already uses.
-                const selectMatch = sql.match(/^SELECT\s+(?:TOP\s*\(?\s*\d+\s*\)?\s+)?([\s\S]*?)\bFROM\b/i);
-                if (!selectMatch) return null;
-                const parts = splitSelectList(selectMatch[1]);
-                if (parts[0] !== "b.CompName") return null;
-                const aliasToTable = new Map(extractTableAliasPairs(sql).map(([table, alias]) => [alias, table]));
-                const metrics = [];
-                let periodMarker = null;
-                for (let i = 1; i < parts.length; i++) {
-                    const periodM = parts[i].match(/^([A-Za-z_]\w*)\.\[([^\]]+)\]\s+AS\s+\[Period\]$/);
-                    if (periodM) { periodMarker = { alias: periodM[1], column: periodM[2] }; continue; } // anchor's period marker — re-derived by the builder itself, never a metric
-                    // A standardised metric's alias list is carried back out as `columns`, so a
-                    // rebuild (Refresh/Add Column/period edit) re-emits the SAME COALESCE instead of
-                    // quietly narrowing the metric to its primary column and losing the bank-style
-                    // fallback that was there before.
-                    // The heading is carried back out as `display` whenever it differs from the
-                    // column itself, so a rebuild (Refresh/Add Column/period edit) re-emits the
-                    // SAME heading. Without it a standardised quarterly table would silently drift
-                    // from "Revenue" back to "Revenue (Q)" the first time it was refreshed. Left
-                    // undefined when heading and column already match, so an ordinary metric
-                    // round-trips byte-for-byte exactly as it did before.
-                    const coalesceM = parts[i].match(/^COALESCE\(\s*([\s\S]+?)\s*\)\s+AS\s+\[([^\]]+)\]$/i);
-                    if (coalesceM) {
-                        const refs = splitSelectList(coalesceM[1]).map((r) => r.match(/^([A-Za-z_]\w*)\.\[([^\]]+)\]$/));
-                        if (!refs.length || refs.some((r) => !r)) return null;
-                        if (new Set(refs.map((r) => r[1])).size !== 1) return null; // a COALESCE spanning two tables isn't a shape this builder emits
-                        const coalesceTable = aliasToTable.get(refs[0][1]);
-                        if (!coalesceTable) return null;
-                        const metric = { table: coalesceTable, column: refs[0][2], columns: refs.map((r) => r[2]) };
-                        if (coalesceM[2] !== metric.column) metric.display = coalesceM[2];
-                        metrics.push(metric);
-                        continue;
-                    }
-                    const m = parts[i].match(/^([A-Za-z_]\w*)\.\[([^\]]+)\]\s+AS\s+\[([^\]]+)\]$/);
-                    if (!m) return null;
-                    const table = aliasToTable.get(m[1]);
-                    if (!table) return null;
-                    const metric = { table, column: m[2] };
-                    if (m[3] !== m[2]) metric.display = m[3];
-                    metrics.push(metric);
-                }
-                if (!metrics.length) return null;
-                // aliasToTable/periodMarker are needed again by runTableAddColumns' rebuild and
-                // runTableDataRowEdit (to reconstruct/resolve a table's period) —
-                // tryCodeSideRefreshToLatest, another caller, just ignores these extra fields.
-                return { metrics, aliasToTable, periodMarker };
-            };
-
-            // Reads the plain company-filter WHERE clause back into a company name list — the exact
-            // shape buildDeterministicQuery's companyFilter always produces when at least one
-            // company was named. Also what correctly excludes a ranking table (its WHERE has an
-            // extra "<> '-'" condition, or no CompName filter at all) from the Refresh fast path.
-            const reconstructCompaniesFromWhere = (sql) => {
-                // \bWHERE\b/\bORDER BY\b, not newline-anchored — same reason as
-                // reconstructMetricsFromSelectList above: a decrypted token's SQL isn't guaranteed to
-                // still have buildDeterministicQuery's own original line breaks.
-                const whereMatch = sql.match(/\bWHERE\s+([\s\S]*?)\bORDER BY\b/i);
-                if (!whereMatch) return null;
-                const filterMatch = whereMatch[1].trim().match(/^\(((?:b\.CompName LIKE '(?:[^']|'')*'(?: OR )?)+)\) AND b\.isdefault = 'yes'$/i);
-                if (!filterMatch) return null;
-                const companies = [];
-                const companyRe = /LIKE '%((?:[^']|'')*)%'/g;
-                let cm;
-                while ((cm = companyRe.exec(filterMatch[1]))) companies.push(cm[1].replace(/''/g, "'"));
-                return companies.length ? companies : null;
-            };
-
-            // Recovers a deterministically-built query's FULL period — the exact mode and literal
-            // value(s), not just "is it already dynamic". Used by runTableAddColumns' rebuild to
-            // preserve a table's EXISTING period untouched while a new metric is added. Reads the
-            // anchor's own filter (identified via
-            // reconstructMetricsFromSelectList's periodMarker) against the three shapes
-            // buildDeterministicQuery can produce — ROW_NUMBER "_rn <= N" (latest/range), an
-            // "IN (...)" list (years), or a plain "= 'literal'" equality (specific) — inverting
-            // literal(s) back to {fiscalYear, quarterNo} via parseLiteralPeriodValue. Returns
-            // `{ period: null }` when there's no period marker at all (valid — the table has no
-            // period-bearing metric), or `null` when a marker exists but its filter doesn't match
-            // any recognized shape (a genuine failure — the caller should fall back rather than guess).
-            const reconstructPeriodFromSql = (sql, aliasToTable, periodMarker, metaByTable) => {
-                if (!periodMarker) return { period: null };
-                const anchorTable = aliasToTable.get(periodMarker.alias);
-                const meta = anchorTable && metaByTable.get(anchorTable);
-                if (!meta || !meta.period) return null;
-                const alias = periodMarker.alias;
-                const escapedCol = periodMarker.column.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
-                const rnMatch = sql.match(new RegExp(`${alias}\\._rn\\s*<=\\s*(\\d+)`, "i"));
-                if (rnMatch) {
-                    const n = parseInt(rnMatch[1], 10);
-                    return { period: n <= 1 ? { mode: "latest" } : { mode: "range", range_count: n } };
-                }
-
-                const inMatch = sql.match(new RegExp(`${alias}\\.\\[${escapedCol}\\]\\s+IN\\s*\\(([^)]*)\\)`, "i"));
-                if (inMatch) {
-                    const values = [];
-                    const literalRe = /'((?:[^']|'')*)'/g;
-                    let lm;
-                    while ((lm = literalRe.exec(inMatch[1]))) {
-                        const parsed = parseLiteralPeriodValue(meta.period, lm[1].replace(/''/g, "'"));
-                        if (!parsed) return null;
-                        values.push({ fiscalYear: parsed.fiscalYear, quarter: parsed.quarterNo || undefined });
-                    }
-                    if (!values.length) return null;
-                    return { period: { mode: "years", values } };
-                }
-
-                // "since" mode's own shape (see buildDeterministicQuery) — a bare inequality on the
-                // NORMALIZED year expression, not a literal column comparison, since that's what
-                // lets one pattern cover every period format (plain year, month-year annual,
-                // quarterly) the same way normalizedYearExpr itself already does. Built and matched
-                // against the exact same expression string so this never has to re-derive the
-                // per-format SQL shape independently and risk drifting out of sync with it.
-                const normYearExpr = normalizedYearExpr(alias, periodMarker.column, meta.period).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-                const sinceMatch = sql.match(new RegExp(`${normYearExpr}\\s*>=\\s*(\\d+)`, "i"));
-                if (sinceMatch) return { period: { mode: "since", since_fiscal_year: parseInt(sinceMatch[1], 10) } };
-
-                const eqMatch = sql.match(new RegExp(`${alias}\\.\\[${escapedCol}\\]\\s*=\\s*'((?:[^']|'')*)'`, "i"));
-                if (eqMatch) {
-                    const parsed = parseLiteralPeriodValue(meta.period, eqMatch[1].replace(/''/g, "'"));
-                    if (!parsed) return null;
-                    return { period: { mode: "specific", fiscal_year: parsed.fiscalYear, quarter: parsed.quarterNo || undefined } };
-                }
-
-                return null; // marker exists but its filter doesn't match any recognized shape
-            };
-
-            // Code-side equivalent of rewriteSqlForLatestPeriod for the common case: a table built
-            // by buildDeterministicQuery (the normal Download flow's own output) has a fixed,
-            // predictable SELECT/WHERE shape — reading {companies, metrics} back out of it and
-            // re-running the SAME builder with period.mode "latest" reuses its own already-correct
-            // per-period-format "latest per entity" logic (ROW_NUMBER anchor + join-equality ties
-            // for every other period table) instead of asking an LLM to re-derive it freeform every
-            // time. Returns null (not an error) whenever the SQL doesn't match that exact shape —
-            // the caller falls back to the LLM rewrite unchanged, same as every other fast path this
-            // session added.
-            const tryCodeSideRefreshToLatest = async (prior) => {
-                try {
-                    const sql = prior.sql;
-                    const tablesUsed = Array.isArray(prior.tables_used) ? prior.tables_used : [];
-                    if (!tablesUsed.length) { console.log("[QueryData] refresh fast path: no tables_used on the token — falling back."); return null; }
-
-                    const referenced = extractReferencedTables(sql);
-                    const expected = new Set(tablesUsed.map((t) => t.toLowerCase()));
-                    if (referenced.size !== expected.size || ![...referenced].every((t) => expected.has(t))) {
-                        console.log("[QueryData] refresh fast path: referenced tables don't exactly match tables_used — falling back.", { referenced: [...referenced], expected: [...expected] });
-                        return null;
-                    }
-
-                    const metaByTable = await loadPeriodJoinMetadata(tablesUsed);
-                    const sources = scanSqlSources(sql);
-                    const periodTables = tablesUsed.filter((t) => t !== BASIC_INFO_TABLE && metaByTable.get(t) && metaByTable.get(t).period);
-
-                    // Case 1 — already dynamic (an original "latest"/"range" build): re-resolves on
-                    // every run regardless of table count, nothing to change.
-                    if (/\._rn\s*<=\s*\d+/i.test(sql)) {
-                        if (!sqlExcludesEstimatesForTables(sql, sources, metaByTable)) {
-                            console.log("[QueryData] refresh fast path: already-dynamic query is missing an expected estimate exclusion — falling back rather than trusting it.");
-                            return null;
-                        }
-                        return { sql, changed: false };
-                    }
-
-                    // Case 2 — not period-based at all: nothing to refresh.
-                    if (!periodTables.length) return { sql, changed: false };
-
-                    // Case 3 — a literal period needs upgrading. Reconstruct {companies, metrics}
-                    // from the SQL's own fixed, predictable shape.
-                    const reconstructed = reconstructMetricsFromSelectList(sql);
-                    if (!reconstructed) { console.log("[QueryData] refresh fast path: couldn't reconstruct the SELECT list — falling back."); return null; }
-                    const { metrics, aliasToTable, periodMarker } = reconstructed;
-
-                    const companies = reconstructCompaniesFromWhere(sql);
-                    if (!companies) { console.log("[QueryData] refresh fast path: couldn't reconstruct a plain company filter from the WHERE clause (ranking table, or otherwise non-standard) — falling back."); return null; }
-
-                    // What does this table's period filter ALREADY express? Confirmed live as the
-                    // actual bug a blind "always upgrade to latest" used to cause: a table built
-                    // for an EXPLICIT named span ("2021 to 2025", period.mode "years") got that
-                    // whole span collapsed down to a single newest row the instant Refresh ran —
-                    // "it got the latest data but it also erased the already present data." Only a
-                    // genuinely single named period ("specific") should actually become "latest";
-                    // an explicit multi-value span must instead be EXTENDED to also cover whatever's
-                    // newly available, never replaced outright.
-                    const periodResult = reconstructPeriodFromSql(sql, aliasToTable, periodMarker, metaByTable);
-                    if (periodResult === null) { console.log("[QueryData] refresh fast path: couldn't reconstruct the existing period filter's shape — falling back."); return null; }
-                    const oldPeriod = periodResult.period;
-
-                    let newPeriod;
-                    if (!oldPeriod || oldPeriod.mode === "specific") {
-                        newPeriod = { mode: "latest" };
-                    } else if (oldPeriod.mode === "years") {
-                        // An explicit, user-named SET of periods — extend it by switching to an
-                        // open lower bound anchored at the span's own earliest year (mode "since"),
-                        // so every period the user named stays, and whatever's newly available
-                        // beyond the old top of the span comes along too — "2021 to 2025" refreshes
-                        // into "2021 onward" rather than into "just the newest row". This also
-                        // means a LATER refresh needs no further upgrading at all: "since" is
-                        // already open-ended, exactly like "latest"/"range" — see Case 1 above (that
-                        // regex only catches the ROW_NUMBER shape, so a "since"-built query reaches
-                        // this same Case 3 on its next refresh too, and oldPeriod.mode === "since"
-                        // below is what recognizes it and leaves it alone).
-                        const fiscalYears = oldPeriod.values.map((v) => v.fiscalYear).filter((y) => Number.isFinite(y));
-                        if (!fiscalYears.length) { console.log("[QueryData] refresh fast path: explicit period list had no usable fiscal years — falling back."); return null; }
-                        newPeriod = { mode: "since", since_fiscal_year: Math.min(...fiscalYears) };
-                    } else {
-                        // "latest"/"range" would already have matched Case 1's regex above; "since"
-                        // reaching here means it's already open-ended — either way, nothing to do.
-                        return { sql, changed: false };
-                    }
-
-                    const plan = { feasible: true, companies, metrics, period: newPeriod };
-                    const rebuilt = buildDeterministicQuery(plan, metaByTable);
-                    if (!rebuilt || !rebuilt.sql) { console.log("[QueryData] refresh fast path: buildDeterministicQuery declined the reconstructed plan — falling back."); return null; }
-
-                    if (!sqlShapeUnchanged(sql, rebuilt.sql)) {
-                        console.log("[QueryData] refresh fast path: rebuilt SQL's tables/SELECT list don't match the original — reconstruction wasn't faithful, falling back.", { original: sql, rebuilt: rebuilt.sql });
-                        return null;
-                    }
-                    if (!sqlExcludesEstimatesForTables(rebuilt.sql, scanSqlSources(rebuilt.sql), metaByTable)) {
-                        console.log("[QueryData] refresh fast path: rebuilt SQL is missing an expected estimate exclusion — falling back rather than running it.");
-                        return null;
-                    }
-
-                    return { sql: rebuilt.sql, title: rebuilt.title, description: rebuilt.description, changed: true };
-                } catch (e) {
-                    console.warn("[QueryData] refresh fast path failed, falling back to the LLM rewrite:", e.message);
-                    return null;
-                }
-            };
-
-            // Runs a plain REFRESH for one table: decrypt its tag, ask the model ONLY to check/fix
-            // the period filter (see rewriteSqlForLatestPeriod — never to change what the table is
-            // about, unlike Modify), independently verify the rewrite didn't touch anything besides
-            // that (sqlShapeUnchanged), then execute and writeRefreshedTable. Title/description ARE
-            // allowed to change here too, but only to keep them accurate about the (possibly now
-            // different) period the data covers — rewriteSqlForLatestPeriod returns them unchanged
-            // on its own if nothing about the query's period actually needed updating.
-            const runTableSimpleRefresh = async (entry, statusEl) => {
-                statusEl = wrapStatusElWithOverlay(statusEl);
-                setTableRefreshingFlag(entry, true); // see its own comment — guards against pollTableMetaEdits mistaking this write for a user edit
-                currentTrace = [];
-                let outcome = "(ended before any outcome was recorded)";
-                try {
-                    statusEl.style.display = "block";
-                    statusEl.textContent = "Reading the original query…";
-                    const prior = await decryptRefreshTokenWithFallback(entry, (step) => { statusEl.textContent = step; });
-                    traceLookup("Decrypt refresh tag", "(server-side decrypt, no SQL sent from here)", `sql: ${prior.sql}\nuser_query: ${prior.user_query}`);
-
-                    statusEl.textContent = "Checking for a newer period…";
-                    let rewritten = await tryCodeSideRefreshToLatest(prior);
-                    if (rewritten) {
-                        traceLookup(
-                            "Refresh: code-side latest-period rebuild (no LLM)",
-                            "(pure code — re-derives the query via buildDeterministicQuery with period.mode=\"latest\")",
-                            rewritten.changed ? `Rebuilt:\n${rewritten.sql}` : "Already resolves to the latest period dynamically (or isn't period-based at all) — nothing to rebuild."
-                        );
-                    } else {
-                        const sampleText = await readSampleRows(entry);
-                        traceLookup("Read sample rows", "(reads the sheet directly, no SQL)", sampleText ? `${sampleText.split("\n").length} row(s) sampled` : "no data rows to sample");
-                        statusEl.textContent = "Asking the model to check the period…";
-                        rewritten = await rewriteSqlForLatestPeriod(prior.sql, prior.user_query, prior.description, sampleText);
-                    }
-                    if (!rewritten.sql) {
-                        outcome = "DECLINED — no SQL returned.";
-                        statusEl.textContent = "Couldn't refresh this table.";
-                        return;
-                    }
-
-                    const shapeOk = sqlShapeUnchanged(prior.sql, rewritten.sql);
-                    traceLookup(
-                        "Refresh safety check: table/SELECT-list diff",
-                        "(static text comparison — no SQL executed)",
-                        shapeOk ? "OK — same referenced tables and SELECT list as the original" : "FAILED — the rewrite changed more than the period filter"
-                    );
-                    if (!shapeOk) {
-                        outcome = `REJECTED — the rewritten query changed more than the period filter, so it was not run.\n\nOriginal SQL:\n${prior.sql}\n\nRewritten SQL:\n${rewritten.sql}`;
-                        statusEl.textContent = "That refresh didn't look safe to run (it changed more than just the period) — try Modify instead, or try again.";
-                        return;
-                    }
-                    outcome = rewritten.changed
-                        ? `Rewrote the period filter to the latest available per entity:\n${rewritten.sql}`
-                        : `Query already resolves to the latest period dynamically — re-ran unchanged:\n${rewritten.sql}`;
-
-                    statusEl.textContent = "Running the query…";
-                    const data = await runGeneratedSql(rewritten.sql, prior.user_query || "Refresh", (rewritten.title || prior.title || "Query Result").slice(0, 31), prior.tables_used, rewritten.title || prior.title, rewritten.description || prior.description);
-                    // The model updates title/description to match the refreshed period (see
-                    // rewriteSqlForLatestPeriod) — falls back to `prior`'s only if it left either
-                    // blank, never silently dropping them.
-                    data.title = rewritten.title || prior.title || "Query Result";
-                    data.description = rewritten.description || prior.description || "";
-
-                    outcome += await writeRefreshedTable(entry, data, statusEl);
-                } catch (e) {
-                    console.warn("[QueryData] refresh failed:", e);
-                    outcome = `ERROR: ${e.message}`;
-                    statusEl.textContent = e.message && e.message !== "Failed to fetch" ? e.message : "Couldn't refresh this table — please try again.";
-                } finally {
-                    if (currentTrace) saveQueryDataTrace(formatQueryDataTrace(`Refresh: ${entry.title}`, currentTrace, outcome), `refresh-${entry.title}`);
-                    hideQueryDataOverlay();
-                    setTableRefreshingFlag(entry, false);
-                    flushQueryDataCost(`Refresh "${entry.title}"`);
-                }
-            };
-
-            // Runs an ADD-COLUMN(S) update for one table: decrypt its tag, ask the model to fold in
-            // whatever new header(s) the user typed directly into the sheet (see addColumnsToTable —
-            // allowed to pull in a table that isn't currently used, unlike a plain Modify), then
-            // execute and writeRefreshedTable. No sqlShapeUnchanged check here — unlike plain
-            // Refresh, genuinely changing the SELECT list (and possibly the tables) is the whole
-            // point of this flow, not something to guard against.
-            const runTableAddColumns = async (entry, newColumnLabels, statusEl) => {
-                statusEl = wrapStatusElWithOverlay(statusEl);
-                // Covers the manual Update-bar click (its only caller) — sets this itself (same
-                // "don't mistake my own write for a user edit" guard runTableRefresh/
-                // runTableHeaderRename also set on themselves) rather than relying on the caller to.
-                setTableRefreshingFlag(entry, true);
-                currentTrace = [];
-                let outcome = "(ended before any outcome was recorded)";
-                try {
-                    statusEl.style.display = "block";
-                    statusEl.textContent = "Reading the original query…";
-                    const prior = await decryptRefreshTokenWithFallback(entry, (step) => { statusEl.textContent = step; });
-                    traceLookup("Decrypt refresh tag", "(server-side decrypt, no SQL sent from here)", `sql: ${prior.sql}\nuser_query: ${prior.user_query}`);
-                    const sampleText = await readSampleRows(entry);
-                    traceLookup("Read sample rows", "(reads the sheet directly, no SQL)", sampleText ? `${sampleText.split("\n").length} row(s) sampled` : "no data rows to sample");
-
-                    // Fast path first: if every new header label is an exact, known metric (the
-                    // SAME classify/resolve machinery the skeleton-grid Download flow uses — see
-                    // its own comment) AND its table is already JOINed in the existing query,
-                    // splice it straight into the SQL as plain text — no freeform rewrite LLM call
-                    // at all, possibly not even the scoped one if everything exact-matched locally.
-                    let updated = null;
-                    let allTables = prior.tables_used || [];
-                    try {
-                        const classification = classifyGridCells([newColumnLabels]);
-                        console.log("[QueryData] add-columns classification:", classification);
-                        const resolution = await resolveGridTermsOrNull(classification);
-                        console.log("[QueryData] add-columns resolution:", resolution);
-                        const uniqueLabels = new Set(newColumnLabels);
-                        // Every label must have resolved AS A METRIC specifically — not a company or
-                        // period (a header label landing there would be a strange edge case, not
-                        // something to guess about) — and none left unresolved.
-                        if (!resolution) {
-                            console.warn("[QueryData] add-columns: a new label couldn't be resolved as company/metric/period/irrelevant — falling back to the LLM rewrite.");
-                        } else if (resolution.companies.length || resolution.periodValues.length || resolution.metrics.length !== uniqueLabels.size) {
-                            console.warn("[QueryData] add-columns: new label(s) didn't resolve cleanly as metrics (some landed as a company/period, or one didn't resolve at all) — falling back to the LLM rewrite.", { newColumnLabels, resolution });
-                        } else {
-                            let splicedSql = prior.sql;
-                            let spliceFailedTable = null;
-                            for (const metric of resolution.metrics) {
-                                const next = trySpliceNewColumn(splicedSql, metric);
-                                if (!next) { spliceFailedTable = metric.table; splicedSql = null; break; }
-                                splicedSql = next;
-                            }
-                            if (splicedSql) {
-                                traceLookup(
-                                    "Add column(s): code-side splice (no freeform rewrite)",
-                                    "(text-level SQL edit, no SQL executed yet)",
-                                    `spliced in: ${resolution.metrics.map((m) => `${m.table}.${m.column}`).join(", ")}`
-                                );
-                                updated = {
-                                    sql: splicedSql,
-                                    title: prior.title,
-                                    description: prior.description ? `${prior.description}, plus ${newColumnLabels.join(", ")}` : "",
-                                    explanation: "",
-                                };
-                            } else {
-                                console.warn(`[QueryData] add-columns: couldn't splice ${spliceFailedTable} in via plain text — it isn't already joined in this query. Trying a full code-side rebuild (brings in the new table/JOIN) before falling back to the LLM.`);
-                                // Second fast path: the simple splice only ever inserts a column into
-                                // an ALREADY-joined table — bringing in a genuinely new table needs the
-                                // SAME correct-join/period-alignment/granularity-handling judgment
-                                // buildDeterministicQuery already makes. Reconstruct the table's WHOLE
-                                // existing plan (same reconstruction trio Refresh already uses), add
-                                // the new metric(s) to it, and let the builder re-derive the
-                                // join/period logic from scratch — rather than hand-writing a JOIN via
-                                // text splice and risking getting any of that wrong silently.
-                                try {
-                                    const reconstructed = reconstructMetricsFromSelectList(prior.sql);
-                                    const companies = reconstructed ? reconstructCompaniesFromWhere(prior.sql) : null;
-                                    if (!reconstructed || !companies) {
-                                        console.warn("[QueryData] add-columns: couldn't reconstruct the existing query's shape for a full rebuild (ranking table, or otherwise non-standard) — falling back to the LLM rewrite.");
-                                    } else {
-                                        const newTables = [...new Set(resolution.metrics.map((m) => m.table))];
-                                        let fullTables = Array.from(new Set([...(prior.tables_used || []), ...newTables]));
-                                        let fullMetaByTable = await loadPeriodJoinMetadata(fullTables);
-                                        const periodResult = reconstructPeriodFromSql(prior.sql, reconstructed.aliasToTable, reconstructed.periodMarker, fullMetaByTable);
-                                        if (!periodResult) {
-                                            console.warn("[QueryData] add-columns: couldn't reconstruct the existing period for a full rebuild — falling back to the LLM rewrite.");
-                                        } else {
-                                            let newMetrics = resolution.metrics;
-                                            let plan = { feasible: true, companies, metrics: [...reconstructed.metrics, ...newMetrics], period: periodResult.period || { mode: "latest" } };
-                                            let rebuilt = buildDeterministicQuery(plan, fullMetaByTable);
-                                            if (!rebuilt) {
-                                                // Granularity conflict — substitute the NEW metric(s)
-                                                // for their equivalent in the EXISTING table's own
-                                                // granularity, never the other way around (see
-                                                // tryMatchNewMetricsToExistingGranularity's own
-                                                // comment for why).
-                                                const existingFormats = new Set(reconstructed.metrics.map((m) => fullMetaByTable.get(m.table)?.period?.format).filter(Boolean));
-                                                const existingFormat = existingFormats.values().next().value;
-                                                const matchedMetrics = tryMatchNewMetricsToExistingGranularity(newMetrics, existingFormat, fullMetaByTable);
-                                                if (matchedMetrics) {
-                                                    newMetrics = matchedMetrics;
-                                                    // The matched equivalent could live on a DIFFERENT
-                                                    // table than originally resolved (that's the whole
-                                                    // point) — expand fullTables/fullMetaByTable to
-                                                    // cover it before retrying, or buildDeterministicQuery
-                                                    // would just fail again for missing metadata.
-                                                    const matchedTables = [...new Set(newMetrics.map((m) => m.table))];
-                                                    const expandedTables = Array.from(new Set([...fullTables, ...matchedTables]));
-                                                    if (expandedTables.length !== fullTables.length) {
-                                                        fullTables = expandedTables;
-                                                        fullMetaByTable = await loadPeriodJoinMetadata(fullTables);
-                                                    }
-                                                    plan = { ...plan, metrics: [...reconstructed.metrics, ...newMetrics] };
-                                                    rebuilt = buildDeterministicQuery(plan, fullMetaByTable);
-                                                } else {
-                                                    console.warn("[QueryData] add-columns: new metric's table has a different period granularity than the existing one, and no equivalent column exists in the existing table's own granularity — falling back to the LLM rewrite.");
-                                                }
-                                            }
-                                            if (rebuilt && rebuilt.sql) {
-                                                traceLookup(
-                                                    "Add column(s): code-side rebuild with a new JOIN (no LLM)",
-                                                    "(pure code — re-derives the query via buildDeterministicQuery)",
-                                                    `Rebuilt:\n${rebuilt.sql}`
-                                                );
-                                                updated = {
-                                                    sql: rebuilt.sql,
-                                                    title: prior.title,
-                                                    description: prior.description ? `${prior.description}, plus ${newColumnLabels.join(", ")}` : "",
-                                                    explanation: "",
-                                                };
-                                                allTables = fullTables;
-                                            } else {
-                                                console.warn("[QueryData] add-columns: full rebuild couldn't bring in the new table either (e.g. a granularity conflict) — falling back to the LLM rewrite.");
-                                            }
-                                        }
-                                    }
-                                } catch (e) {
-                                    console.warn("[QueryData] add-columns: full rebuild attempt failed, falling back to the LLM rewrite:", e.message);
-                                }
-                            }
-                        }
-                    } catch (e) {
-                        console.warn("[QueryData] add-columns fast path failed, falling back to the LLM rewrite:", e.message);
-                    }
-
-                    if (!updated) {
-                        // Same merged table + structured-extraction call generateSql uses for a fresh
-                        // Download — given just the new column label(s) as the "request" — to find which
-                        // catalog table(s) can supply them, merged with whatever the original query
-                        // already used (only its metrics' tables, not its own BASIC_INFO_TABLE addition,
-                        // which is unconditionally folded in below anyway). Both then go through
-                        // loadSchemaAndColumns for REAL, INFORMATION_SCHEMA-verified columns before
-                        // addColumnsToTable ever writes SQL — the catalog's own column-name lists alone
-                        // aren't trustworthy enough to join on (confirmed live: without this, the model
-                        // repeatedly invented a shared "mode" column between two tables that didn't
-                        // actually have one, 3 times in a row with the same exact mistake).
-                        statusEl.textContent = `Finding which table has ${newColumnLabels.join(", ")}…`;
-                        const columnPlan = await extractPlanAndTables(newColumnLabels.join(", "));
-                        const columnMetrics = Array.isArray(columnPlan.metrics) ? columnPlan.metrics.filter((m) => m && m.table && m.column) : [];
-                        const candidateTables = [...new Set(columnMetrics.map((m) => m.table))];
-                        allTables = Array.from(new Set([...(prior.tables_used || []), ...candidateTables, BASIC_INFO_TABLE]));
-                        traceLookup(
-                            "Tables considered for the new column(s)",
-                            "(catalog match, no SQL executed)",
-                            `original table(s): ${(prior.tables_used || []).join(", ") || "(none recorded)"}\nmatched for new column(s): ${candidateTables.join(", ") || "(none)"}\nreason if none matched: ${columnPlan.reason_if_infeasible || "(none given)"}`
-                        );
-                        const schemaMarkdown = await loadSchemaAndColumns(allTables, (step) => { statusEl.textContent = step; });
-
-                        statusEl.textContent = `Adding ${newColumnLabels.join(", ")}…`;
-                        updated = await addColumnsToTable(prior.sql, prior.user_query, prior.description, newColumnLabels, sampleText, schemaMarkdown);
-                    }
-                    if (!updated.sql) {
-                        outcome = `DECLINED — no SQL generated.\nExplanation: ${updated.explanation || "(none given)"}`;
-                        statusEl.textContent = updated.explanation || `Couldn't find ${newColumnLabels.join(", ")} in the data catalog.`;
-                        return;
-                    }
-                    outcome = `SQL generated:\n${updated.sql}\n\nExplanation: ${updated.explanation || "(none given)"}`;
-
-                    statusEl.textContent = "Running the updated query…";
-                    const data = await runGeneratedSql(updated.sql, prior.user_query || newColumnLabels.join(", "), (updated.title || "Query Result").slice(0, 31), allTables, updated.title, updated.description);
-                    data.title = updated.title || prior.title || "Query Result";
-                    data.description = updated.description || prior.description || "";
-
-                    // ignoreHeaderRow=true: the new column(s) exist because the user typed their
-                    // headers directly into cells past the table's old width — that typed text is
-                    // the whole reason this ran, and is always about to be replaced with the real
-                    // header below, never "someone else's content" to avoid overwriting.
-                    outcome += await writeRefreshedTable(entry, data, statusEl, true);
-                } catch (e) {
-                    console.warn("[QueryData] add-columns failed:", e);
-                    outcome = `ERROR: ${e.message}`;
-                    statusEl.textContent = e.message && e.message !== "Failed to fetch" ? e.message : "Couldn't update this table — please try again.";
-                } finally {
-                    if (currentTrace) saveQueryDataTrace(formatQueryDataTrace(`Add column(s): ${newColumnLabels.join(", ")}`, currentTrace, outcome), `add-columns-${entry.title}`);
-                    hideQueryDataOverlay();
-                    setTableRefreshingFlag(entry, false);
-                    flushQueryDataCost(`Add column(s) to "${entry.title}": ${newColumnLabels.join(", ")}`);
-                }
-            };
-
-            // Updates the description to mention a company/period change made directly in the
-            // sheet's data rows (see runTableDataRowEdit/pollTableMetaEdits) — not polished prose,
-            // just enough to keep the description from silently going stale, same utilitarian
-            // standard Add Columns' own "${description}, plus ${labels}" already sets.
-            // A company swap replaces that company's name wherever it appears in the existing
-            // description text, rather than appending a parenthetical note that leaves the OLD
-            // name in place — a description reading "...for Reliance... (updated for Tata Steel
-            // via a direct sheet edit)" is actively misleading (it names BOTH companies) and, worse,
-            // is exactly the kind of contradictory context a later LLM fallback (e.g. a subsequent
-            // period edit that can't be handled code-side) can latch onto and use to revert the
-            // company back to the one still named first. `swap` (old/new company lists, same order,
-            // from the companyChange branch's own one-for-one retype detection) drives an exact
-            // substring replace; anything else (periodChange, or a companyChange that wasn't a clean
-            // swap) keeps the old append-style note.
-            const describeDataRowChange = (description, change, swap) => {
-                if (!description) return "";
-                if (change.kind === "companyChange" && swap && swap.oldCompanies && swap.newCompanies
-                    && swap.oldCompanies.length === swap.newCompanies.length) {
-                    let updated = description;
-                    let replacedAny = false;
-                    swap.oldCompanies.forEach((oldName, i) => {
-                        const newName = swap.newCompanies[i];
-                        if (oldName && newName && oldName !== newName && updated.includes(oldName)) {
-                            updated = updated.split(oldName).join(newName);
-                            replacedAny = true;
-                        }
-                    });
-                    if (replacedAny) return updated;
-                }
-                const extra = change.kind === "companyChange" ? `for ${change.companies.join(", ")}` : `covering ${change.periods.join(", ")}`;
-                return `${description} (updated ${extra} via a direct sheet edit)`;
-            };
-
-            // Runs a data-row edit for ONE table — the user typed a new company/period directly
-            // into the sheet below the table's existing data, or retyped an existing row's company/
-            // period cell (see pollTableMetaEdits' data-row watcher). Two kinds only, never both at
-            // once (see classifyDataRowChange): "companyChange" (the final set of companies to show,
-            // read straight off the sheet) and "periodChange" (the final set of periods, same way).
-            // Fast path reuses the SAME reconstruction trio Refresh/Add Columns already use —
-            // reconstruct the table's existing plan, substitute just the ONE dimension that
-            // changed, and let buildDeterministicQuery re-derive the query from scratch, falling
-            // back to the LLM rewrite (refreshSqlFromPrevious) for anything it can't cleanly handle
-            // (a non-standard/ranking query, a period value that doesn't parse, a granularity
-            // conflict) — same "never a dead end" pattern every other fast path here already has.
-            const runTableDataRowEdit = async (entry, change, statusEl) => {
-                statusEl = wrapStatusElWithOverlay(statusEl);
-                setTableRefreshingFlag(entry, true);
-                currentTrace = [];
-                let outcome = "(ended before any outcome was recorded)";
-                const describe = change.kind === "companyChange" ? `Company change (typed directly in the sheet): now ${change.companies.join(", ")}`
-                    : change.kind === "periodChange" ? `Period change (typed directly in the sheet): now ${change.periods.join(", ")}`
-                    : `Company and period both changed (typed directly in the sheet): companies now ${change.companies.join(", ") || "(unchanged)"}, periods now ${change.periods.join(", ") || "(unchanged)"}`;
-                try {
-                    statusEl.style.display = "block";
-                    statusEl.textContent = "Reading the original query…";
-                    const prior = await decryptRefreshTokenWithFallback(entry, (step) => { statusEl.textContent = step; });
-                    traceLookup("Decrypt refresh tag", "(server-side decrypt, no SQL sent from here)", `sql: ${prior.sql}\nuser_query: ${prior.user_query}`);
-
-                    let updated = null;
-                    // Reassigned below only when a grain-aware period rebuild succeeds (see
-                    // buildGrainAwareQuery's own `tables` field) — a mixed/switched-grain rebuild can
-                    // bring in a table that wasn't joined before (e.g. a previously annual-only table
-                    // now also needing the quarterly table for a newly-typed quarter row), and the
-                    // refresh token minted for the updated table needs to record THAT set, not the
-                    // one it walked in with — otherwise a later edit (Add Columns, another period
-                    // change) would load metadata for only the table(s) this one already knew about.
-                    let allTables = prior.tables_used || [];
-                    try {
-                        const reconstructed = reconstructMetricsFromSelectList(prior.sql);
-                        const metaByTable = reconstructed ? await loadPeriodJoinMetadata(prior.tables_used || []) : null;
-                        if (!reconstructed || !metaByTable) {
-                            console.warn("[QueryData] data-row edit: couldn't reconstruct the existing query's shape for a rebuild — falling back to the LLM rewrite.");
-                        } else if (change.kind === "companyChange") {
-                            // Period stays exactly as it already was — only the company list changes.
-                            const periodResult = reconstructPeriodFromSql(prior.sql, reconstructed.aliasToTable, reconstructed.periodMarker, metaByTable);
-                            if (!periodResult) {
-                                console.warn("[QueryData] data-row edit: couldn't reconstruct the existing period for a rebuild — falling back to the LLM rewrite.");
-                            } else {
-                                // change.companies is just "every company name now displayed" — used
-                                // as-is, that would ADD a newly-typed company alongside whatever's
-                                // still shown elsewhere, rather than REPLACING the one that actually
-                                // changed. A clean one-for-one retype (exactly one old name
-                                // disappeared, exactly one new one appeared) instead swaps that one
-                                // name everywhere it was in the ORIGINAL list — so every row that
-                                // company had moves to the new company together, and every OTHER
-                                // company's rows are untouched. Anything else (a brand-new company
-                                // added via a new row with nothing removed, two swaps at once, …)
-                                // keeps the union as-is — that IS the right answer for "add one more".
-                                let newCompanies = change.companies;
-                                let cleanSwap = null;
-                                const oldCompanies = reconstructCompaniesFromWhere(prior.sql);
-                                if (oldCompanies) {
-                                    const removed = oldCompanies.filter((c) => !change.companies.includes(c));
-                                    const added = change.companies.filter((c) => !oldCompanies.includes(c));
-                                    if (removed.length === 1 && added.length === 1) {
-                                        newCompanies = oldCompanies.map((c) => (c === removed[0] ? added[0] : c));
-                                        cleanSwap = { oldCompanies, newCompanies };
-                                    }
-                                }
-                                const plan = { feasible: true, companies: newCompanies, metrics: reconstructed.metrics, period: periodResult.period || { mode: "latest" } };
-                                const rebuilt = buildDeterministicQuery(plan, metaByTable);
-                                if (rebuilt && rebuilt.sql) {
-                                    traceLookup("Data row edit: code-side rebuild (no LLM)", "(pure code — re-derives the query via buildDeterministicQuery)", `Rebuilt:\n${rebuilt.sql}`);
-                                    updated = { sql: rebuilt.sql, title: prior.title, description: describeDataRowChange(prior.description, change, cleanSwap), explanation: "" };
-                                } else {
-                                    console.warn("[QueryData] data-row edit: rebuild declined for the new company set — falling back to the LLM rewrite.");
-                                }
-                            }
-                        } else if (change.kind === "periodChange") {
-                            // periodChange — companies stay exactly as they were; the period list is
-                            // built directly from what's now displayed in the Period column (ground
-                            // truth), parsed against the anchor table's own stored format.
-                            const companies = reconstructCompaniesFromWhere(prior.sql);
-                            const anchorTable = reconstructed.periodMarker && reconstructed.aliasToTable.get(reconstructed.periodMarker.alias);
-                            const periodMeta = anchorTable && metaByTable.get(anchorTable) && metaByTable.get(anchorTable).period;
-                            if (!companies || !periodMeta) {
-                                console.warn("[QueryData] data-row edit: couldn't reconstruct the existing companies, or this table has no reconstructable period column — falling back to the LLM rewrite.");
-                            } else {
-                                // Every displayed value is read TWO ways, in this order: as the
-                                // literal this table's own query wrote (parseLiteralPeriodValue —
-                                // what every UNTOUCHED row still holds, e.g. "2025" or "Sep2025"),
-                                // then as whatever a human typed by hand (parsePeriodToken — "Q1
-                                // FY27", "q4fy26", "FY26 Q4", "Sep 2025", "Oct 2025", …).
-                                //
-                                // Only the first reading existed before, which is why a hand-typed
-                                // quarter never got through this fast path AT ALL — not even in the
-                                // canonical "Q1FY27" spelling, since parseLiteralPeriodValue only
-                                // ever understood the STORED month-year form. Every quarterly row
-                                // edit was silently paying for an LLM rewrite.
-                                const parsed = change.periods.map((shown) => {
-                                    const asStored = parseLiteralPeriodValue(periodMeta, shown);
-                                    if (asStored) return asStored;
-                                    const asTyped = parsePeriodToken(shown);
-                                    if (asTyped && Number.isFinite(asTyped.fiscalYear)) {
-                                        return { fiscalYear: asTyped.fiscalYear, quarterNo: asTyped.quarter || null };
-                                    }
-                                    // Last: a month-year Excel already turned into a date serial
-                                    // behind the user's back — see parseExcelSerialPeriod.
-                                    return parseExcelSerialPeriod(shown);
-                                });
-                                if (parsed.some((p) => !p)) {
-                                    console.warn("[QueryData] data-row edit: couldn't read one of the displayed period values as either this table's stored format or a typed period — falling back to the LLM rewrite.");
-                                } else {
-                                    const values = parsed.map((p) => ({ fiscalYear: p.fiscalYear, quarter: p.quarterNo || undefined }));
-                                    const plan = { feasible: true, companies, metrics: reconstructed.metrics, period: { mode: "years", values } };
-                                    // A quarterly period typed into an annual table (or an annual one
-                                    // into a quarterly table) leaves this list spanning BOTH grains,
-                                    // or switched wholesale to the other one. Neither fits a single
-                                    // table, so those go to buildGrainAwareQuery — which re-points
-                                    // each grain's metrics at the table that actually holds it and,
-                                    // for a genuinely mixed list, UNION ALLs the two halves.
-                                    // Single-grain-and-unchanged stays on the ordinary path first,
-                                    // byte-for-byte as before, and only falls through to the
-                                    // grain-aware builder if that declines.
-                                    const mixedGrain = values.some((v) => v.quarter) && values.some((v) => !v.quarter);
-                                    let rebuilt = mixedGrain ? null : buildDeterministicQuery(plan, metaByTable);
-                                    let wentGrainAware = false;
-                                    if (!rebuilt || !rebuilt.sql) { rebuilt = await buildGrainAwareQuery(plan, values); wentGrainAware = true; }
-                                    if (rebuilt && rebuilt.sql) {
-                                        traceLookup(
-                                            `Data row edit: code-side rebuild (no LLM)${mixedGrain ? " — mixed annual + quarterly periods, stitched with UNION ALL" : ""}`,
-                                            "(pure code — re-derives the query via buildDeterministicQuery)",
-                                            `Rebuilt:\n${rebuilt.sql}`
-                                        );
-                                        // See the grain-aware path's own `tables` field — a rebuild
-                                        // that went through it may reference a table that wasn't
-                                        // joined before.
-                                        if (wentGrainAware && Array.isArray(rebuilt.tables)) allTables = rebuilt.tables;
-                                        updated = { sql: rebuilt.sql, title: prior.title, description: describeDataRowChange(prior.description, change), explanation: "" };
-                                    } else {
-                                        console.warn("[QueryData] data-row edit: rebuild declined for the new period set — falling back to the LLM rewrite.");
-                                    }
-                                }
-                            }
-                        } else {
-                            console.warn("[QueryData] data-row edit: both company and period changed at once — too compound for the fast path, falling back to the LLM rewrite.");
-                        }
-                    } catch (e) {
-                        console.warn("[QueryData] data-row edit fast path failed, falling back to the LLM rewrite:", e.message);
-                    }
-
-                    if (!updated) {
-                        const sampleText = await readSampleRows(entry);
-                        traceLookup("Read sample rows", "(reads the sheet directly, no SQL)", sampleText ? `${sampleText.split("\n").length} row(s) sampled` : "no data rows to sample");
-                        statusEl.textContent = "Asking the model to update the query…";
-                        // Ground truth for "what company/companies does this table show right now" —
-                        // the sheet's own single-company meta row when there is one (always fresh: a
-                        // re-scan runs after every successful write, whichever path produced it), else
-                        // reconstructed from the stored SQL. Stated explicitly whenever the company
-                        // isn't the thing changing, so the model can't quietly revert an already-applied
-                        // company swap by inferring the wrong one from the sql/description it's also
-                        // given — exactly the mismatch that let a prior Reliance -> Tata Steel swap get
-                        // undone by a later period-only edit that fell back to this same path.
-                        const currentCompanies = entry.companyName ? [entry.companyName] : reconstructCompaniesFromWhere(prior.sql);
-                        const companyPin = currentCompanies && change.kind !== "companyChange" && change.kind !== "mixedChange"
-                            ? ` This table currently shows exactly: ${currentCompanies.join(", ")} — keep the company/companies exactly as they are, do not change or revert them.`
-                            : "";
-                        const instruction = change.kind === "companyChange" ? `The user directly edited this table's data rows in the sheet so the company/companies shown are now: ${change.companies.join(", ")}. Refresh the table to match, keeping every existing column and the overall shape the same.`
-                            : change.kind === "periodChange" ? `The user directly edited this table's data rows in the sheet so the period(s) shown are now: ${change.periods.join(", ")}. Refresh the table to match, keeping every existing column and the overall shape the same.${companyPin}`
-                            : `The user directly edited this table's data rows in the sheet, changing both company and period at once. The company/companies shown are now: ${change.companies.join(", ") || "(unchanged)"}. The period(s) shown are now: ${change.periods.join(", ") || "(unchanged)"}. Refresh the table to match, keeping every existing column and the overall shape the same.`;
-                        updated = await refreshSqlFromPrevious(prior.sql, prior.user_query, prior.description, instruction, sampleText);
-                    }
-                    if (!updated.sql) {
-                        outcome = `DECLINED — no SQL generated.\nExplanation: ${updated.explanation || "(none given)"}`;
-                        statusEl.textContent = updated.explanation || "Couldn't update this table with that change.";
-                        return;
-                    }
-                    outcome = `SQL generated:\n${updated.sql}\n\nExplanation: ${updated.explanation || "(none given)"}`;
-
-                    statusEl.textContent = "Running the updated query…";
-                    const data = await runGeneratedSql(updated.sql, prior.user_query || describe, (updated.title || "Query Result").slice(0, 31), allTables, updated.title, updated.description);
-                    data.title = updated.title || prior.title || "Query Result";
-                    data.description = updated.description || prior.description || "";
-
-                    // ignoreDataRowsBelow=true: whatever new row(s) now sit just below the table's
-                    // old footprint (e.g. the "2022" the user typed into the period column of the
-                    // blank row right under the table) are the KNOWN edit that triggered this very
-                    // refresh, not someone else's content — without this, wouldRefreshOverwriteOtherContent
-                    // saw that typed value as a conflict and shifted the whole table to a new blank
-                    // block elsewhere instead of rewriting it in place.
-                    outcome += await writeRefreshedTable(entry, data, statusEl, false, true);
-                } catch (e) {
-                    console.warn("[QueryData] data row edit failed:", e);
-                    outcome = `ERROR: ${e.message}`;
-                    statusEl.textContent = e.message && e.message !== "Failed to fetch" ? e.message : "Couldn't update this table — please try again.";
-                } finally {
-                    if (currentTrace) saveQueryDataTrace(formatQueryDataTrace(`Data row edit: ${describe}`, currentTrace, outcome), `data-row-${entry.title}`);
-                    hideQueryDataOverlay();
-                    setTableRefreshingFlag(entry, false);
-                    flushQueryDataCost(`Update "${entry.title}": ${describe}`);
-                }
-            };
-
-            // Runs a pending HEADER change (headerAdd/headerRename) and a pending DATA-ROW change
-            // (companyChange/periodChange/mixedChange) TOGETHER, in one rebuild and one write — the
-            // gap this exists to close: the Update bar tracks these on two separate state slots
-            // (pendingHeaderChange, pendingDataRowChange — see pollTableMetaEdits), and a user who
-            // makes both kinds of edit in the same sitting (e.g. types a new period into the blank
-            // row below the table AND a new header past its last column) ends up with BOTH slots
-            // set at once. Before this function existed, the Update-bar click handler applied
-            // priority-ordered — ONE of the two pending changes only, never both — and because
-            // applying either one rewrites the table's WHOLE footprint from scratch (clearTableBlock
-            // + writeDownloadedTableToSheet), the OTHER edit's visible evidence on the sheet was
-            // overwritten back to its old value by that same write. Not merely deferred to a second
-            // click: genuinely lost the instant the first click ran, since the next poll tick would
-            // see the overwritten cell matching its old baseline again and never re-flag it.
-            //
-            // Only a natural-language request already got this right (an LLM asked to apply several
-            // changes at once just does) — this is the matching code-side path for the two SPECIFIC
-            // kinds the Update bar already detects deterministically, reusing the exact same
-            // reconstruct-the-plan-then-rebuild-once approach every single-kind path above already
-            // uses (just applying BOTH modifications to the one reconstructed plan before a single
-            // buildDeterministicQuery call), rather than two separate writes or silently picking one
-            // change over the other. Falls back to ONE LLM rewrite describing both changes together
-            // if anything about either one doesn't fit the deterministic path (a ranking query, a
-            // mixedChange data edit, a metric that didn't resolve cleanly, a granularity conflict) —
-            // the same "never a dead end" pattern every fast path here already has, and exactly what
-            // a user who typed both changes as one sentence would get anyway.
-            //
-            // Deliberately NOT built on the text-splice fast paths runTableAddColumns/
-            // runTableHeaderRename try first (trySpliceNewColumn/trySpliceRenameColumn): those edit
-            // the SELECT list in place as plain text and never touch WHERE/the period window, so
-            // they can't also carry a company/period change — the reconstruct-and-rebuild path below
-            // is the common ground both single-kind paths already fall back to, and the only one
-            // that can express both deltas in a single buildDeterministicQuery call.
-            const runTableCombinedEdit = async (entry, pendingHeader, pendingData, statusEl) => {
-                statusEl = wrapStatusElWithOverlay(statusEl);
-                setTableRefreshingFlag(entry, true);
-                currentTrace = [];
-                let outcome = "(ended before any outcome was recorded)";
-                const headerDescribe = pendingHeader.kind === "headerAdd"
-                    ? `new column(s): ${pendingHeader.newColumnLabels.join(", ")}`
-                    : `renamed column(s): ${pendingHeader.changes.map((c) => `"${c.from}" -> "${c.to}"`).join(", ")}`;
-                const dataDescribe = pendingData.kind === "companyChange" ? `company change: now ${pendingData.companies.join(", ")}`
-                    : pendingData.kind === "periodChange" ? `period change: now ${pendingData.periods.join(", ")}`
-                    : `company and period both changed: companies now ${pendingData.companies.join(", ") || "(unchanged)"}, periods now ${pendingData.periods.join(", ") || "(unchanged)"}`;
-                const describe = `${headerDescribe}; ${dataDescribe}`;
-                try {
-                    statusEl.style.display = "block";
-                    statusEl.textContent = "Reading the original query…";
-                    const prior = await decryptRefreshTokenWithFallback(entry, (step) => { statusEl.textContent = step; });
-                    traceLookup("Decrypt refresh tag", "(server-side decrypt, no SQL sent from here)", `sql: ${prior.sql}\nuser_query: ${prior.user_query}`);
-
-                    let updated = null;
-                    let allTables = prior.tables_used || [];
-                    try {
-                        if (pendingData.kind === "mixedChange") throw new Error("data-row change is itself compound (company+period at once) — too compound to ALSO combine with a header change deterministically");
-                        const reconstructed = reconstructMetricsFromSelectList(prior.sql);
-                        if (!reconstructed) throw new Error("couldn't reconstruct the existing query's shape");
-
-                        // ── Header side first — resolve the label(s) and fold them into the metric
-                        // list, since the data-row side below needs the FINAL metric list to build
-                        // metaByTable against (a header-add may bring in a table that isn't joined yet). ──
-                        let metrics = reconstructed.metrics;
-                        if (pendingHeader.kind === "headerAdd") {
-                            const classification = classifyGridCells([pendingHeader.newColumnLabels]);
-                            const resolution = await resolveGridTermsOrNull(classification);
-                            const uniqueLabels = new Set(pendingHeader.newColumnLabels);
-                            if (!resolution || resolution.companies.length || resolution.periodValues.length || resolution.metrics.length !== uniqueLabels.size) {
-                                throw new Error("new header label(s) didn't resolve cleanly as metrics");
-                            }
-                            allTables = Array.from(new Set([...allTables, ...resolution.metrics.map((m) => m.table)]));
-                            metrics = [...metrics, ...resolution.metrics];
-                        } else { // headerRename
-                            const toLabels = pendingHeader.changes.map((c) => c.to);
-                            const classification = classifyGridCells([toLabels]);
-                            const resolution = await resolveGridTermsOrNull(classification);
-                            const uniqueLabels = new Set(toLabels);
-                            if (!resolution || resolution.companies.length || resolution.periodValues.length || resolution.metrics.length !== uniqueLabels.size) {
-                                throw new Error("renamed header label(s) didn't resolve cleanly as metrics");
-                            }
-                            const metricByColumn = new Map();
-                            for (const m of resolution.metrics) {
-                                if (m.display) metricByColumn.set(m.display, m);
-                                if (!metricByColumn.has(m.column)) metricByColumn.set(m.column, m);
-                            }
-                            // Positional substitution, matched by the reconstructed entry's OWN
-                            // display/column against change.from — reconstructed.metrics is in the
-                            // same left-to-right SELECT-list order trySpliceRenameColumn targets by
-                            // label, so this is the same matching, just applied to the parsed list
-                            // instead of the raw SQL text.
-                            const matchedFrom = new Set();
-                            metrics = reconstructed.metrics.map((m) => {
-                                const change = pendingHeader.changes.find((c) => c.from === (m.display || m.column));
-                                if (!change) return m;
-                                const metric = metricByColumn.get(change.to);
-                                if (!metric) throw new Error(`no resolved metric for "${change.to}"`);
-                                matchedFrom.add(change.from);
-                                return metric;
-                            });
-                            // trySpliceRenameColumn (the single-kind path) bails to the LLM when a
-                            // "from" label isn't found exactly once in the SELECT list rather than
-                            // silently no-op'ing it — matched here too, so a rename that doesn't
-                            // match anything (e.g. the user renamed a cell that isn't where the
-                            // detected header shape expects it) isn't quietly dropped.
-                            if (matchedFrom.size !== pendingHeader.changes.length) throw new Error("one or more renamed column(s) weren't found in the existing SELECT list");
-                        }
-
-                        const metaByTable = await loadPeriodJoinMetadata(allTables);
-
-                        // ── Data-row side — companies and/or period, same logic each single-kind
-                        // path above already applies, just landing in a shared `plan` instead of its
-                        // own immediate buildDeterministicQuery call. ──
-                        let companies, period, cleanSwap = null;
-                        if (pendingData.kind === "companyChange") {
-                            const periodResult = reconstructPeriodFromSql(prior.sql, reconstructed.aliasToTable, reconstructed.periodMarker, metaByTable);
-                            if (!periodResult) throw new Error("couldn't reconstruct the existing period");
-                            period = periodResult.period || { mode: "latest" };
-                            let newCompanies = pendingData.companies;
-                            const oldCompanies = reconstructCompaniesFromWhere(prior.sql);
-                            if (oldCompanies) {
-                                const removed = oldCompanies.filter((c) => !pendingData.companies.includes(c));
-                                const added = pendingData.companies.filter((c) => !oldCompanies.includes(c));
-                                if (removed.length === 1 && added.length === 1) {
-                                    newCompanies = oldCompanies.map((c) => (c === removed[0] ? added[0] : c));
-                                    cleanSwap = { oldCompanies, newCompanies };
-                                }
-                            }
-                            companies = newCompanies;
-                        } else { // periodChange
-                            companies = reconstructCompaniesFromWhere(prior.sql);
-                            const anchorTable = reconstructed.periodMarker && reconstructed.aliasToTable.get(reconstructed.periodMarker.alias);
-                            const periodMeta = anchorTable && metaByTable.get(anchorTable) && metaByTable.get(anchorTable).period;
-                            if (!companies || !periodMeta) throw new Error("couldn't reconstruct the existing companies, or this table has no reconstructable period column");
-                            const parsed = pendingData.periods.map((shown) => {
-                                const asStored = parseLiteralPeriodValue(periodMeta, shown);
-                                if (asStored) return asStored;
-                                const asTyped = parsePeriodToken(shown);
-                                if (asTyped && Number.isFinite(asTyped.fiscalYear)) return { fiscalYear: asTyped.fiscalYear, quarterNo: asTyped.quarter || null };
-                                return parseExcelSerialPeriod(shown);
-                            });
-                            if (parsed.some((p) => !p)) throw new Error("couldn't read one of the displayed period values");
-                            period = { mode: "years", values: parsed.map((p) => ({ fiscalYear: p.fiscalYear, quarter: p.quarterNo || undefined })) };
-                        }
-
-                        // A quarterly value typed against an annual table's own period column (or
-                        // vice versa) isn't something a single buildDeterministicQuery call can
-                        // express — same mixed-grain gap runTableDataRowEdit's own periodChange
-                        // branch has (see buildGrainAwareQuery there); left unhandled here rather
-                        // than duplicated, since combining THAT with a header change on top is rare
-                        // enough to just take the LLM fallback below instead.
-                        const plan = { feasible: true, companies, metrics, period };
-                        const rebuilt = buildDeterministicQuery(plan, metaByTable);
-                        if (!rebuilt || !rebuilt.sql) throw new Error("combined rebuild declined (e.g. a ranking query, or a granularity conflict)");
-
-                        traceLookup("Combined update: code-side rebuild (no LLM)", "(pure code — re-derives the query via buildDeterministicQuery)", `Rebuilt:\n${rebuilt.sql}`);
-                        let description = prior.description || "";
-                        if (pendingHeader.kind === "headerAdd") {
-                            description = description ? `${description}, plus ${pendingHeader.newColumnLabels.join(", ")}` : "";
-                        } else {
-                            pendingHeader.changes.forEach((c) => { description = description.split(c.from).join(c.to); }); // best-effort, harmless if it doesn't appear
-                        }
-                        updated = { sql: rebuilt.sql, title: prior.title, description: describeDataRowChange(description, pendingData, cleanSwap) || description, explanation: "" };
-                    } catch (e) {
-                        console.warn("[QueryData] combined update fast path failed, falling back to the LLM rewrite:", e.message);
-                    }
-
-                    if (!updated) {
-                        const sampleText = await readSampleRows(entry);
-                        traceLookup("Read sample rows", "(reads the sheet directly, no SQL)", sampleText ? `${sampleText.split("\n").length} row(s) sampled` : "no data rows to sample");
-                        statusEl.textContent = "Asking the model to update the query…";
-                        const headerInstr = pendingHeader.kind === "headerAdd"
-                            ? `added ${pendingHeader.newColumnLabels.length > 1 ? "these new columns" : "this new column"} past the table's last column: ${pendingHeader.newColumnLabels.join(", ")}`
-                            : `renamed ${pendingHeader.changes.length > 1 ? "these columns" : "this column"}: ${pendingHeader.changes.map((c) => `"${c.from}" -> "${c.to}"`).join(", ")}`;
-                        const dataInstr = pendingData.kind === "companyChange" ? `the company/companies shown are now: ${pendingData.companies.join(", ")}`
-                            : pendingData.kind === "periodChange" ? `the period(s) shown are now: ${pendingData.periods.join(", ")}`
-                            : `both company and period changed at once — companies now ${pendingData.companies.join(", ") || "(unchanged)"}, periods now ${pendingData.periods.join(", ") || "(unchanged)"}`;
-                        const instruction = `The user made TWO different kinds of direct-sheet edit at once: they ${headerInstr}, AND ${dataInstr}. Update the query to reflect BOTH changes together, keeping every other column/company/period exactly the same.`;
-                        updated = await refreshSqlFromPrevious(prior.sql, prior.user_query, prior.description, instruction, sampleText);
-                    }
-                    if (!updated.sql) {
-                        outcome = `DECLINED — no SQL generated.\nExplanation: ${updated.explanation || "(none given)"}`;
-                        statusEl.textContent = updated.explanation || "Couldn't update this table with those changes.";
-                        return;
-                    }
-                    outcome = `SQL generated:\n${updated.sql}\n\nExplanation: ${updated.explanation || "(none given)"}`;
-
-                    statusEl.textContent = "Running the updated query…";
-                    const data = await runGeneratedSql(updated.sql, prior.user_query || describe, (updated.title || "Query Result").slice(0, 31), allTables, updated.title, updated.description);
-                    data.title = updated.title || prior.title || "Query Result";
-                    data.description = updated.description || prior.description || "";
-
-                    // Both ignore flags on: the new header label past the table's old width AND
-                    // whatever new row now sits just below its old footprint are BOTH the user's own
-                    // known edits that triggered this very update, never someone else's content —
-                    // see runTableAddColumns'/runTableDataRowEdit's own identical comments on each
-                    // flag individually.
-                    outcome += await writeRefreshedTable(entry, data, statusEl, true, true);
-                } catch (e) {
-                    console.warn("[QueryData] combined update failed:", e);
-                    outcome = `ERROR: ${e.message}`;
-                    statusEl.textContent = e.message && e.message !== "Failed to fetch" ? e.message : "Couldn't update this table — please try again.";
-                } finally {
-                    if (currentTrace) saveQueryDataTrace(formatQueryDataTrace(`Combined update: ${describe}`, currentTrace, outcome), `combined-${entry.title}`);
-                    hideQueryDataOverlay();
-                    setTableRefreshingFlag(entry, false);
-                    flushQueryDataCost(`Update "${entry.title}": ${describe}`);
-                }
-            };
-
-            // ── Second refresh trigger: editing the Description cell, or the HEADER ROW, directly ──
-            // The button+textbox above is one way to ask for a refresh; this is the other — the
-            // user just types straight into the sheet, and once a cell has held still for
-            // QD_META_EDIT_DEBOUNCE_MS (not on every keystroke), the edit is surfaced as a pending
-            // change on that table's Update bar — it only actually takes effect once that bar is
-            // clicked (see the dt-yt-update-bar handler), never automatically.
-            // Two independent things are watched per table:
-            //   - the Description cell (unchanged from before) — a new sentence there becomes a
-            //     Modify-style instruction.
-            //   - the HEADER ROW ONLY (never any data row below it) — new text typed there, either
-            //     into an existing header cell or into a blank cell just past the table's current
-            //     last column (see QD_HEADER_WATCH_EXTRA_COLS), is treated as "the user wants this
-            //     additional column added" and goes through addColumnsToTable/runTableAddColumns
-            //     instead, which — unlike the description path — also gets the full catalog, since
-            //     a typed header like "EBITDA" might not exist in any table this query already uses.
-            // Both are tracked per table by a stable position key (sheet+row+col), rebuilt fresh
-            // every time the "Your Tables" list re-scans (runYourTablesScan/renderYourTablesList) —
-            // a rescan's own freshly-read values become the new BASELINE, so a refresh this just
-            // triggered can never immediately re-trigger itself once that follow-up rescan completes.
-            // Debounce only gates when a pending change gets SURFACED on the Update bar — it never
-            // gates the actual rewrite (that only ever fires on an explicit click, see the
-            // dt-yt-update-bar handler) — so it can run short without risking a premature apply;
-            // all it risks is the pending label flickering through an intermediate value while
-            // someone is still actively typing, which is harmless.
-            //
-            // Was 1200ms, lowered to 700ms then 400ms — confirmed live 2026-10-29: the header-row
-            // watcher and the data-row watcher each track their OWN pendingXSince timestamp
-            // independently (see pollTableMetaEdits below), starting the countdown the moment THAT
-            // one cell stabilizes. Typing a new header, then a few seconds later typing a new period
-            // into the row below it (two edits, same sitting, same intent), lets the header's
-            // debounce finish well before the period's — the Update bar correctly shows "New column
-            // added" alone for however long that gap lasts, since the second edit genuinely hasn't
-            // stabilized yet, and a click landing in that window applies the header-only change,
-            // never getting a chance to also pick up the still-debouncing period. A shorter debounce
-            // narrows that gap without weakening anything (per the comment above, a short debounce
-            // was already established as safe) — it can't close the gap to zero against an inherently
-            // sequential edit (nothing can know about a change before it's been typed), but it
-            // meaningfully shrinks the window a user who types both edits in quick succession can
-            // click through. 400ms is close to the floor worth chasing on THIS knob alone — once it's
-            // below the poll interval below, the interval (not the debounce) is what actually bounds
-            // how soon an already-stable change gets noticed; see that constant's own comment for why
-            // IT can't safely come down too.
-            //
-            // The poll interval, however, was 250ms, on the reasoning that
-            // pollTableMetaEditsInFlight already prevents two ticks overlapping so a short interval
-            // "just no-ops" — which was true but missed the real cost: it meant this poll ran
-            // essentially BACK-TO-BACK, permanently occupying Office.js's single request channel
-            // with one ~0.8s round trip after another for as long as any table existed. Everything
-            // else the user did then had to take its turn behind it. 900ms still surfaces a pending
-            // change well inside the debounce window it's feeding (the debounce, not this interval,
-            // is what decides when a change appears), at roughly a third of the traffic — left
-            // unchanged by both debounce reductions above for exactly that reason.
-            const QD_META_EDIT_DEBOUNCE_MS = 400;
-            const QD_META_EDIT_POLL_MS = 900;
-            // How many blank cells past the table's current last column also get watched, so typing
-            // a brand-new header (not just editing an existing one) is caught too. Columns beyond
-            // this are out of scope — a reasonable bound on how many new headers can be typed in one go.
-            const QD_HEADER_WATCH_EXTRA_COLS = 10;
-            // Same idea, but how many blank rows past the table's current last DATA row also get
-            // watched (in the CompName/Period columns only — see pollTableMetaEdits), so typing a
-            // brand-new company/period row directly below the existing data is caught too.
-            const QD_DATA_ROW_WATCH_EXTRA_ROWS = 5;
-            // How far PAST its own footprint a table may actually watch before it would start
-            // reading ANOTHER table's cells — the two constants above, clipped against every other
-            // scanned table on the same sheet.
-            //
-            // Unclipped, a table whose neighbour sits within 5 rows below it has that neighbour's
-            // title/description/company cells sitting inside its OWN data-row watch window. So
-            // updating the LOWER table moved cells that the UPPER table was watching, and the upper
-            // table lit up its own "update needed" bar for an edit nobody made to it — the cascading
-            // false indicator. Same hazard sideways: the 10-column header window reaching into a
-            // table parked to the right.
-            //
-            // Only ever clips against a real neighbour, never against blank space, so a table with
-            // room around it keeps the full window and behaves exactly as before.
-            const watchWindowRoom = (entry) => {
-                let extraRows = QD_DATA_ROW_WATCH_EXTRA_ROWS;
-                let extraCols = QD_HEADER_WATCH_EXTRA_COLS;
-                const myRowEnd = entry.titleRow + entry.metaRows + entry.tableRows - 1;
-                const myColEnd = entry.titleCol + entry.tableCols - 1;
-                for (const other of (lastScannedTables || [])) {
-                    if (other.sheetName !== entry.sheetName) continue;
-                    if (other.titleRow === entry.titleRow && other.titleCol === entry.titleCol) continue; // this same table
-                    const oRowEnd = other.titleRow + other.metaRows + other.tableRows - 1;
-                    const oColEnd = other.titleCol + other.tableCols - 1;
-                    // Below us, and overlapping at least one of our columns -> limits how far down.
-                    if (other.titleRow > myRowEnd && other.titleCol <= myColEnd && oColEnd >= entry.titleCol) {
-                        extraRows = Math.min(extraRows, other.titleRow - 1 - myRowEnd);
-                    }
-                    // To our right, and overlapping at least one of our rows -> limits how far across.
-                    if (other.titleCol > myColEnd && other.titleRow <= myRowEnd && oRowEnd >= entry.titleRow) {
-                        extraCols = Math.min(extraCols, other.titleCol - 1 - myColEnd);
-                    }
-                }
-                return { extraRows: Math.max(0, extraRows), extraCols: Math.max(0, extraCols) };
-            };
 
             // ── Metric/company autofill dropdown — a VERY hidden sheet backs it ──
             // Excel's own "Formula AutoComplete"-style dropdown while typing in a cell can only be
@@ -7512,8 +6419,14 @@ function applyRibbonView() {
             const QD_COMBINED_NAMES_RANGE_NAME = "QDAutofillNames";
             const QD_AUTOFILL_LIST_START_ROW = 2; // 0-indexed — row 1 is the disclaimer, row 2 the column labels
             // sessionStorage key for refreshAutofillSheet's own "skip the write if the list hasn't
-            // changed" fingerprint — see its own comment for why this exists.
-            const QD_AUTOFILL_WRITE_FINGERPRINT_KEY = "qd_autofill_write_fingerprint";
+            // changed" fingerprint — see its own comment for why this exists. Versioned ("_v2") so
+            // a fingerprint saved under the OLD key (from a session that's been running since
+            // before the getCompanyNames/getCatalogEntries completeness fixes — this add-in's
+            // SharedRuntime can keep the SAME JS context alive across many ribbon-view switches, so
+            // "reopen Query Data" alone doesn't guarantee fresh code is actually running yet) is
+            // simply never found, guaranteeing at least one real rewrite the next time this runs
+            // rather than possibly skipping forever on a fingerprint computed before those fixes.
+            const QD_AUTOFILL_WRITE_FINGERPRINT_KEY = "qd_autofill_write_fingerprint_v2";
 
             // Which real table(s) a given metric NAME lives on — the autofill sheet/dropdown only
             // ever needed the bare deduplicated name list, but the skeleton-grid fast path (below)
@@ -7760,9 +6673,21 @@ function applyRibbonView() {
             // whenever the real list fits under the cap in the first place. The iteration guard is
             // just a safety net against an infinite loop if truncated were ever reported
             // incorrectly, not an expected real limit.
+            // Returns { names, complete } rather than just names — "complete" is what tells
+            // getCompanyNames below whether this is actually safe to cache for 24h. Confirmed live
+            // (2026-11): a transient failure partway through this pagination (one batch's own
+            // network call throwing, or — far less likely in practice, but still possible — the
+            // 50-batch guard tripping on a genuinely huge list) used to still return whatever
+            // `names` had collected so far, and the caller cached that PARTIAL list exactly like a
+            // complete one. Batch #1 alone happens to cut off alphabetically right before "R" (the
+            // row cap lands mid-way through the alphabet), so the exact symptom was "Reliance
+            // Industries"/"Tata Motors"/anything from ~R onward missing from the dropdown while
+            // earlier letters worked fine — and since that bad list got cached, it stayed broken
+            // for a full day with nothing surfacing that anything had gone wrong.
             const fetchAllCompanyNames = async () => {
                 const names = [];
                 let cursor = "";
+                let complete = false;
                 try {
                     for (let guard = 0; guard < 50; guard++) {
                         const tBatch = performance.now();
@@ -7771,15 +6696,18 @@ function applyRibbonView() {
                         const data = await runGeneratedSql(sql, null, "autofill: company list");
                         const batch = (data.rows || []).map(([name]) => name).filter(Boolean);
                         console.log(`[QueryData timing][${QD_AUTOFILL_TAG}]       company list: batch #${guard + 1} — ${batch.length} name(s), truncated=${!!data.truncated}: ${(performance.now() - tBatch).toFixed(0)}ms`);
-                        if (!batch.length) break;
+                        if (!batch.length) { complete = true; break; }
                         names.push(...batch);
                         cursor = batch[batch.length - 1];
-                        if (!data.truncated) break; // this batch wasn't cut short — nothing more to fetch
+                        if (!data.truncated) { complete = true; break; } // this batch wasn't cut short — nothing more to fetch
                     }
+                    // Falling out of the loop via the guard counter (50 batches, still truncated)
+                    // is ALSO an incomplete result — `complete` deliberately stays false here, same
+                    // as the catch below.
                 } catch (e) {
                     console.warn("[QueryData] couldn't fetch the company list for autofill:", e.message);
                 }
-                return names;
+                return { names, complete };
             };
             // Same localStorage-cache idea as the catalog above (see QD_CATALOG_CACHE_KEY) — new
             // companies get listed rarely enough that a 24-hour-stale list is never a real problem,
@@ -7794,14 +6722,20 @@ function applyRibbonView() {
                     const raw = localStorage.getItem(QD_COMPANY_CACHE_KEY);
                     if (!raw) return null;
                     const parsed = JSON.parse(raw);
-                    if (!parsed || !Array.isArray(parsed.names) || !(Date.now() - parsed.timestamp < QD_COMPANY_CACHE_TTL_MS)) return null;
+                    // `complete` only exists on a cache THIS code actually wrote after confirming
+                    // fetchAllCompanyNames ran to completion (see saveCompanyCacheToStorage) — a
+                    // cache from before this field existed, or one written mid-bug, never has it,
+                    // so it's never trusted here either. That isn't just defensive: it's what makes
+                    // an already-broken cache sitting in someone's browser RIGHT NOW self-heal on
+                    // their very next load, instead of staying wrong for the rest of its 24h TTL.
+                    if (!parsed || parsed.complete !== true || !Array.isArray(parsed.names) || !(Date.now() - parsed.timestamp < QD_COMPANY_CACHE_TTL_MS)) return null;
                     return parsed.names;
                 } catch (e) {
                     return null; // corrupt/unavailable storage — fall through to a real fetch, same as a cold cache
                 }
             };
             const saveCompanyCacheToStorage = (names) => {
-                try { localStorage.setItem(QD_COMPANY_CACHE_KEY, JSON.stringify({ timestamp: Date.now(), names })); }
+                try { localStorage.setItem(QD_COMPANY_CACHE_KEY, JSON.stringify({ timestamp: Date.now(), names, complete: true })); }
                 catch (e) { /* storage full/unavailable — the in-memory cache still covers this session, just not the next reload */ }
             };
             const getCompanyNames = async () => {
@@ -7810,11 +6744,15 @@ function applyRibbonView() {
                     console.log(`[QueryData timing][${QD_AUTOFILL_TAG}]     company list loaded from localStorage cache (${cached.length} compan${cached.length === 1 ? "y" : "ies"}, TTL ${QD_COMPANY_CACHE_TTL_MS / 3600000}h) — skipped the network fetch entirely`);
                     return cached;
                 }
-                console.log(`[QueryData timing][${QD_AUTOFILL_TAG}]     company list: no usable localStorage cache (missing, corrupt, or past its ${QD_COMPANY_CACHE_TTL_MS / 3600000}h TTL) — fetching from the network (sequential, paginated — see fetchAllCompanyNames)`);
+                console.log(`[QueryData timing][${QD_AUTOFILL_TAG}]     company list: no usable localStorage cache (missing, corrupt, incomplete, or past its ${QD_COMPANY_CACHE_TTL_MS / 3600000}h TTL) — fetching from the network (sequential, paginated — see fetchAllCompanyNames)`);
                 const tFetch = performance.now();
-                const names = await fetchAllCompanyNames();
-                if (names.length) saveCompanyCacheToStorage(names); // never cache an empty/failed fetch — that would hide every real name until the TTL expires
-                console.log(`[QueryData timing][${QD_AUTOFILL_TAG}]     company list: network fetch (${names.length} compan${names.length === 1 ? "y" : "ies"}): ${(performance.now() - tFetch).toFixed(0)}ms`);
+                const { names, complete } = await fetchAllCompanyNames();
+                // Only a CONFIRMED-complete fetch is cached — see fetchAllCompanyNames' own comment
+                // on why a partial list (network blip mid-pagination) must never be cached as if it
+                // were the full one. An incomplete-but-non-empty result is still returned for this
+                // one call (better than nothing on screen right now), it just isn't persisted.
+                if (complete && names.length) saveCompanyCacheToStorage(names);
+                console.log(`[QueryData timing][${QD_AUTOFILL_TAG}]     company list: network fetch (${names.length} compan${names.length === 1 ? "y" : "ies"}, complete=${complete}): ${(performance.now() - tFetch).toFixed(0)}ms`);
                 return names;
             };
             // Creates the autofill sheet if it doesn't exist yet, or just overwrites its contents
@@ -7971,9 +6909,17 @@ function applyRibbonView() {
             // isn't active or `sheetName` is already the validated one (called on every tick of
             // checkYtSelectionOnce's existing poll — see its own call site — so this needs to be
             // cheap to skip).
+            // `force` re-applies even when the record already names this exact sheet, for the two
+            // callers that can't trust that record to mean the rule is genuinely still there: page
+            // startup (the previous page may have died mid-apply, after claiming the record but
+            // before Excel committed the rule) and the pane-shown restore (its matching clear may
+            // have reached Excel but been frozen before it could null the record). The poll's own
+            // per-tick call deliberately does NOT force — that guard is what keeps it free to run
+            // every 1.2s.
             let qdMoveCallCount = 0;
-            const moveAutofillToSheet = async (sheetName) => {
-                if (!autofillActive || !sheetName || sheetName === getValidatedSheetName()) return;
+            const moveAutofillToSheet = async (sheetName, { force = false } = {}) => {
+                if (!autofillActive || !sheetName) return;
+                if (!force && sheetName === getValidatedSheetName()) return;
                 const callNum = ++qdMoveCallCount;
                 const previous = getValidatedSheetName();
                 setValidatedSheetName(sheetName); // claimed up front so an overlapping poll tick can't double-fire this
@@ -7992,7 +6938,11 @@ function applyRibbonView() {
                     await qdWithExcelBusy(() => Excel.run(async (context) => {
                         const target = context.workbook.worksheets.getActiveWorksheet();
                         let old = null;
-                        if (previous) {
+                        // Only a genuinely DIFFERENT sheet needs clearing. A forced re-apply onto
+                        // the same sheet (see the `force` note above) is just an overwrite of the
+                        // same range, so the existence check — and the whole extra sync it costs —
+                        // is pure waste there.
+                        if (previous && previous !== sheetName) {
                             old = context.workbook.worksheets.getItemOrNullObject(previous);
                             old.load("isNullObject");
                             await context.sync();
@@ -8042,10 +6992,69 @@ function applyRibbonView() {
             // it. Each logs the event that triggered it precisely so a console log from a real
             // X-button close tells us which of them actually fires here.
             const handlePaneHiding = (evt) => {
+                qdPaneHidden = true;
                 clearAutofillValidationEverywhere(`pane hidden/closing via "${evt}" (visibilityState=${document.visibilityState})`);
             };
-            document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") handlePaneHiding("visibilitychange"); });
+            // The symmetric half of the hide handlers — and the whole reason the dropdown used to
+            // vanish for good on Excel for the WEB. A task pane there is an iframe inside the
+            // browser tab, and switching to another BROWSER tab propagates visibilityState
+            // "hidden" down into it: from in here that is indistinguishable from an X-button
+            // close, so the clear above fires and takes the dropdown with it. Coming back fires
+            // "visible" again — but nothing re-applied it. This page never reloaded, so neither
+            // applyRibbonView nor the startup block below runs a second time, and the active-sheet
+            // poll's own moveAutofillToSheet call no-ops the moment autofillActive went false. The
+            // only way back was clicking the ribbon button again, i.e. forcing a real page load.
+            //
+            // Re-arming here is safe for the genuine close case too: a pane that really was closed
+            // never becomes visible again without a page load, which re-runs all of this anyway.
+            let qdRestoreInFlight = null;
+            const handlePaneShowing = (evt) => {
+                qdPaneHidden = false;
+                if (qdRestoreInFlight) return qdRestoreInFlight; // "visible" and "resume" can both land
+                const t0 = performance.now();
+                qdRestoreInFlight = (async () => {
+                    try {
+                        // The matching hide-clear may still be in flight (a quick tab flick away
+                        // and back) — letting it land AFTER the re-apply below would wipe the
+                        // dropdown straight back out, the same ordering hazard pendingAutofillClear
+                        // guards against at startup.
+                        await qdClearInFlight;
+                        autofillActive = true;
+                        let activeSheetName = null;
+                        await Excel.run(async (context) => {
+                            const active = context.workbook.worksheets.getActiveWorksheet();
+                            active.load("name");
+                            await context.sync();
+                            activeSheetName = active.name;
+                        });
+                        // Forced: the record surviving doesn't prove the rule did — see the `force`
+                        // note on moveAutofillToSheet.
+                        await moveAutofillToSheet(activeSheetName, { force: true });
+                        console.log(`[QueryData timing][${QD_AUTOFILL_TAG}] pane shown via "${evt}" — dropdown restored on "${activeSheetName}": ${(performance.now() - t0).toFixed(0)}ms`);
+                    } catch (e) {
+                        // Same stance as everywhere else here: the dropdown is an enhancement, so a
+                        // failure just leaves it absent until the next sheet change or reload, it
+                        // never surfaces to the user.
+                        console.warn(`[QueryData] couldn't restore the metric-autofill dropdown after "${evt}":`, e.message);
+                    } finally {
+                        qdRestoreInFlight = null;
+                    }
+                })();
+                return qdRestoreInFlight;
+            };
+            document.addEventListener("visibilitychange", () => {
+                if (document.visibilityState === "hidden") handlePaneHiding("visibilitychange");
+                else handlePaneShowing("visibilitychange");
+            });
+            // Page Lifecycle counterpart of the "freeze" listener below — Chromium fires this when
+            // it un-freezes a tab it had frozen for being in the background (which it does after a
+            // few minutes hidden, and which is itself one of the clears this restores from).
+            document.addEventListener("resume", () => handlePaneShowing("resume"));
             window.addEventListener("pagehide", () => handlePaneHiding("pagehide"));
+            // pagehide's own counterpart, for the case where the page was put in the bfcache rather
+            // than hidden — that restore fires pageshow and NOT visibilitychange, so without this
+            // the clear pagehide just did would have nothing to undo it.
+            window.addEventListener("pageshow", () => handlePaneShowing("pageshow"));
             // Page Lifecycle API — what Chromium-based WebViews fire when a page is SUSPENDED
             // rather than navigated away from, which is exactly what an Office task pane does
             // when it's closed but kept in memory. Not covered by pagehide.
@@ -8088,1118 +7097,35 @@ function applyRibbonView() {
                     // metrics/company rebuild just to see it. Safe: the rule references the Defined
                     // Name by FORMULA, so it auto-reflects whatever refreshAutofillSheet (genuinely
                     // backgrounded here — not awaited) updates that name to a moment later.
-                    await moveAutofillToSheet(activeSheetName);
+                    await moveAutofillToSheet(activeSheetName, { force: true });
                     refreshAutofillSheet({ workbookHasNames: true });
                 } else {
                     // First-time workbook — nothing exists to apply yet until the list is built.
                     // workbookHasNames stays false, so the write happens even if the fingerprint
                     // says this exact list was already written (to a DIFFERENT workbook).
                     await refreshAutofillSheet({ workbookHasNames: false });
-                    await moveAutofillToSheet(activeSheetName);
+                    await moveAutofillToSheet(activeSheetName, { force: true });
                 }
                 console.log(`[QueryData timing][${QD_AUTOFILL_TAG}] downloadtable startup — END — dropdown ready: ${(performance.now() - tTotal).toFixed(0)}ms`);
             })();
 
-            let tableMetaWatchState = new Map();
-            const tableWatchKey = (e) => `${e.sheetName}::${e.titleRow}::${e.titleCol}`;
-            const resetTableMetaWatchState = (tables) => {
-                // This rescan runs unconditionally every 60s (plus after every write/refresh/etc.
-                // — see runYourTablesScan's call sites), completely independent of whatever the
-                // user happens to be doing in the sheet at that exact moment. Replacing every
-                // table's watch state with a brand-new object on every single call — as this used
-                // to do unconditionally — silently threw away any in-progress pendingHeaderRow/
-                // pendingDescription debounce the instant a rescan landed mid-edit: a value typed
-                // (or picked from the metric-autofill dropdown) just before the periodic rescan
-                // fired would get re-captured as the new BASELINE instead of ever surfacing as a
-                // pending change, since "pending" and "baseline" both reset to the same
-                // just-written value with nothing left to compare against. Reusing the SAME prior
-                // state object (not even a copy — see the refreshing note below) whenever a table's
-                // own watch-window position hasn't moved means an unrelated rescan can never cancel
-                // an edit that's already mid-debounce. Only reset fresh when the table's own
-                // position/shape actually changed (titleRow/titleCol/tableCols), since then the old
-                // baseline's column alignment no longer corresponds to anything real.
-                const previous = tableMetaWatchState;
-                tableMetaWatchState = new Map(tables.map((entry) => {
-                    const key = tableWatchKey(entry);
-                    const prior = previous.get(key);
-                    // A NEIGHBOUR appearing, moving or resizing changes how far this table's own
-                    // watch windows are allowed to reach (see watchWindowRoom) even though nothing
-                    // about this table moved. A window that GREW would then be compared against a
-                    // baseline captured at the smaller size, so the newly-visible cells would read
-                    // as a change nobody made — the same false "update needed" from the other
-                    // direction. Treat a room change like a position change and re-prime.
-                    const room = watchWindowRoom(entry);
-                    const samePosition = prior && prior.entry.titleRow === entry.titleRow
-                        && prior.entry.titleCol === entry.titleCol && prior.entry.tableCols === entry.tableCols
-                        && prior.watchExtraRows === room.extraRows && prior.watchExtraCols === room.extraCols;
-                    if (samePosition) {
-                        // Mutated in place, same object reference — runTableRefresh/
-                        // runTableAddColumns/etc.'s own in-flight `.finally(() => { state.refreshing
-                        // = false; })` closures captured THIS exact object; swapping in even a
-                        // shallow copy here would leave a refresh already running write its
-                        // completion to an orphaned object, making the new one stuck showing
-                        // refreshing: true (or false, letting a second refresh start concurrently)
-                        // forever, depending on which was in flight when this ran.
-                        prior.entry = entry;
-                        if (prior.refreshing) {
-                            // This rescan is either the one writeRefreshedTable/addColumnsToTable
-                            // itself triggers right after writing (still inside the refreshing
-                            // window — the `.finally()` that flips it back to false hasn't run
-                            // yet) or lands while a refresh is otherwise in flight. Either way the
-                            // sheet now shows OUR OWN edit, not the user's — if the stale
-                            // pre-refresh baseline were kept, the very next poll tick would see
-                            // "changed" against content we just wrote ourselves and re-fire the
-                            // same rename/add-columns/modify flow against its own output forever
-                            // (confirmed live as an infinite loop). Since polling already skips
-                            // any table with refreshing: true, there's no in-progress USER
-                            // debounce here to lose by resetting these now.
-                            prior.baselineDescription = entry.descriptionText || "";
-                            prior.baselineHeaderRow = null; // re-primed fresh from the sheet on the very next poll tick
-                            prior.baselineDataColumns = null; // same — a refresh just rewrote the data rows too
-                            prior.pendingDescription = null; prior.pendingDescriptionSince = 0;
-                            prior.pendingDescriptionChange = null; // a refresh just ran — whatever was pending has already been superseded
-                            prior.pendingHeaderRow = null; prior.pendingHeaderRowSince = 0;
-                            prior.pendingDataRows = null; prior.pendingDataRowsSince = 0;
-                            prior.pendingDataRowChange = null;
-                            prior.baselineCompanyMetaText = entry.companyName || null; // re-seeded from the fresh scan, same as baselineDescription above
-                            prior.pendingCompanyMetaText = null; prior.pendingCompanyMetaSince = 0;
-                        }
-                        return [key, prior];
-                    }
-                    return [key, {
-                        entry,
-                        // How far this table's watch windows currently reach past its own footprint
-                        // before hitting a neighbour — recorded so the next rescan can tell whether
-                        // that room changed under it (see the samePosition check above).
-                        watchExtraRows: room.extraRows, watchExtraCols: room.extraCols,
-                        baselineDescription: entry.descriptionText || "",
-                        pendingDescription: null, pendingDescriptionSince: 0,
-                        pendingDescriptionChange: null, // { newDescription, oldDescription, instruction } | null — surfaced as a highlight on this table's own row, see renderYourTablesList
-                        // Only ever read/compared for a single-company table (entry.companyName set)
-                        // — its own "Company: <name>" meta row has no per-row equivalent to watch,
-                        // so it gets the exact same single-cell debounce treatment as Description,
-                        // feeding the SAME pendingDataRowChange a multi-company table's data-row
-                        // watcher below would (always a clean { kind: "companyChange" } swap, since
-                        // there's only ever one company to replace). Seeded from the scan's own
-                        // reading (like baselineDescription above), NOT left null-to-prime-on-first-
-                        // tick — scanYourTables already knows this value from the SAME comment tag
-                        // the poll tick is about to re-read off the cell, so there's nothing to prime.
-                        baselineCompanyMetaText: entry.companyName || null,
-                        pendingCompanyMetaText: null, pendingCompanyMetaSince: 0,
-                        // null (not yet primed) rather than [] — the very first poll tick just
-                        // records whatever's there right now as the baseline instead of comparing
-                        // against it, since reading it fresh here (rather than reusing
-                        // scanYourTables' own read) keeps this watcher independent of exactly what
-                        // that scan happened to capture.
-                        baselineHeaderRow: null,
-                        pendingHeaderRow: null, pendingHeaderRowSince: 0,
-                        pendingHeaderChange: null, // { kind: "headerAdd", newColumnLabels } | { kind: "headerRename", changes } | null — set once stable, applied only by the Update bar
-                        // Same idea, but over the CompName/Period columns of the data rows (plus a
-                        // few blank rows below — see QD_DATA_ROW_WATCH_EXTRA_ROWS) rather than the
-                        // header row — each entry is [compName, period|undefined].
-                        baselineDataColumns: null,
-                        pendingDataRows: null, pendingDataRowsSince: 0,
-                        pendingDataRowChange: null, // { kind, companies?, periods? } | null — set once stable, applied only by the Update bar
-                        refreshing: false,
-                    }];
-                }));
-            };
-
-            // Marks (or clears) a table's OWN per-table watch state as "mid-refresh" — the SAME
-            // flag runTableRefresh/runTableAddColumns/etc. already set on themselves, just made
-            // callable given only an `entry` rather than a pre-resolved state object, for
-            // every OTHER path that's about to rewrite a table's description cell: a manual click
-            // on Refresh/Modify/Add-Columns. Without this, the SAME write that runTableRefresh/etc.
-            // make to the description cell gets picked up by pollTableMetaEdits as if the USER had
-            // just typed it, firing a second, entirely redundant Modify right back on top of it.
-            const setTableRefreshingFlag = (entry, refreshing) => {
-                const state = tableMetaWatchState.get(tableWatchKey(entry));
-                if (state) state.refreshing = refreshing;
-            };
-
-            // A description/header/data-row edit no longer auto-fires a rewrite the moment it
-            // debounces — it's recorded on the table's OWN watch state (pendingDescriptionChange/
-            // pendingHeaderChange/pendingDataRowChange) and surfaced as a subtle highlight + note on
-            // that table's row in the Your Tables list (see renderYourTablesList). Every table can
-            // have its own pending change at once; clicking that row's Update bar applies it (see
-            // the dt-yt-update-bar handler below) — Refresh itself always just does a plain
-            // latest-period refresh, pending change or not.
-
-            // Fires when the user instead retypes one of the table's OWN existing header cells
-            // (e.g. "Revenue" -> "Revenue Growth") rather than extending it with a new column. A
-            // dedicated function rather than routing through the shared runTableRefresh (which
-            // Description-edits also use directly) — tries the SAME code-side splice
-            // as Add Columns first (classify the new label(s) via the skeleton-grid machinery,
-            // splice via trySpliceRenameColumn if the new metric's table is already joined), falling
-            // back to the Modify pipeline's own freeform rewrite (refreshSqlFromPrevious) otherwise
-            // — but never routes through runTableRefresh itself, so the Description-box edit path is
-            // completely untouched by any of this.
-            const runTableHeaderRename = async (entry, changes, statusEl) => {
-                statusEl = wrapStatusElWithOverlay(statusEl);
-                setTableRefreshingFlag(entry, true);
-                currentTrace = [];
-                let outcome = "(ended before any outcome was recorded)";
-                const describe = changes.map((c) => `"${c.from}" -> "${c.to}"`).join(", ");
-                try {
-                    statusEl.style.display = "block";
-                    statusEl.textContent = "Reading the original query…";
-                    const prior = await decryptRefreshTokenWithFallback(entry, (step) => { statusEl.textContent = step; });
-                    traceLookup("Decrypt refresh tag", "(server-side decrypt, no SQL sent from here)", `sql: ${prior.sql}\nuser_query: ${prior.user_query}`);
-
-                    let updated = null;
-                    try {
-                        const toLabels = changes.map((c) => c.to);
-                        const classification = classifyGridCells([toLabels]);
-                        console.log("[QueryData] header-rename classification:", classification);
-                        const resolution = await resolveGridTermsOrNull(classification);
-                        console.log("[QueryData] header-rename resolution:", resolution);
-                        const uniqueLabels = new Set(toLabels);
-                        if (!resolution) {
-                            console.warn("[QueryData] header-rename: a new label couldn't be resolved as company/metric/period/irrelevant — falling back to the LLM rewrite.");
-                        } else if (resolution.companies.length || resolution.periodValues.length || resolution.metrics.length !== uniqueLabels.size) {
-                            console.warn("[QueryData] header-rename: new label(s) didn't resolve cleanly as metrics (some landed as a company/period, or one didn't resolve at all) — falling back to the LLM rewrite.", { toLabels, resolution });
-                        } else {
-                            // Keyed on BOTH the canonical display name and the primary column: a
-                            // standardised metric resolved for a quarterly table has column
-                            // "Revenue (Q)" while the user typed (and the heading reads) "Revenue",
-                            // so keying on the column alone would never find it.
-                            const metricByColumn = new Map();
-                            for (const m of resolution.metrics) {
-                                if (m.display) metricByColumn.set(m.display, m);
-                                if (!metricByColumn.has(m.column)) metricByColumn.set(m.column, m);
-                            }
-                            let splicedSql = prior.sql;
-                            let splicedDescription = prior.description || "";
-                            for (const change of changes) {
-                                const metric = metricByColumn.get(change.to);
-                                if (!metric) { console.warn(`[QueryData] header-rename: no resolved metric for "${change.to}" — falling back.`); splicedSql = null; break; }
-                                const next = trySpliceRenameColumn(splicedSql, change.from, metric);
-                                if (!next) { console.warn(`[QueryData] header-rename: couldn't splice "${change.from}" -> "${change.to}" (${metric.table}.${metric.column}) — either "${change.from}" isn't found exactly once in the SELECT list, or ${metric.table} isn't already joined in this query. Falling back to the LLM rewrite.`, { sql: splicedSql }); splicedSql = null; break; }
-                                splicedSql = next;
-                                if (splicedDescription) splicedDescription = splicedDescription.split(change.from).join(change.to); // best-effort, harmless if it doesn't appear
-                            }
-                            if (splicedSql) {
-                                traceLookup("Header rename: code-side splice (no freeform rewrite)", "(text-level SQL edit, no SQL executed yet)", describe);
-                                updated = { sql: splicedSql, title: prior.title, description: splicedDescription, explanation: "" };
-                            }
-                        }
-                    } catch (e) {
-                        console.warn("[QueryData] header-rename fast path failed, falling back to the LLM rewrite:", e.message);
-                    }
-
-                    if (!updated) {
-                        const sampleText = await readSampleRows(entry);
-                        traceLookup("Read sample rows", "(reads the sheet directly, no SQL)", sampleText ? `${sampleText.split("\n").length} row(s) sampled` : "no data rows to sample");
-                        statusEl.textContent = "Asking the model to update the query…";
-                        const instruction = `The user directly retyped this table's own header row in the sheet, renaming `
-                            + `${changes.length > 1 ? "these columns" : "this column"}: ${describe}. Update the query so `
-                            + `${changes.length > 1 ? "those columns" : "that column"} now reflect the new label(s) instead, `
-                            + "keeping every other column and the overall shape the same.";
-                        updated = await refreshSqlFromPrevious(prior.sql, prior.user_query, prior.description, instruction, sampleText);
-                    }
-                    if (!updated.sql) {
-                        outcome = `DECLINED — no SQL generated.\nExplanation: ${updated.explanation || "(none given)"}`;
-                        statusEl.textContent = updated.explanation || "Couldn't refresh this table with that request.";
-                        return;
-                    }
-                    outcome = `SQL generated:\n${updated.sql}\n\nExplanation: ${updated.explanation || "(none given)"}`;
-
-                    statusEl.textContent = "Running the updated query…";
-                    const data = await runGeneratedSql(updated.sql, prior.user_query || describe, (updated.title || "Query Result").slice(0, 31), prior.tables_used, updated.title, updated.description);
-                    data.title = updated.title || prior.title || "Query Result";
-                    data.description = updated.description || prior.description || "";
-
-                    outcome += await writeRefreshedTable(entry, data, statusEl);
-                } catch (e) {
-                    console.warn("[QueryData] header rename failed:", e);
-                    outcome = `ERROR: ${e.message}`;
-                    statusEl.textContent = e.message && e.message !== "Failed to fetch" ? e.message : "Couldn't refresh this table — please try again.";
-                } finally {
-                    if (currentTrace) saveQueryDataTrace(formatQueryDataTrace(`Header rename: ${describe}`, currentTrace, outcome), `rename-${entry.title}`);
-                    hideQueryDataOverlay();
-                    setTableRefreshingFlag(entry, false);
-                    flushQueryDataCost(`Rename header on "${entry.title}": ${describe}`);
-                }
-            };
-
-            // Classifies a stable change in the CompName/Period watch window (see
-            // pollTableMetaEdits) into exactly ONE of two kinds, never both at once — if the user
-            // touched BOTH the company and period columns in the same tick (whether that's one new
-            // row with both cells filled, or two separate edits), this still surfaces as a single
-            // pending change ("mixedChange") so the row's Update bar can show it, but
-            // runTableDataRowEdit routes it straight to the LLM fallback instead of attempting the
-            // fast path once applied.
-            // Otherwise, the changed dimension's FINAL value is simply whatever's now
-            // actually displayed across the whole watch window (existing rows plus the blank ones
-            // below) — this naturally covers both "typed a brand-new row" (the old values are all
-            // still there, this is just one more) and "retyped an existing row" (the old text is
-            // gone from the column, unless some OTHER row still shows it, in which case it's
-            // correctly kept) with no separate "is this an addition or a swap" judgment needed.
-            // isSingleCompany tables have no CompName column here at all (see item 2's layout) —
-            // their own company changes come exclusively from the separate "Company" meta-cell
-            // watch in pollTableMetaEdits; this function only ever looks at Period for them, at
-            // column 0 instead of column 1.
-            // Whether this table is laid out the way every STRUCTURED editor below assumes: company
-            // down column 0 (multi-company) or Period down column 0 (single-company, its company
-            // folded into its own meta row). That is what writeDownloadedTableToSheet produces for
-            // a buildDeterministicQuery result, and what classifyDataRowChange/runTableHeaderRename/
-            // runTableAddColumns all read positionally.
-            //
-            // A table can legitimately be on the sheet in a DIFFERENT orientation — most commonly
-            // companies across the header row with metrics down column 0, which the freeform SQL
-            // writer produces when the user lays a skeleton out that way. Nothing about writing or
-            // displaying that is wrong; the bug was that the editors went on reading column 0 as
-            // "the company column" regardless. On a companies-across table, column 0 holds METRIC
-            // names, so an edit anywhere reported `companyChange` with companies like
-            // ["Revenue","EBITDA","PAT"] — and the LLM fallback then got handed that same garbage
-            // premise as fact ("the companies shown are now Revenue, EBITDA, PAT"), which is why
-            // the update failed outright and the table just stayed as it was.
-            //
-            // So: detect it, and route those tables' edits through the model with an HONEST
-            // description instead of a positional misreading. "Compname" is what
-            // formatColumnHeaderLabel turns the unaliased b.CompName into; compared case-insensitively
-            // since it is only ever a display label.
-            const isStructuredLayout = (entry, headerRowValues) => {
-                const first = String(headerRowValues?.[0] ?? "").trim().toLowerCase();
-                if (entry.companyName) return first === "period"; // single-company: Period is its only positional hook
-                return first === "compname" || first === "company name";
-            };
-            const classifyDataRowChange = (s, dataRowValues, hasPeriodCol, isSingleCompany) => {
-                const baseline = s.baselineDataColumns;
-                const periodColIdx = isSingleCompany ? 0 : 1;
-                let companyChanged = false, periodChanged = false;
-                for (let r = 0; r < dataRowValues.length; r++) {
-                    const row = dataRowValues[r];
-                    const baseRow = baseline[r] || [];
-                    if (!isSingleCompany && (row[0] || "") !== (baseRow[0] || "")) companyChanged = true;
-                    if (hasPeriodCol && (row[periodColIdx] || "") !== (baseRow[periodColIdx] || "")) periodChanged = true;
-                }
-                if (companyChanged && periodChanged) {
-                    const companies = [...new Set(dataRowValues.map((row) => row[0]).filter(Boolean))];
-                    const periods = [...new Set(dataRowValues.map((row) => row[periodColIdx]).filter(Boolean))];
-                    return (companies.length || periods.length) ? { kind: "mixedChange", companies, periods } : null;
-                }
-                if (companyChanged) {
-                    const companies = [...new Set(dataRowValues.map((row) => row[0]).filter(Boolean))];
-                    return companies.length ? { kind: "companyChange", companies } : null;
-                }
-                if (periodChanged) {
-                    const periods = [...new Set(dataRowValues.map((row) => row[periodColIdx]).filter(Boolean))];
-                    return periods.length ? { kind: "periodChange", periods } : null;
-                }
-                return null; // only deletions — nothing to act on
-            };
-
-            // True when two pending-change objects (pendingDataRowChange's companyChange/
-            // periodChange/mixedChange shapes, or pendingHeaderChange's headerAdd/headerRename —
-            // the two are never compared against each other) describe the exact same edit. Used by
-            // pollTableMetaEdits to tell "the user's latest correction, once stable, is identical to
-            // what's already on the Update bar" (skip re-rendering) apart from "it's genuinely
-            // different now" (replace it and re-surface) — see that function's own comment on why
-            // this check exists at all. Every shape here is a plain object of strings/string-arrays,
-            // so a short field-by-field comparison covers it; no need for a generic deep-equal.
-            const sameStrArr = (x, y) => {
-                const a = x || [], b = y || [];
-                return a.length === b.length && a.every((v, i) => v === b[i]);
-            };
-            const pendingChangeEquals = (a, b) => {
-                if (a === b) return true;
-                if (!a || !b || a.kind !== b.kind) return false;
-                if (a.kind === "headerAdd") return sameStrArr(a.newColumnLabels, b.newColumnLabels);
-                if (a.kind === "headerRename") {
-                    return sameStrArr(a.changes.map((c) => `${c.from}\u0000${c.to}`), b.changes.map((c) => `${c.from}\u0000${c.to}`));
-                }
-                // A non-standard-layout edit (see isStructuredLayout) carries no companies/periods
-                // to compare — only a flattened snapshot of what the watched cells now say. Without
-                // comparing THAT, two different consecutive edits to such a table would both look
-                // "equal" and the Update bar would keep applying the first one, which is exactly the
-                // stale-pending-change bug the other kinds already had fixed.
-                if (a.kind === "layoutEdit") return a.signature === b.signature;
-                return sameStrArr(a.companies, b.companies) && sameStrArr(a.periods, b.periods); // companyChange / periodChange / mixedChange
-            };
-
-            // Re-renders the list AND — only when this is a genuinely NEW pending change, never
-            // when one is being cleared/cancelled back to baseline — switches to the Your Tables tab
-            // if the user is currently looking at Download Data instead, so a detected edit is never
-            // sitting unseen behind the other tab. switchDtTab/activeDtTab are declared earlier in
-            // this same setup (see the tab-bar wiring), both already initialized by the time this
-            // can possibly run (the first poll tick fires on a timer, strictly after the whole view
-            // finishes its synchronous setup).
-            const notifyPendingChangeDetected = () => {
-                renderYourTablesList(lastScannedTables);
-                if (activeDtTab !== "yourtables") switchDtTab("yourtables");
-            };
-
-            // One Excel.run per tick reading every watched table's Description cell AND header row
-            // in a single batch — never one round trip per table — then pure-JS debounce bookkeeping
-            // against the (synchronous) results.
-            let pollTableMetaEditsInFlight = false;
-            const pollTableMetaEdits = async () => {
-                if (pollTableMetaEditsInFlight) return; // never let a slow tick overlap the next one
-                if (qdExcelBusy > 0) return; // and never compete with an operation the user is waiting on — see qdWithExcelBusy
-                const states = Array.from(tableMetaWatchState.values()).filter(s => !s.refreshing);
-                if (!states.length) return;
-                pollTableMetaEditsInFlight = true;
-                try {
-                    let readings;
-                    try {
-                        readings = await Excel.run(async (context) => {
-                            const ranges = states.map((s) => {
-                                const sheet = context.workbook.worksheets.getItem(s.entry.sheetName);
-                                const descriptionRange = sheet.getRangeByIndexes(s.entry.titleRow + 1, s.entry.titleCol, 1, 1);
-                                descriptionRange.load("values");
-                                // A single-company table's "Company: <name>" meta row (see
-                                // writeDownloadedTableToSheet) always sits right after Title+
-                                // Description — the SAME single-cell debounce treatment as
-                                // Description above, just for the company instead.
-                                let companyMetaRange = null;
-                                if (s.entry.companyName) {
-                                    companyMetaRange = sheet.getRangeByIndexes(s.entry.titleRow + QD_TABLE_META_ROWS, s.entry.titleCol + 1, 1, 1);
-                                    companyMetaRange.load("values");
-                                }
-                                const headerRow = s.entry.titleRow + s.entry.metaRows;
-                                // Both windows below stop short of any neighbouring table — see
-                                // watchWindowRoom for the false "update needed" that cost.
-                                const room = watchWindowRoom(s.entry);
-                                const headerWatchCols = s.entry.tableCols + room.extraCols;
-                                const headerRange = sheet.getRangeByIndexes(headerRow, s.entry.titleCol, 1, headerWatchCols);
-                                headerRange.load("values");
-                                // For a multi-company table: CompName (always column 0, see
-                                // buildDeterministicQuery) and, if present, Period (column 1). For a
-                                // single-company table, there's no CompName column left to watch at
-                                // all (see item 2's layout) — just Period, if present, now at column
-                                // 0. Either way, over the existing data rows plus a few blank ones
-                                // below, same "extra watch window" idea as the header row's
-                                // QD_HEADER_WATCH_EXTRA_COLS above. Which column (if any) is actually
-                                // "Period" is read off the SAME header row already being loaded (its
-                                // value isn't known synchronously here — resolved below once
-                                // headerRange.values is actually available).
-                                const existingDataRows = Math.max(0, s.entry.tableRows - 1);
-                                const dataR0 = s.entry.titleRow + s.entry.metaRows + 1;
-                                // Never 0 — a table with no data rows yet whose neighbour sits
-                                // immediately below it would otherwise ask Excel for a 0-row range,
-                                // which throws. One row is always safe: it's the table's own first
-                                // data row, inside its own footprint.
-                                const dataWatchRows = Math.max(1, existingDataRows + room.extraRows);
-                                const dataWatchCols = s.entry.companyName ? Math.min(1, Math.max(1, s.entry.tableCols)) : Math.min(2, Math.max(1, s.entry.tableCols));
-                                const dataRange = sheet.getRangeByIndexes(dataR0, s.entry.titleCol, dataWatchRows, dataWatchCols);
-                                dataRange.load("values");
-                                return { s, descriptionRange, companyMetaRange, headerRange, dataRange };
-                            });
-                            await context.sync();
-                            return ranges.map(r => ({
-                                s: r.s,
-                                description: String(r.descriptionRange.values[0][0] || "").replace(/^Description:\s*/i, "").trim(),
-                                companyMeta: r.companyMetaRange ? String(r.companyMetaRange.values[0][0] ?? "").trim() : null,
-                                headerRowValues: r.headerRange.values[0].map(v => String(v ?? "").trim()),
-                                dataRowValues: r.dataRange.values.map(row => row.map(v => String(v ?? "").trim())),
-                            }));
-                        });
-                    } catch (e) {
-                        // A watched sheet/cell may have been deleted or renamed since the last
-                        // scan — not fatal, just skip this tick; the next full rescan resets
-                        // everything anyway.
-                        console.warn("[QueryData] meta-cell watch poll failed:", e);
-                        return;
-                    }
-
-                    const now = Date.now();
-                    for (const { s, description, companyMeta, headerRowValues, dataRowValues: rawDataRowValues } of readings) {
-                        // --- Description cell ---
-                        if (description !== s.baselineDescription) {
-                            if (description !== s.pendingDescription) {
-                                s.pendingDescription = description; s.pendingDescriptionSince = now;
-                            } else if (now - s.pendingDescriptionSince >= QD_META_EDIT_DEBOUNCE_MS
-                                && (!s.pendingDescriptionChange || s.pendingDescriptionChange.newDescription !== description)) {
-                                // Stable past the debounce — don't fire a rewrite, just surface it on
-                                // this table's own row's Update bar (see renderYourTablesList); only
-                                // an explicit click on that bar applies it (see the
-                                // dt-yt-update-bar click handler below).
-                                //
-                                // Reclassified even when something is already pending (that's the
-                                // "newDescription !== description" half of the guard above, not just
-                                // "!pendingDescriptionChange") — otherwise a user who typos the
-                                // description, sees the Update bar light up, then fixes the typo
-                                // BEFORE clicking Update, would have that correction silently
-                                // ignored: Update would apply the first (wrong) text it ever saw,
-                                // forever, since nothing after the first commit ever looked again.
-                                // s.pendingDescription is deliberately NOT reset to null here (unlike
-                                // the old code) — it has to keep holding the just-committed value, or
-                                // the very next tick's "description !== s.pendingDescription" check
-                                // above would always be true, causing this whole branch to run on a
-                                // loop instead of going quiet once nothing has actually changed since.
-                                s.pendingDescriptionChange = {
-                                    newDescription: description, oldDescription: s.baselineDescription,
-                                    instruction: `The user directly edited the table's description in the sheet to: "${description}". Refresh the table to match.`,
-                                };
-                                notifyPendingChangeDetected();
-                            }
-                        } else {
-                            // Back to baseline — typed back to the original is an implicit cancel.
-                            s.pendingDescription = null; s.pendingDescriptionSince = 0;
-                            if (s.pendingDescriptionChange) { s.pendingDescriptionChange = null; renderYourTablesList(lastScannedTables); }
-                        }
-
-                        // --- Company meta cell (single-company tables only — see
-                        // writeDownloadedTableToSheet) — a retyped company name here is exactly as
-                        // definitive as a Description edit: there's only ever one company, so a
-                        // change IS the new company list, no data-row diffing needed at all. Same
-                        // debounce shape as Description above, feeding the SAME pendingDataRowChange
-                        // a multi-company table's data-row watcher below would.
-                        if (companyMeta !== null) {
-                            if (companyMeta !== s.baselineCompanyMetaText) {
-                                if (companyMeta !== s.pendingCompanyMetaText) {
-                                    s.pendingCompanyMetaText = companyMeta; s.pendingCompanyMetaSince = now;
-                                } else if (now - s.pendingCompanyMetaSince >= QD_META_EDIT_DEBOUNCE_MS && companyMeta
-                                    && !(s.pendingDataRowChange && s.pendingDataRowChange.kind === "companyChange" && s.pendingDataRowChange.companies[0] === companyMeta)) {
-                                    // Same "reclassify on a correction, not just the first stable
-                                    // value" fix as the Description cell above — and the same reason
-                                    // s.pendingCompanyMetaText is left holding the committed value
-                                    // instead of being reset to null here.
-                                    s.pendingDataRowChange = { kind: "companyChange", companies: [companyMeta] };
-                                    notifyPendingChangeDetected();
-                                }
-                            } else {
-                                s.pendingCompanyMetaText = null; s.pendingCompanyMetaSince = 0;
-                                if (s.pendingDataRowChange && s.pendingDataRowChange.kind === "companyChange") { s.pendingDataRowChange = null; renderYourTablesList(lastScannedTables); }
-                            }
-                        }
-
-                        // --- Data rows: CompName/Period columns only, never any other data column.
-                        // A single-company table has no CompName column left to watch at all (see
-                        // item 2's layout) — only Period, if present, now shifted to column 0. ---
-                        //
-                        // Trimmed to a CONTIGUOUS run starting right at the table's own last real
-                        // data row — the first entirely-blank row (across the watched columns) ends
-                        // the window, rather than trusting the raw read's full QD_DATA_ROW_WATCH_
-                        // EXTRA_ROWS regardless of what's actually in it. watchWindowRoom (used to
-                        // size that raw read) only clips against OTHER ALREADY-SCANNED tables — a
-                        // real neighbour with its own refresh tag. A plain skeleton grid the user is
-                        // still building a few rows below (even past a genuine blank gap) has no tag
-                        // at all yet, so it was never something that clipping could see — confirmed
-                        // live: building one two rows below an existing table's last data row got
-                        // misread as a company/period typed directly into THAT table, firing a false
-                        // "period change" on it. A blank-row stop works regardless of whether
-                        // whatever's below is a recognized table, an in-progress skeleton, or
-                        // unrelated notes — a real new row the user is adding is always typed
-                        // immediately adjacent to the table's existing data, never past a gap.
-                        const existingDataRows = Math.max(0, s.entry.tableRows - 1);
-                        let dataWatchEnd = rawDataRowValues.length;
-                        for (let i = existingDataRows; i < rawDataRowValues.length; i++) {
-                            if (rawDataRowValues[i].every((v) => !v)) { dataWatchEnd = i; break; }
-                        }
-                        const dataRowValues = rawDataRowValues.slice(0, dataWatchEnd);
-
-                        // Decided once per tick and used by BOTH the data-row and header sections
-                        // below — see isStructuredLayout for what a non-standard orientation is and
-                        // why reading column 0 positionally on one produces nonsense.
-                        const structuredLayout = isStructuredLayout(s.entry, headerRowValues);
-
-                        if (s.baselineDataColumns === null) {
-                            s.baselineDataColumns = dataRowValues; // just started watching — nothing to compare against yet
-                        } else {
-                            const dataChanged = dataRowValues.some((row, r) => {
-                                const baseRow = s.baselineDataColumns[r] || [];
-                                return row.some((v, c) => v !== (baseRow[c] || ""));
-                            });
-                            if (!dataChanged) {
-                                s.pendingDataRows = null; s.pendingDataRowsSince = 0;
-                                // Back to baseline — typed back to the original is an implicit cancel,
-                                // same as the description cell above. Only clears a PERIOD/company
-                                // change pending from the DATA-ROW watcher — a companyChange pending
-                                // from the meta-cell watch above (single-company tables) is that
-                                // watch's own business, handled up there instead.
-                                if (s.pendingDataRowChange && s.pendingDataRowChange.kind !== "companyChange") { s.pendingDataRowChange = null; renderYourTablesList(lastScannedTables); }
-                            } else {
-                                const stillPendingData = s.pendingDataRows && dataRowValues.every((row, r) => {
-                                    const pendRow = s.pendingDataRows[r] || [];
-                                    return row.every((v, c) => v === (pendRow[c] || ""));
-                                });
-                                if (!stillPendingData) {
-                                    s.pendingDataRows = dataRowValues; s.pendingDataRowsSince = now;
-                                } else if (now - s.pendingDataRowsSince >= QD_META_EDIT_DEBOUNCE_MS) {
-                                    // Stable past the debounce — same "don't fire, just surface it on
-                                    // the Update bar" treatment as the description cell above, and the
-                                    // SAME "reclassify every time, even when something is already
-                                    // pending" fix (see that cell's own comment): this always
-                                    // re-derives `change` from the current data rows, rather than
-                                    // gating on "!s.pendingDataRowChange" — otherwise a correction
-                                    // typed after the Update bar lit up (e.g. fixing a typo'd period)
-                                    // would be tracked here but never promoted, and clicking Update
-                                    // would apply the first, wrong value forever.
-                                    //
-                                    // pendingChangeEquals is what keeps this from re-notifying/
-                                    // re-rendering on every single poll tick once stable — without
-                                    // it, this would recompute (cheaply) AND re-fire every ~250ms
-                                    // for as long as the change sits unapplied, since nothing above
-                                    // resets pendingDataRowsSince once the debounce is first satisfied.
-                                    //
-                                    // foreignCompanyChange mirrors the ownership split the
-                                    // !dataChanged branch above already respects: a single-company
-                                    // table's companyChange belongs to the meta-cell watcher, never
-                                    // this one (classifyDataRowChange itself never returns that kind
-                                    // for isSingleCompany — see its own comment), so this must not
-                                    // clear or replace one just because classification came back null
-                                    // or different here.
-                                    const isSingleCompany = !!s.entry.companyName;
-                                    const hasPeriodCol = headerRowValues[isSingleCompany ? 0 : 1] === "Period";
-                                    // On a non-standard orientation, column 0 is NOT the company
-                                    // column — classifying positionally there is what produced
-                                    // companies like ["Revenue","EBITDA","PAT"]. Report the edit
-                                    // honestly instead and let the model read the real sheet (see
-                                    // isStructuredLayout, and the layoutEdit routing on the Update bar).
-                                    const change = structuredLayout
-                                        ? classifyDataRowChange(s, dataRowValues, hasPeriodCol, isSingleCompany)
-                                        : { kind: "layoutEdit", where: "the table's first column", signature: dataRowValues.map((r) => r.join("\u0000")).join("\u0001") };
-                                    const foreignCompanyChange = isSingleCompany && s.pendingDataRowChange && s.pendingDataRowChange.kind === "companyChange";
-                                    if (!foreignCompanyChange && !pendingChangeEquals(change, s.pendingDataRowChange)) {
-                                        s.pendingDataRowChange = change;
-                                        if (change) notifyPendingChangeDetected(); else renderYourTablesList(lastScannedTables);
-                                    }
-                                }
-                            }
-                        }
-
-                        // --- Header row ONLY — never a data row below it ---
-                        // A header edit no longer auto-fires a rewrite the moment it debounces,
-                        // same reasoning as the description/data-row watchers above (and the SAME
-                        // bug this change is specifically fixing: an auto-fired header-add used to
-                        // land mid-way through a user still typing several new columns, or collide
-                        // with wouldRefreshOverwriteOtherContent's own danger-detection — see that
-                        // function's comment — while the user was still mid-edit elsewhere in the
-                        // table). It's recorded on the table's own watch state (pendingHeaderChange)
-                        // and surfaced as the same Update-bar highlight every other pending-change
-                        // kind uses; only an explicit click on that bar (see the dt-yt-update-bar
-                        // handler below) actually fires runTableAddColumns/runTableHeaderRename.
-                        if (s.baselineHeaderRow === null) { s.baselineHeaderRow = headerRowValues; continue; } // just started watching — nothing to compare against yet
-                        const headerChanged = headerRowValues.some((v, i) => v !== s.baselineHeaderRow[i]);
-                        if (!headerChanged) {
-                            s.pendingHeaderRow = null; s.pendingHeaderRowSince = 0;
-                            // Back to baseline — typed back to the original is an implicit cancel,
-                            // same as every other watcher above. Only touches a header-origin
-                            // pending change; leaves a description/data-row one (if any) alone.
-                            if (s.pendingHeaderChange) { s.pendingHeaderChange = null; renderYourTablesList(lastScannedTables); }
-                            continue;
-                        }
-                        const stillPending = s.pendingHeaderRow && headerRowValues.every((v, i) => v === s.pendingHeaderRow[i]);
-                        if (!stillPending) { s.pendingHeaderRow = headerRowValues; s.pendingHeaderRowSince = now; continue; }
-                        if (now - s.pendingHeaderRowSince < QD_META_EDIT_DEBOUNCE_MS) continue;
-
-                        // Stable for QD_META_EDIT_DEBOUNCE_MS — two DISTINCT kinds of edit are
-                        // classified within the same header row, checked in this order:
-                        //
-                        // 1. A CONTIGUOUS run of NEW non-blank text starting at the table's own next
-                        //    immediate column (offset tableCols — the cell right after the current
-                        //    last header), stopping at the first still-blank/unchanged cell. Typing
-                        //    into a column further out with one or more BLANK cells still separating
-                        //    it from the table (e.g. the table ends at C, D/E are still blank, but
-                        //    the user typed into F) never reaches this — the loop stops at the first
-                        //    gap, so only genuinely adjacent new column(s) count as "extending" it.
-                        //
-                        // This reclassifies EVERY time it's stable, even when something is already
-                        // pending — the guard used to be "... || s.pendingHeaderChange", which meant
-                        // once a header change had been surfaced on the Update bar, NOTHING here ever
-                        // ran again until the user clicked it or reverted to baseline. A correction
-                        // typed in the meantime (fixing a typo'd header before ever clicking Update)
-                        // was tracked by pendingHeaderRow/pendingHeaderRowSince above just fine, but
-                        // never got PROMOTED into pendingHeaderChange — so Update kept applying
-                        // whatever the first stable (wrong) text had been. pendingChangeEquals below
-                        // is what keeps this from re-notifying/re-rendering on every poll tick once
-                        // stable instead: without it, this would reclassify (cheaply) AND re-fire
-                        // every ~250ms for as long as the change sits unapplied, since nothing above
-                        // resets pendingHeaderRowSince once the debounce is first satisfied.
-                        // On a non-standard orientation the header row holds COMPANY names, not
-                        // metric names — so "a new header appeared" means a new company column, and
-                        // "a header was retyped" means a company was swapped, neither of which
-                        // addColumnsToTable/runTableHeaderRename can express (both only ever reason
-                        // about metric columns). Surfaced honestly as a layoutEdit for the model to
-                        // handle instead of being forced into the wrong one of those two.
-                        if (!structuredLayout) {
-                            const freshLayoutChange = { kind: "layoutEdit", where: "the table's header row", signature: headerRowValues.join("\u0000") };
-                            if (!pendingChangeEquals(freshLayoutChange, s.pendingHeaderChange)) {
-                                s.pendingHeaderChange = freshLayoutChange;
-                                notifyPendingChangeDetected();
-                            }
-                            continue;
-                        }
-                        const additions = [];
-                        for (let i = s.entry.tableCols; i < headerRowValues.length; i++) {
-                            const v = headerRowValues[i];
-                            if (!v || v === s.baselineHeaderRow[i]) break; // first gap or unchanged cell — stop, don't look further out
-                            additions.push(v);
-                        }
-                        let freshHeaderChange = additions.length ? { kind: "headerAdd", newColumnLabels: additions } : null;
-                        if (!freshHeaderChange) {
-                            // 2. Retyping one of the table's OWN EXISTING header cells (offset <
-                            //    tableCols) — a rename, not an addition, so it'll go through
-                            //    runTableHeaderRename (the Modify pipeline) instead of
-                            //    addColumnsToTable, which only ever appends.
-                            const renames = [];
-                            for (let i = 0; i < s.entry.tableCols; i++) {
-                                const v = headerRowValues[i];
-                                if (v && v !== s.baselineHeaderRow[i]) renames.push({ from: s.baselineHeaderRow[i] || "(blank)", to: v });
-                            }
-                            if (renames.length) freshHeaderChange = { kind: "headerRename", changes: renames };
-                            // else: only deletions — nothing to act on, already cleared above
-                        }
-                        if (!pendingChangeEquals(freshHeaderChange, s.pendingHeaderChange)) {
-                            s.pendingHeaderChange = freshHeaderChange;
-                            if (freshHeaderChange) notifyPendingChangeDetected(); else renderYourTablesList(lastScannedTables);
-                        }
-                    }
-                } finally {
-                    pollTableMetaEditsInFlight = false;
-                }
-            };
-            setInterval(pollTableMetaEdits, QD_META_EDIT_POLL_MS);
-
-            // Shows/hides a row's editable range field (and its destination-sheet picker) in
-            // lockstep with its badge — entering "range edit mode" (Modify clicked) always resets
-            // the input back to the table's CURRENT range (the exact same string the badge itself
-            // shows, e.g. "A3:C16" — not just its invisible title anchor, which sits
-            // QD_TABLE_META_ROWS rows above that and would look like an unrelated, wrong cell next
-            // to the range the user was just looking at), so a stale half-typed value from a
-            // previous open/close never lingers; leaving it (Cancel, or switching to Refresh/Delete
-            // instead) just reverts display, discarding whatever was typed without attempting a
-            // move. The sheet picker defaults to this table's OWN sheet (not necessarily whatever's
-            // active right now) — populated asynchronously (a synchronous single-option
-            // placeholder shows immediately so the dropdown is never empty while that's in flight).
-            const setLocEditing = (item, entry, editing) => {
-                // The whole row (range badge + any company/period value badges) swaps for the edit
-                // controls as one unit, not just the range badge alone.
-                const locRow = item.querySelector(".dt-yt-item-loc-row");
-                const editWrap = item.querySelector(".dt-yt-item-loc-edit");
-                const startInput = item.querySelector(".dt-yt-item-loc-start-input");
-                const endInput = item.querySelector(".dt-yt-item-loc-end-input");
-                const sheetSelect = item.querySelector(".dt-yt-item-loc-sheet-select");
-                if (editing) {
-                    // entry.range is always "start:end" (see blockAddress — even a 1-row/1-col
-                    // table's footprint is expressed that way) — split back into the two boxes
-                    // rather than reusing it as one joined string.
-                    const [startVal, endVal] = entry.range.split(":");
-                    startInput.value = startVal || "";
-                    endInput.value = endVal || "";
-                    locRow.style.display = "none";
-                    editWrap.style.display = "flex";
-                    sheetSelect.innerHTML = `<option value="${escapeHtml(entry.sheetName)}">${escapeHtml(entry.sheetName)}</option>`;
-                    populateSheetSelect(sheetSelect, entry.sheetName).catch((e) => console.warn("[QueryData] couldn't list sheets:", e));
-                } else {
-                    editWrap.style.display = "none";
-                    locRow.style.display = "flex";
-                }
-            };
-
-            // Moving a table is a pure relocation (copy values+formatting+comment to the new spot,
-            // clear what's left of the old one), never a re-query — see moveYourTable. Committed by
-            // either pressing Enter in one of the two range boxes or clicking away from them (see
-            // the keydown/focusout listeners below), both funneled through here.
-            //
-            // The START box alone ("B5"), or START+END together ("B5" and "D20", matching whatever
-            // the badge showed) — entry.range (and so these two boxes) now spans the table's WHOLE
-            // footprint, title/description rows included, so the START cell typed here IS the new
-            // title anchor directly, no offset math needed. The table's actual row/column count is
-            // fixed by its own data, not by what's typed here, so only that START cell is ever used
-            // as the new anchor; if an END cell was ALSO given, it's checked against what the
-            // table's real size would actually produce there — a mismatch (entering a
-            // shorter/longer range than the table really is) is rejected with a clear explanation
-            // rather than silently moving it somewhere the user's own typed range didn't describe.
-            // The two boxes are rejoined into one "start:end" (or bare "start") string here so
-            // every check below this point — parseRangeRef included — is unchanged from when this
-            // was a single field.
-            const commitTableMove = async (item, entry) => {
-                const startVal = (item.querySelector(".dt-yt-item-loc-start-input")?.value || "").trim();
-                const endVal = (item.querySelector(".dt-yt-item-loc-end-input")?.value || "").trim();
-                const parsedRange = parseRangeRef(endVal ? `${startVal}:${endVal}` : startVal);
-                if (!parsedRange) {
-                    setLocEditing(item, entry, false);
-                    showDtStatus("err", "Enter a valid starting cell (e.g. \"B5\"), optionally with an ending cell, to move this table.");
-                    return;
-                }
-                // parseCellRef is 1-indexed; entry's row/col are 0-indexed.
-                const newTitleRow = parsedRange.start.row - 1, newTitleCol = parsedRange.start.col - 1;
-                const fullTotalRows = entry.metaRows + entry.tableRows;
-                if (parsedRange.end) {
-                    const expectedEndRow = newTitleRow + fullTotalRows - 1, expectedEndCol = newTitleCol + entry.tableCols - 1;
-                    const gotEndRow = parsedRange.end.row - 1, gotEndCol = parsedRange.end.col - 1;
-                    if (gotEndRow !== expectedEndRow || gotEndCol !== expectedEndCol) {
-                        const expected = blockAddress(newTitleRow + 1, newTitleCol + 1, fullTotalRows, entry.tableCols);
-                        setLocEditing(item, entry, false);
-                        showDtStatus("err", `This table (including its title/description rows) is ${fullTotalRows} row(s) by ${entry.tableCols} column(s) — starting at ${colLetter(newTitleCol + 1)}${newTitleRow + 1} that's ${expected}, not what was entered. Enter just the starting cell, or match that exact range.`);
-                        return;
-                    }
-                }
-                const sheetSelect = item.querySelector(".dt-yt-item-loc-sheet-select");
-                const targetSheetName = (sheetSelect && sheetSelect.value) || entry.sheetName;
-                if (newTitleRow === entry.titleRow && newTitleCol === entry.titleCol && targetSheetName === entry.sheetName) {
-                    setLocEditing(item, entry, false);
-                    return; // typed back the same cell/range on the same sheet — nothing to do
-                }
-                const statusEl = wrapStatusElWithOverlay(item.querySelector(".dt-yt-item-status"));
-                statusEl.style.display = "block";
-                statusEl.textContent = "Checking the new range…";
-                try {
-                    const conflict = await wouldMoveOverwriteContent(entry, newTitleRow, newTitleCol, targetSheetName);
-                    if (conflict) {
-                        statusEl.textContent = "Table cannot be moved — the new range would overwrite existing data.";
-                        return;
-                    }
-                    statusEl.textContent = "Moving the table…";
-                    await moveYourTable(entry, newTitleRow, newTitleCol, targetSheetName);
-                    statusEl.textContent = "Table moved.";
-                    setLocEditing(item, entry, false);
-                    await runYourTablesScan(); // the table's row/range are stale on `entry` now — rescan rather than patch it in place
-                } catch (e) {
-                    console.warn("[QueryData] move failed:", e);
-                    statusEl.textContent = e.message && e.message !== "Failed to fetch" ? e.message : "Couldn't move this table — please try again.";
-                } finally {
-                    hideQueryDataOverlay();
-                }
-            };
-
-            // ── Shared Undo toast (per-row Delete and the Change panel above both use this) ──
-            let ytToastHideTimer = null;
-            let ytToastUndoHandler = null; // the PREVIOUS toast's Undo listener, removed before attaching a new one
-            const showYtUndoToast = (message, onUndo, ms = 6000) => {
-                clearTimeout(ytToastHideTimer);
-                if (ytToastUndoHandler) yourTablesToastUndo.removeEventListener("click", ytToastUndoHandler);
-                yourTablesToastMessage.textContent = message;
-                yourTablesToast.style.display = "flex";
-                const hide = () => { yourTablesToast.style.display = "none"; };
-                ytToastUndoHandler = () => { clearTimeout(ytToastHideTimer); hide(); onUndo(); };
-                yourTablesToastUndo.addEventListener("click", ytToastUndoHandler);
-                ytToastHideTimer = setTimeout(hide, ms);
-            };
-
-            // ── Delete via Undo toast, not a confirm modal ──
-            // The row hides immediately (optimistic — see .dt-yt-item-pending-delete); the actual
-            // deleteYourTable call is deferred until the toast's window closes with no Undo click,
-            // so clicking Undo is free (nothing was ever touched).
-            const startYtPendingDelete = (entry, item) => {
-                const key = tableWatchKey(entry);
-                pendingDeleteKeys.add(key);
-                item.classList.add("dt-yt-item-pending-delete");
-                // Deletion is meant to feel fast — a short 2s Undo window, not the usual 6s other
-                // toasts use — so this timeout and the toast's own display time (below) are kept in
-                // sync: the toast disappears at exactly the moment Undo stops working, never gone
-                // while still clickable or vice versa.
-                const timeoutId = setTimeout(async () => {
-                    pendingDeleteKeys.delete(key);
-                    try {
-                        await deleteYourTable(entry);
-                    } catch (e) {
-                        console.warn("[QueryData] delete failed:", e);
-                    }
-                    await runYourTablesScan();
-                }, 2000);
-                showYtUndoToast(`"${entry.title}" deleted.`, () => {
-                    clearTimeout(timeoutId);
-                    pendingDeleteKeys.delete(key);
-                    item.classList.remove("dt-yt-item-pending-delete");
-                }, 2000);
-            };
-
-            // Closes one row's Edit panel — both classes removed together (display:none and the
-            // fade-in undone in one step; there's nothing to animate on the way out, same instant
-            // hide this had before the fade-in was added), the pencil button AND the Update bar
-            // footer both reappear (see the dt-yt-modify-btn handler for why the footer is hidden
-            // in the first place), and the aria-expanded/location-badge-editing state resets, so
-            // nothing is left half-open or half-hidden.
-            const closeEditPanel = (closeItem, closeEntry) => {
-                closeItem.querySelector(".dt-yt-refresh-form")?.classList.remove("dt-yt-refresh-form-open", "dt-yt-refresh-form-visible");
-                const modifyBtn = closeItem.querySelector(".dt-yt-modify-btn");
-                if (modifyBtn) { modifyBtn.style.display = ""; modifyBtn.setAttribute("aria-expanded", "false"); }
-                const footer = closeItem.querySelector(".dt-yt-item-footer");
-                if (footer) footer.style.display = "";
-                setLocEditing(closeItem, closeEntry, false);
-            };
-            // Only one row's Edit panel is ever open at once — opening a new one closes whichever
-            // other row currently has theirs open, rather than letting several pile up across the list.
-            const closeAllOpenEditPanels = (exceptItem) => {
-                yourTablesList.querySelectorAll(".dt-yt-refresh-form.dt-yt-refresh-form-open").forEach((openForm) => {
-                    const openItem = openForm.closest(".dt-yt-item");
-                    if (!openItem || openItem === exceptItem) return;
-                    const openEntry = lastScannedTables[Number(openItem.dataset.idx)];
-                    if (openEntry) closeEditPanel(openItem, openEntry);
-                });
-            };
-
-            // Event delegation on the list container — items (and their forms) are rebuilt
-            // wholesale on every scan, so listeners live on the stable parent instead. Clicking
-            // anywhere on a row OTHER than an actual control (the header icon buttons, the Update
-            // bar, the Edit toggle, the open Edit panel/the inline move editor) navigates to that
-            // table (see navigateToTable) — same as clicking a row in Excel's own Queries &
-            // Connections pane.
-            yourTablesList.addEventListener("click", (ev) => {
-                const item = ev.target.closest(".dt-yt-item");
-                if (!item) return;
-                const idx = Number(item.dataset.idx);
-                const entry = lastScannedTables[idx];
-                if (!entry) return;
-                const form = item.querySelector(".dt-yt-refresh-form");
-                const statusEl = item.querySelector(".dt-yt-item-status");
-
-                // The icon/labeled actions have an <svg>/<span> INSIDE the button, so a click can
-                // land on any of those rather than the button itself.
-                const btn = ev.target.closest(".dt-yt-refresh-btn, .dt-yt-modify-btn, .dt-yt-delete-btn, .dt-yt-refresh-cancel, .dt-yt-refresh-confirm, .dt-yt-update-bar, .dt-yt-desc-toggle-btn, .dt-yt-loc-confirm-btn, .dt-yt-loc-cancel-btn");
-                if (btn) {
-                    if (btn.classList.contains("dt-yt-refresh-btn")) {
-                        // Always a plain latest-period refresh now — a pending description/company/
-                        // period change (see the Update bar below) is applied there instead, never
-                        // folded into this button any more.
-                        closeEditPanel(item, entry);
-                        btn.disabled = true;
-                        runTableSimpleRefresh(entry, statusEl).finally(() => { btn.disabled = false; });
-                    } else if (btn.classList.contains("dt-yt-update-bar")) {
-                        if (btn.getAttribute("aria-disabled") === "true") return; // idle — not actionable
-                        const state = tableMetaWatchState.get(tableWatchKey(entry));
-                        const pendingDesc = state && state.pendingDescriptionChange;
-                        const pendingData = state && state.pendingDataRowChange;
-                        const pendingHeader = state && state.pendingHeaderChange;
-                        if (!pendingDesc && !pendingData && !pendingHeader) return;
-                        btn.disabled = true;
-                        let run;
-                        // A layoutEdit can arrive on EITHER pending slot (the data-row watcher sets
-                        // one, the header watcher the other) and is handled the same way from both:
-                        // through runTableRefresh, the one path that hands the model the stored SQL
-                        // plus a live sample of the sheet and lets it work out the change itself.
-                        // Checked before the positional branches below, since those would otherwise
-                        // try to read companies/periods/metric columns that aren't where they assume.
-                        const pendingLayout = (pendingData && pendingData.kind === "layoutEdit" && pendingData)
-                            || (pendingHeader && pendingHeader.kind === "layoutEdit" && pendingHeader);
-                        if (pendingLayout) {
-                            if (state) { state.pendingDataRowChange = null; state.pendingHeaderChange = null; }
-                            run = runTableRefresh(entry, `The user directly edited ${pendingLayout.where} in the sheet. This table is NOT laid out in the usual one-row-per-company shape — read the sample rows below to see its actual orientation (for example companies across the header row with metrics down the first column) before deciding what changed. Rebuild the query so the table matches what the sheet now shows, keeping that same orientation and overall shape.`, statusEl);
-                        } else if (pendingHeader && pendingData) {
-                            // Two DIFFERENT kinds of direct-sheet edit pending at once — e.g. a new
-                            // period typed below the table AND a new header typed past its last
-                            // column. Clearing BOTH slots here (not just one) is what makes this a
-                            // single click rather than "apply one now, the other survives for a
-                            // second click" — see runTableCombinedEdit's own comment for why a
-                            // second click would be too late anyway (the first write already erases
-                            // the other edit's visible evidence on the sheet).
-                            if (state) { state.pendingDataRowChange = null; state.pendingHeaderChange = null; }
-                            if (pendingDesc) {
-                                // A THIRD kind (description) pending at the very same time — rather
-                                // than a dedicated 3-way deterministic path, fold all three deltas
-                                // into one instruction for the same general LLM-driven rewrite the
-                                // layoutEdit/description-only cases above already use; this is the
-                                // "describe it in one sentence" treatment every combination already
-                                // gets once it leaves the deterministic fast paths.
-                                if (state) state.pendingDescriptionChange = null;
-                                const headerPart = pendingHeader.kind === "headerAdd"
-                                    ? `added new column(s): ${pendingHeader.newColumnLabels.join(", ")}`
-                                    : `renamed column(s): ${pendingHeader.changes.map((c) => `"${c.from}" -> "${c.to}"`).join(", ")}`;
-                                const dataPart = pendingData.kind === "companyChange" ? `changed the company/companies shown to: ${pendingData.companies.join(", ")}`
-                                    : pendingData.kind === "periodChange" ? `changed the period(s) shown to: ${pendingData.periods.join(", ")}`
-                                    : `changed both company (now ${pendingData.companies.join(", ") || "unchanged"}) and period (now ${pendingData.periods.join(", ") || "unchanged"})`;
-                                run = runTableRefresh(entry, `${pendingDesc.instruction} The user ALSO made direct-sheet edits at the same time: they ${headerPart}, and ${dataPart}. Apply every one of these changes together.`, statusEl);
-                            } else {
-                                run = runTableCombinedEdit(entry, pendingHeader, pendingData, statusEl);
-                            }
-                        } else if (pendingDesc) {
-                            run = runTableRefresh(entry, pendingDesc.instruction, statusEl).then(() => { if (state) state.pendingDescriptionChange = null; });
-                        } else if (pendingData) {
-                            if (state) state.pendingDataRowChange = null;
-                            run = runTableDataRowEdit(entry, pendingData, statusEl);
-                        } else {
-                            if (state) state.pendingHeaderChange = null;
-                            run = pendingHeader.kind === "headerAdd"
-                                ? runTableAddColumns(entry, pendingHeader.newColumnLabels, statusEl)
-                                : runTableHeaderRename(entry, pendingHeader.changes, statusEl);
-                        }
-                        run.finally(() => { btn.disabled = false; });
-                    } else if (btn.classList.contains("dt-yt-modify-btn")) {
-                        const opening = !form.classList.contains("dt-yt-refresh-form-open");
-                        closeAllOpenEditPanels(item);
-                        if (!opening) {
-                            closeEditPanel(item, entry);
-                        } else {
-                            // The pencil button hides, and the Update bar below it (the row's own
-                            // .dt-yt-item-footer — a SEPARATE element now that the pencil sits next
-                            // to the description instead of in that footer) hides too: "just the
-                            // description and the edit textbox" while a change is being typed, same
-                            // idea as the old Edit-button-transforms-into-the-input-row behavior,
-                            // just covering one more element since the Update bar used to stay
-                            // visible alongside an open form and shouldn't any more.
-                            // display:none -> flex and the fade-in itself happen one frame apart —
-                            // display can't be transitioned, so without this split the row would
-                            // just snap open instead of fading/sliding in.
-                            btn.style.display = "none";
-                            const footer = item.querySelector(".dt-yt-item-footer");
-                            if (footer) footer.style.display = "none";
-                            form.classList.add("dt-yt-refresh-form-open");
-                            requestAnimationFrame(() => form.classList.add("dt-yt-refresh-form-visible"));
-                            btn.setAttribute("aria-expanded", "true");
-                            setLocEditing(item, entry, true);
-                            form.querySelector(".dt-yt-refresh-input").focus();
-                            const reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-                            requestAnimationFrame(() => item.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "nearest" }));
-                        }
-                    } else if (btn.classList.contains("dt-yt-delete-btn")) {
-                        startYtPendingDelete(entry, item);
-                    } else if (btn.classList.contains("dt-yt-refresh-cancel")) {
-                        closeEditPanel(item, entry);
-                    } else if (btn.classList.contains("dt-yt-refresh-confirm")) {
-                        const input = form.querySelector(".dt-yt-refresh-input");
-                        const instruction = input.value.trim();
-                        if (!instruction) { input.focus(); return; }
-                        btn.disabled = true;
-                        statusEl.style.display = "block";
-                        statusEl.textContent = "Checking the best way to handle this…";
-                        // Same intent-triage pattern the Download box's typed request already runs
-                        // (see classifyQueryDataIntent) — classifyTableEditIntent's own comment has
-                        // the reasoning for why this one's "normal case" is flipped. Wrapped in its
-                        // own async IIFE since this click handler itself isn't async.
-                        (async () => {
-                            const intent = await classifyTableEditIntent(instruction);
-                            if (intent === "other") {
-                                closeEditPanel(item, entry);
-                                await delegateToDataGpt(instruction);
-                                return; // the page is about to navigate to the "datagpt" view
-                            }
-                            await runTableRefresh(entry, instruction, statusEl);
-                        })().finally(() => { btn.disabled = false; });
-                    } else if (btn.classList.contains("dt-yt-desc-toggle-btn")) {
-                        const descEl = item.querySelector(".dt-yt-item-desc-clamped");
-                        const expanded = descEl.classList.toggle("dt-yt-item-desc-expanded");
-                        btn.textContent = expanded ? "Show less" : "Show more";
-                    } else if (btn.classList.contains("dt-yt-loc-confirm-btn")) {
-                        commitTableMove(item, entry);
-                    } else if (btn.classList.contains("dt-yt-loc-cancel-btn")) {
-                        // Same full close the modify form's own Cancel uses (closeEditPanel) — the
-                        // location editor and the modify form always open/close together (see
-                        // setLocEditing's own comment), so a dedicated "just hide the location
-                        // editor, leave the modify form open" state doesn't exist today.
-                        closeEditPanel(item, entry);
-                    }
-                    return;
-                }
-
-                // Anything else — including the title/location badge, same as before — navigates.
-                // The inline move-location editor, the open Edit panel's own fields, and the
-                // actions area itself already have their own meaning and are excluded.
-                if (ev.target.closest(".dt-yt-item-loc-edit, .dt-yt-refresh-form, .dt-yt-item-actions")) return;
-                navigateToTable(entry).catch((e) => console.warn("[QueryData] couldn't navigate to that table:", e));
-            });
-
-            // Either range box (or the sheet picker) commits directly on Enter — a deliberate,
-            // explicit action, same as clicking the tick button (see the main click handler's
-            // dt-yt-loc-confirm-btn branch) rather than something that happens implicitly on
-            // clicking/tabbing away. There used to be a "commit on focusout" handler here instead,
-            // removed because it directly fought with the Cancel button added alongside it:
-            // clicking Cancel first BLURS whichever field currently has focus (standard DOM event
-            // order — focusout fires before Cancel's own click), so that old handler would silently
-            // commit the move the instant Cancel was clicked, before Cancel's own handler ever ran.
-            yourTablesList.addEventListener("keydown", (ev) => {
-                if (ev.key !== "Enter") return;
-                const control = ev.target.closest(".dt-yt-item-loc-cell-input, .dt-yt-item-loc-sheet-select");
-                if (!control) return;
-                ev.preventDefault();
-                const item = control.closest(".dt-yt-item");
-                if (!item) return;
-                const idx = Number(item.dataset.idx);
-                const entry = lastScannedTables[idx];
-                if (!entry) return;
-                commitTableMove(item, entry);
-            });
-
-            // ── Your Tables tutorial ──
-            // Same floating, non-blocking shell as the Download Data tutorial used (see its own old
-            // HTML/CSS comments, now removed, for why — no dark backdrop, the sheet/list stay fully
-            // usable throughout). Used to walk through editing an EXISTING table live, via a
-            // disposable sample it created on its own temporary sheet and deleted on close — every
-            // step dispatched real .click()s/wrote real cells the real poll already watches, nothing
-            // mocked up. Replaced with a recorded walkthrough (#dtYtTutorialVideo) instead: the real
-            // live-demo mechanism (create/locate/clean up a sample sheet, write a header/period cell,
-            // poll pollTableMetaEdits' own watch state for it to be detected, spotlight the right
-            // button) added real Excel round trips and genuine wait time just to show something a
-            // short video already demonstrates instantly, with no workbook side effects at all.
-            {
-                const ytTutorialBtn = document.getElementById("dtYtTutorialBtn");
-                const ytTutorialPanel = document.getElementById("dtYtTutorialPanel");
-                const ytTutorialStepLabel = document.getElementById("dtYtTutorialStepLabel");
-                const ytTutorialX = document.getElementById("dtYtTutorialX");
-                const ytTutorialVideo = document.getElementById("dtYtTutorialVideo");
-                const ytTutorialBody = document.getElementById("dtYtTutorialBody");
-                const ytTutorialPrev = document.getElementById("dtYtTutorialPrev");
-                const ytTutorialNext = document.getElementById("dtYtTutorialNext");
-                if (ytTutorialBtn && ytTutorialPanel && ytTutorialStepLabel && ytTutorialX && ytTutorialVideo && ytTutorialBody
-                    && ytTutorialPrev && ytTutorialNext) {
-                    let ytTutorialStepIndex = 0;
-                    let ytTutorialVideoSrcLoaded = false; // the clip is ~11MB — fetched once, the first time this tutorial actually opens, never eagerly on page load
-
-                    // Narrates the SAME points the old live demo made (a new header past the table's
-                    // last column, a new period/company typed into the row below, Refresh) — now
-                    // pointing at what the video above shows rather than an onEnter that performed
-                    // the action live. The video itself is a single persistent element that keeps
-                    // playing/looping across every step (see ytTutorialRenderStep) rather than being
-                    // re-created per step, so stepping Next/Previous never interrupts or restarts it.
-                    // Condensed to 2 steps (was 5) — the video itself carries the demonstration now,
-                    // so the text only needs to point at what it shows, not narrate every beat of it
-                    // as its own separate step.
-                    const ytTutorialSteps = [
-                        "<p><b>Update tutorial:</b> type a new column header just past a table's last column — like <b>EBITDA</b> in the video — or a new period into the row right below it.</p>"
-                            + "<p>The update button becomes enabled and clicking the button will update your table with the new data.</p>",
-                        "<p><b>Refresh</b> re-fetches the latest period for a table, any time — no pending change needed.</p>"
-                            + "<p><b>Edit</b> allows you to type the change you want in the table in natural language.</p>",
-                    ];
-
-                    const ytTutorialRenderStep = () => {
-                        ytTutorialStepLabel.textContent = `Step ${ytTutorialStepIndex + 1} of ${ytTutorialSteps.length}`;
-                        ytTutorialBody.innerHTML = ytTutorialSteps[ytTutorialStepIndex];
-                        ytTutorialPrev.disabled = ytTutorialStepIndex === 0;
-                        ytTutorialNext.querySelector("span").textContent = ytTutorialStepIndex === ytTutorialSteps.length - 1 ? "Finish" : "Next";
-                    };
-                    const ytTutorialGoToStep = (newIndex) => {
-                        if (newIndex < 0 || newIndex >= ytTutorialSteps.length) return;
-                        ytTutorialStepIndex = newIndex;
-                        ytTutorialRenderStep();
-                    };
-                    const ytTutorialClose = () => {
-                        ytTutorialPanel.classList.remove("dt-tutorial-panel-open");
-                        setTimeout(() => { ytTutorialPanel.style.display = "none"; }, 170);
-                        ytTutorialBtn.style.display = "";
-                        ytTutorialVideo.pause(); // stop decoding/playing while the panel is hidden
-                    };
-
-                    ytTutorialBtn.addEventListener("click", () => {
-                        ytTutorialBtn.style.display = "none";
-                        ytTutorialPanel.style.display = "flex";
-                        requestAnimationFrame(() => ytTutorialPanel.classList.add("dt-tutorial-panel-open"));
-                        if (!ytTutorialVideoSrcLoaded) { ytTutorialVideo.src = "assets/table-update-tutorial.mp4"; ytTutorialVideoSrcLoaded = true; }
-                        ytTutorialVideo.currentTime = 0; // restart from the beginning on every open, same reasoning as #dtQueryHintPreview's own video
-                        ytTutorialVideo.play().catch(() => {});
-                        ytTutorialStepIndex = 0;
-                        ytTutorialRenderStep();
-                    });
-                    ytTutorialNext.addEventListener("click", () => {
-                        if (ytTutorialStepIndex === ytTutorialSteps.length - 1) { ytTutorialClose(); return; }
-                        ytTutorialGoToStep(ytTutorialStepIndex + 1);
-                    });
-                    ytTutorialPrev.addEventListener("click", () => ytTutorialGoToStep(ytTutorialStepIndex - 1));
-                    ytTutorialX.addEventListener("click", () => ytTutorialClose());
-                }
-            }
         }
     }
 
     return view;
 }
 
-// Clears a table's OLD footprint (title row through its last data row, 0-indexed) before a refresh
-// writes a possibly different-sized result into the same spot — otherwise, a refresh that shrinks
-// (e.g. "last 6 fiscal years" -> "last 4 fiscal years") would leave stale leftover rows/columns
-// behind that the new, smaller write never touches. totalRows/totalCols is QD_TABLE_META_ROWS plus
-// the table's own header+data extent (see scanYourTables), not just the data table itself.
+// Clears a grid-skeleton selection's OLD footprint before writing a (possibly different-sized)
+// result into the same spot — otherwise a shrinking result would leave stale leftover rows/columns
+// behind that the new write never touches. totalRows/totalCols is the full block to clear, not just
+// the data table itself.
 //
 // ClearApplyTo.contents, deliberately NOT the plain clear()/"All" this used to be — "All" clears
 // data validation too, and every table lives inside the metric-autofill dropdown's own validated
 // range (QD_AUTOFILL_RANGE), so a plain clear() here silently stripped the dropdown from exactly
-// the cells it touched on EVERY refresh/rename/add-column/data-row edit — confirmed as the cause
-// of the dropdown "just disappearing for cells within a table" the user reported seeing. Contents-
-// only leaves data validation (and formatting) untouched; the write that follows re-applies
-// whatever formatting it wants for the header/title cells anyway, so nothing is lost by not
-// clearing formats here too.
+// the cells it touched. Contents-only leaves data validation (and formatting) untouched; the write
+// that follows re-applies whatever formatting it wants for the header/title cells anyway, so
+// nothing is lost by not clearing formats here too.
 async function clearTableBlock(sheetName, titleRow, titleCol, totalRows, totalCols) {
     await Excel.run(async (context) => {
         const sheet = context.workbook.worksheets.getItem(sheetName);
@@ -9208,177 +7134,14 @@ async function clearTableBlock(sheetName, titleRow, titleCol, totalRows, totalCo
     });
 }
 
-// Activates the table's sheet and selects its whole footprint (title row through the last data
-// row) — what the "Your Tables" list's clickable title/location buttons jump to.
-async function navigateToTable(entry) {
-    await Excel.run(async (context) => {
-        const sheet = context.workbook.worksheets.getItem(entry.sheetName);
-        sheet.activate();
-        const range = sheet.getRangeByIndexes(entry.titleRow, entry.titleCol, entry.metaRows + entry.tableRows, Math.max(1, entry.tableCols));
-        range.select();
-        await context.sync();
-    });
-}
-
-// Deletes one "Your Tables" entry entirely, for the list's Delete button: the refresh-tag comment
-// on its title cell (best-effort — range.clear() above does NOT remove comments, so without this
-// a deleted table would leave an orphaned comment behind that a future scanYourTables could still
-// pick up against whatever gets typed into that cell next) plus its whole title-through-last-data-
-// row block, same footprint clearTableBlock already uses for a refresh's old-content cleanup.
-async function deleteYourTable(entry) {
-    await Excel.run(async (context) => {
-        const sheet = context.workbook.worksheets.getItem(entry.sheetName);
-        const titleAnchorCell = sheet.getRangeByIndexes(entry.titleRow, entry.titleCol, 1, 1);
-        try {
-            const existingComment = sheet.comments.getItemByCell(titleAnchorCell);
-            existingComment.delete();
-            await context.sync();
-        } catch (e) {
-            console.warn("[QueryData] no refresh-tag comment to delete at this cell (continuing):", e);
-        }
-        // ClearApplyTo.contents — see clearTableBlock's own comment for why: these cells stay
-        // inside the sheet-wide metric-autofill dropdown's validated range even after the table
-        // that used to sit there is gone, and a plain clear() would strip that validation along
-        // with the content.
-        sheet.getRangeByIndexes(entry.titleRow, entry.titleCol, entry.metaRows + entry.tableRows, Math.max(1, entry.tableCols)).clear(Excel.ClearApplyTo.contents);
-        await context.sync();
-    });
-}
-
-// Reads whatever's AT a candidate new top-left cell right now (over the table's existing
-// footprint size) and flags a conflict for any cell there that ISN'T also part of the table's own
-// CURRENT footprint — those overlapping cells are only this table's own data about to be vacated,
-// never "someone else's content," so they're excluded from the check (only possible at all when
-// staying on the SAME sheet — a different sheet can never overlap the old footprint). Used before
-// moveYourTable actually relocates a table via its editable range field in the "Your Tables" list.
-// targetSheetName defaults to entry.sheetName (same-sheet move) when omitted.
-async function wouldMoveOverwriteContent(entry, newTitleRow, newTitleCol, targetSheetName) {
-    targetSheetName = targetSheetName || entry.sheetName;
-    const sameSheet = targetSheetName === entry.sheetName;
-    const totalRows = entry.metaRows + entry.tableRows;
-    const totalCols = Math.max(1, entry.tableCols);
-    const oldR0 = entry.titleRow, oldC0 = entry.titleCol;
-    let conflict = false;
-    await Excel.run(async (context) => {
-        const sheet = context.workbook.worksheets.getItem(targetSheetName);
-        const targetRange = sheet.getRangeByIndexes(newTitleRow, newTitleCol, totalRows, totalCols);
-        targetRange.load("values");
-        await context.sync();
-        const values = targetRange.values;
-        for (let r = 0; r < totalRows && !conflict; r++) {
-            for (let c = 0; c < totalCols; c++) {
-                const absR = newTitleRow + r, absC = newTitleCol + c;
-                const insideOldFootprint = sameSheet && absR >= oldR0 && absR < oldR0 + totalRows && absC >= oldC0 && absC < oldC0 + totalCols;
-                if (insideOldFootprint) continue;
-                const v = values[r][c];
-                if (v !== "" && v !== null && v !== undefined) { conflict = true; break; }
-            }
-        }
-    });
-    return conflict;
-}
-
-// Moves one "Your Tables" entry to a different top-left cell — on the SAME sheet by default, or
-// on targetSheetName if given — a pure relocation, never a re-query: Range.copyFrom carries both
-// values AND formatting to the new spot in one call (works across sheets just as well as within
-// one), then the refresh-tag comment is moved along with it by hand (comments are tied to a
-// specific cell, not to a range's contents, so copyFrom never touches them), and finally whatever
-// the move leaves behind at the OLD spot gets cleared. On the SAME sheet, the two footprints are
-// the same size, so the leftover region always decomposes into at most 4 rectangular bands around
-// their overlap (above/below/left/right) — never a per-cell loop, which would be far too slow on a
-// large table. Moving to a DIFFERENT sheet can never overlap the old footprint at all, so the
-// whole old footprint is simply cleared outright. wouldMoveOverwriteContent must already have been
-// checked before calling this; it does not re-check for a conflict itself.
-async function moveYourTable(entry, newTitleRow, newTitleCol, targetSheetName) {
-    targetSheetName = targetSheetName || entry.sheetName;
-    const sameSheet = targetSheetName === entry.sheetName;
-    const totalRows = entry.metaRows + entry.tableRows;
-    const totalCols = Math.max(1, entry.tableCols);
-    const oldR0 = entry.titleRow, oldC0 = entry.titleCol;
-    await Excel.run(async (context) => {
-        const sourceSheet = context.workbook.worksheets.getItem(entry.sheetName);
-        const destSheet = sameSheet ? sourceSheet : context.workbook.worksheets.getItem(targetSheetName);
-
-        let commentContent = null;
-        try {
-            const oldTitleCell = sourceSheet.getRangeByIndexes(oldR0, oldC0, 1, 1);
-            const existingComment = sourceSheet.comments.getItemByCell(oldTitleCell);
-            existingComment.load("content");
-            await context.sync();
-            commentContent = existingComment.content;
-        } catch (e) {
-            commentContent = null; // no comment at the old title cell — nothing to carry over
-        }
-
-        const sourceRange = sourceSheet.getRangeByIndexes(oldR0, oldC0, totalRows, totalCols);
-        const targetRange = destSheet.getRangeByIndexes(newTitleRow, newTitleCol, totalRows, totalCols);
-        targetRange.copyFrom(sourceRange);
-        await context.sync();
-
-        // ClearApplyTo.contents throughout this block — see clearTableBlock's own comment for why:
-        // the vacated old footprint stays inside the sheet-wide metric-autofill dropdown's
-        // validated range, and a plain clear() would strip that validation right along with it.
-        if (sameSheet) {
-            const ovR0 = Math.max(oldR0, newTitleRow), ovR1 = Math.min(oldR0 + totalRows, newTitleRow + totalRows);
-            const ovC0 = Math.max(oldC0, newTitleCol), ovC1 = Math.min(oldC0 + totalCols, newTitleCol + totalCols);
-            const hasOverlap = ovR0 < ovR1 && ovC0 < ovC1;
-            if (!hasOverlap) {
-                sourceSheet.getRangeByIndexes(oldR0, oldC0, totalRows, totalCols).clear(Excel.ClearApplyTo.contents);
-            } else {
-                if (ovR0 > oldR0) sourceSheet.getRangeByIndexes(oldR0, oldC0, ovR0 - oldR0, totalCols).clear(Excel.ClearApplyTo.contents); // band above the overlap
-                if (ovR1 < oldR0 + totalRows) sourceSheet.getRangeByIndexes(ovR1, oldC0, (oldR0 + totalRows) - ovR1, totalCols).clear(Excel.ClearApplyTo.contents); // band below
-                if (ovC0 > oldC0) sourceSheet.getRangeByIndexes(ovR0, oldC0, ovR1 - ovR0, ovC0 - oldC0).clear(Excel.ClearApplyTo.contents); // band left of the overlap
-                if (ovC1 < oldC0 + totalCols) sourceSheet.getRangeByIndexes(ovR0, ovC1, ovR1 - ovR0, (oldC0 + totalCols) - ovC1).clear(Excel.ClearApplyTo.contents); // band right
-            }
-        } else {
-            // Different sheets can never overlap — always clear the WHOLE old footprint.
-            sourceSheet.getRangeByIndexes(oldR0, oldC0, totalRows, totalCols).clear(Excel.ClearApplyTo.contents);
-        }
-        await context.sync();
-
-        // range.clear() above does NOT remove comments — the old one (wherever it physically sits)
-        // must be deleted explicitly, regardless of whether that cell happened to fall inside a
-        // cleared band or inside the retained overlap, since only the NEW title cell should carry
-        // the tag going forward.
-        try {
-            const oldTitleCellAgain = sourceSheet.getRangeByIndexes(oldR0, oldC0, 1, 1);
-            const staleComment = sourceSheet.comments.getItemByCell(oldTitleCellAgain);
-            staleComment.delete();
-            await context.sync();
-        } catch (e) {
-            // already gone, or never existed — nothing to clean up
-        }
-        if (commentContent) {
-            const newTitleAnchorCell = destSheet.getRangeByIndexes(newTitleRow, newTitleCol, 1, 1);
-            try {
-                const existingAtNew = destSheet.comments.getItemByCell(newTitleAnchorCell);
-                existingAtNew.content = commentContent;
-                await context.sync();
-            } catch (e) {
-                try {
-                    destSheet.comments.add(newTitleAnchorCell, commentContent);
-                    await context.sync();
-                } catch (e2) {
-                    console.warn("[QueryData] couldn't re-attach the refresh tag comment after moving the table:", e2);
-                }
-            }
-        }
-    });
-}
-
-// Writes a /wallet/excel_download_table OR /wallet/excel_run_query response into a sheet: two
-// single-cell metadata rows (title, description — see QD_TABLE_META_ROWS) immediately above a
-// bold header row from data.columns, then data.rows right after — plus one MORE meta row
-// ("Company" / the name) when singleCompanyInfo is given, so the header shifts down by exactly
-// one for those tables (see detectSingleCompanyColumn). The metadata rows are ALWAYS written,
-// even with placeholder text if data.title/description are missing, so the header always lands
-// at the SAME offset for a given table's OWN shape (fixed +QD_TABLE_META_ROWS for a
-// multi-company result, +1 more for single-company) — scanYourTables records which one applied
-// (entry.metaRows) so a future refresh/watch step never has to search for where the real table
-// actually starts. The refresh tag (data.refresh_token, an
-// encrypted blob that can run several hundred characters for a real query) is attached as a
-// COMMENT on the title cell instead of a 3rd visible row — a value that long would otherwise blow
-// out the column's width.
+// Writes a /wallet/excel_download_table OR /wallet/excel_run_query response into a sheet: one
+// single-cell title row (see QD_TABLE_META_ROWS) immediately above a bold header row from
+// data.columns, then data.rows right after — plus one MORE meta row ("Company" / the name) when
+// singleCompanyInfo is given, so the header shifts down by exactly one for those tables (see
+// detectSingleCompanyColumn). A Description row used to sit under Title here too; dropped — see
+// QD_TABLE_META_ROWS's own comment. The title row is ALWAYS written, even with placeholder text
+// if data.title is missing, so the header always lands at the SAME offset for a given table's OWN
+// shape (fixed +QD_TABLE_META_ROWS for a multi-company result, +1 more for single-company).
 //
 // writeTarget is optional: omitted (the original behavior), this always creates a BRAND-NEW sheet
 // — if data.display_name is taken, "(2)", "(3)", … is appended until a free name is found, the
@@ -9428,7 +7191,15 @@ function detectSingleCompanyColumn(data) {
 // sizes the block this is about to write into — passed straight through here rather than
 // re-detected, so the size a caller reserved/checked for conflicts and what actually gets
 // written can never disagree.
-async function writeDownloadedTableToSheet(data, writeTarget, singleCompanyInfo) {
+// asFormulas: true when `data.rows` already holds exactly what belongs in each cell — a
+// GIA.GET() formula string ("=..."), a plain literal (company name, period label), or "" — built
+// by buildFormulaGrid. Skips the literal-value rounding/null-coalescing below (not applicable —
+// there's no raw query value to round) and writes via `.formulas` instead of `.values`, which
+// Excel accepts for a mix of real formulas and plain literals in the same assignment. Column
+// text/numeric formatting (columnFormats below) is unchanged either way — it's driven by each
+// column's `.name`/`.type`, which buildFormulaGrid already sets correctly (type: "text" for
+// CompName/Period, "number" for every metric column) for the SAME heuristics to apply.
+async function writeDownloadedTableToSheet(data, writeTarget, singleCompanyInfo, asFormulas) {
     // The company column is dropped from the grid entirely for a single-company result —
     // its one value instead becomes a "Company" meta row below Description (see below) —
     // a plain local copy, never mutating the caller's own `data`.
@@ -9465,11 +7236,11 @@ async function writeDownloadedTableToSheet(data, writeTarget, singleCompanyInfo)
             c0 = 0;
         }
 
-        // Title/description are merged ACROSS the table's own width rather than left in a single
-        // cell — a long sentence sitting in just column c0 otherwise forces THAT column alone to
-        // widen to fit it (column width is shared down the whole column, so the header/data rows
-        // below inherit that same over-wide column even though their own content is short).
-        // Spreading the text across the full width means no single column has to grow for it.
+        // Title is merged ACROSS the table's own width rather than left in a single cell — a long
+        // sentence sitting in just column c0 otherwise forces THAT column alone to widen to fit it
+        // (column width is shared down the whole column, so the header/data rows below inherit
+        // that same over-wide column even though their own content is short). Spreading the text
+        // across the full width means no single column has to grow for it.
         const metaCols = Math.max(1, columns.length);
         const blankMetaCols = Array.from({ length: metaCols - 1 }, () => "");
         const titleCell = sheet.getRangeByIndexes(metaR0, c0, 1, metaCols);
@@ -9477,56 +7248,11 @@ async function writeDownloadedTableToSheet(data, writeTarget, singleCompanyInfo)
         titleCell.format.font.bold = true;
         titleCell.format.horizontalAlignment = "Left";
         titleCell.merge();
-        const descriptionCell = sheet.getRangeByIndexes(metaR0 + 1, c0, 1, metaCols);
-        descriptionCell.values = [[`Description: ${data.description || "—"}`, ...blankMetaCols]];
-        descriptionCell.format.font.italic = true;
-        descriptionCell.format.font.color = "#55606e";
-        descriptionCell.format.horizontalAlignment = "Left";
-        descriptionCell.merge();
-        // The Comments API only accepts a SINGLE cell, never a merged/multi-cell range — a
-        // dedicated 1x1 reference to the title's own top-left cell, independent of the wide range
-        // above used just for display.
-        const titleAnchorCell = sheet.getRangeByIndexes(metaR0, c0, 1, 1);
-
-        // The refresh tag rides as a COMMENT on the title cell — never a visible value — since a
-        // real token runs several hundred characters. Best-effort: a cell can hold only ONE
-        // comment thread, so an existing one (e.g. a leftover from a previous table at this exact
-        // spot — Excel's "Clear Contents" does NOT remove comments) gets its content REPLACED
-        // rather than erroring; only if none exists yet does this fall back to creating one. Never
-        // lets a failure here (unsupported host, anything) break the write itself — the table
-        // still gets its title/period either way, it just won't be refreshable this time.
-        //
-        // DEFERRED until after the data rows are on the sheet (see the call site below the chunk
-        // loop), not run here where it was first written. On a brand-new table there is no comment
-        // on that cell yet, so getItemByCell ALWAYS throws — that's a full failed round trip — and
-        // the add() fallback costs a second sync. Both used to happen BEFORE the first value was
-        // written, so the user sat watching an empty sheet (title and description merged, nothing
-        // else) for two round trips of pure overhead. Nothing in the data write depends on the
-        // comment, and nothing reads the comment back until the next scan, so it costs nothing to
-        // let the figures land first.
-        const attachRefreshTagComment = async () => {
-            if (!data.refresh_token) return;
-            let commentContent = `${QD_TABLE_ID_COMMENT_PREFIX}${data.refresh_token}`;
-            if (singleCompanyInfo) commentContent += `\n${QD_SINGLE_COMPANY_PREFIX}${singleCompanyInfo.companyName}`;
-            try {
-                const existingComment = sheet.comments.getItemByCell(titleAnchorCell);
-                existingComment.content = commentContent;
-                await ctx.sync();
-            } catch (e) {
-                try {
-                    sheet.comments.add(titleAnchorCell, commentContent);
-                    await ctx.sync();
-                } catch (e2) {
-                    console.warn("[QueryData] couldn't attach the refresh tag comment:", e2);
-                }
-            }
-        };
 
         // A single-company result gets one extra meta row — "Company" / the name — directly
-        // below Description and above the header, instead of repeating that company's name
-        // down every data row. Everything below (header, data, number formats) shifts down
-        // by exactly this one row; scanYourTables recovers the same offset later via the
-        // QD_SINGLE_COMPANY_PREFIX comment line written above, rather than re-reading this cell.
+        // below Title and above the header, instead of repeating that company's name down every
+        // data row. Everything below (header, data, number formats) shifts down by exactly this
+        // one row.
         if (singleCompanyInfo) {
             const companyRowCols = Math.max(2, metaCols); // "Company" + the name always need at least 2 cells
             const companyRow = sheet.getRangeByIndexes(metaR0 + QD_TABLE_META_ROWS, c0, 1, companyRowCols);
@@ -9668,18 +7394,19 @@ async function writeDownloadedTableToSheet(data, writeTarget, singleCompanyInfo)
             const chunk = rows.slice(start, start + CHUNK);
             if (chunk.length && columns.length) {
                 const chunkRange = sheet.getRangeByIndexes(r0 + 1 + start, c0, chunk.length, columns.length);
-                chunkRange.values = chunk.map(row => row.map((v, i) => {
-                    if (v === null || v === undefined) return "";
-                    if (columnFormats[i] && columnFormats[i].isText) return v;
-                    return roundToDecimals(v, columnFormats[i].decimals);
-                }));
+                if (asFormulas) {
+                    chunkRange.formulas = chunk;
+                } else {
+                    chunkRange.values = chunk.map(row => row.map((v, i) => {
+                        if (v === null || v === undefined) return "";
+                        if (columnFormats[i] && columnFormats[i].isText) return v;
+                        return roundToDecimals(v, columnFormats[i].decimals);
+                    }));
+                }
             }
             qdSuspendRepaint(ctx);
             await ctx.sync();
         }
-
-        // Only now that the figures are actually on the sheet — see attachRefreshTagComment.
-        await attachRefreshTagComment();
 
         if (columns.length) {
             const wholeTableRange = sheet.getRangeByIndexes(r0, c0, Math.max(1, rows.length + 1), columns.length);
@@ -15254,8 +12981,44 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
     const compareInput = byId("chatCompareInput"), compareList = byId("chatCompareList"), compareClear = byId("chatCompareClear");
     const selectionIndicator = byId("chatSelectionIndicator"), selectionIndicatorText = byId("chatSelectionIndicatorText");
     const threadBtn = byId("chatThreadBtn"), threadNewBtn = byId("chatThreadNewBtn"),
-        threadMenu = byId("chatThreadMenu"), threadList = byId("chatThreadList");
+        threadMenu = byId("chatThreadMenu"), threadList = byId("chatThreadList"),
+        toolbarTitleEl = byId("chatToolbarTitle");
     if (!fab || !panel) return;
+
+    // ── Stick-to-bottom ──
+    // Every `stream.scrollTop = stream.scrollHeight` elsewhere in this file pins the view at the
+    // moment it runs — but plenty of things change the layout AFTER that, and nothing re-pinned:
+    //   - clarify option buttons appended under a question bubble (renderClarifyOptions)
+    //   - the final streamed chunk re-rendered through renderMarkdown (a table/list is taller than
+    //     the raw text it replaces)
+    //   - a tool/step card settling, or the reasoning box appearing
+    //   - the viewport itself SHRINKING because whatever sits below it grew: #chatInput auto-growing
+    //     a line, .chat-balance-notice appearing, or — docked in Table Builder, where .chat-composer
+    //     is hidden and #dtTextModePanel is the composer in view — its "Cell X selected" indicator
+    //     or skeleton-table preview appearing.
+    // Any of those leaves scrollTop short of the new maximum, so the NEWEST bubble is clipped by the
+    // viewport's bottom edge — no bottom border, no rounded corner, none of .chat-stream's own 12px
+    // bottom padding — which reads exactly as the message disappearing behind the composer instead
+    // of ending cleanly above it (confirmed from a screenshot: the clipped bubble's background runs
+    // straight into the composer's shadow, while an earlier bubble in the same view shows its full
+    // border). Observing the stream catches the viewport side, the mutation observer the content
+    // side; one rAF coalesces a burst of either into a single re-pin after layout has settled.
+    // `stuck` latches off the moment the user scrolls away from the bottom themselves, so reading
+    // back through history is never yanked forward by an arriving chunk, and back on when they
+    // return to the bottom.
+    let stuck = true;
+    let stickRaf = null;
+    const nearBottom = () => stream.scrollHeight - stream.scrollTop - stream.clientHeight <= 24;
+    const restick = () => {
+        if (stickRaf) return;
+        stickRaf = requestAnimationFrame(() => {
+            stickRaf = null;
+            if (stuck) stream.scrollTop = stream.scrollHeight;
+        });
+    };
+    stream.addEventListener("scroll", () => { stuck = nearBottom(); });
+    if (window.ResizeObserver) new ResizeObserver(restick).observe(stream);
+    if (window.MutationObserver) new MutationObserver(restick).observe(stream, { childList: true, subtree: true, characterData: true });
 
     // Whether workbook edits are applied immediately or held for a per-write confirmation.
     // Defaults to ON (write automatically) for anyone who hasn't chosen yet — only an EXPLICIT
@@ -15531,10 +13294,15 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
     const MAX_THREADS = 30; // each thread already self-bounds its own size (40 clipped messages, memory capped at MEM_MAX_BYTES) — this caps how many of THOSE can accumulate
     const CHAT_THREADS_MAX_BYTES = 1500000; // generous relative to one thread's own ~100-150KB ceiling; only ever binds if someone genuinely accumulates dozens of heavily-used threads
     const newThreadId = () => `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+    // "main" (the standalone DataGPT panel) vs "tablebuilder" (FormulaGPT, docked in Table
+    // Builder) — see openThreadForContext's own comment further down for the full picture. Default
+    // here is "main" since that's the ONLY context that existed before this field did; every
+    // pre-existing thread (and anything sanitizeThread can't otherwise place) stays visible to
+    // DataGPT rather than silently vanishing, while FormulaGPT simply starts with none of its own.
     const emptyThread = () => ({
         id: newThreadId(), title: "New chat", titleGenerated: false,
         createdAt: Date.now(), updatedAt: Date.now(),
-        history: [], nextTurn: 1, memory: memEmptyStore(),
+        history: [], nextTurn: 1, memory: memEmptyStore(), context: "main",
     });
     // Repairs whatever came out of localStorage; never trusts its shape, same discipline memSanitize
     // already holds itself to for the memory sub-object every thread now carries.
@@ -15549,6 +13317,9 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
         if (Array.isArray(raw.history)) t.history = raw.history.filter(m => m && typeof m.role === "string").slice(-MAX_HISTORY).map(clipStored);
         t.nextTurn = Number.isFinite(raw.nextTurn) ? raw.nextTurn : (1 + t.history.reduce((mx, m) => Math.max(mx, Number(m.turn) || 0), 0));
         t.memory = memSanitize(raw.memory);
+        // Anything other than exactly "tablebuilder" collapses to "main" — never trust an unknown
+        // string here, same discipline every other field on this object already gets.
+        t.context = raw.context === "tablebuilder" ? "tablebuilder" : "main";
         return t;
     }
     // One-time recovery for a user who already has chat history under the OLD pre-threads keys
@@ -15612,6 +13383,14 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
     }
     let threadsStore = loadThreadsStore();
     const getActiveThread = () => threadsStore.threads.find(t => t.id === threadsStore.activeThreadId) || threadsStore.threads[0];
+    // Which context is CURRENTLY driving this engine — "main" (the standalone DataGPT panel) or
+    // "tablebuilder" (FormulaGPT, docked inside Table Builder). Set by openThreadForContext, which
+    // every entry point into either surface already calls first. Everything that lists, creates or
+    // switches threads filters through threadsForContext below, so the two surfaces never see or
+    // land on each other's conversations — only the underlying localStorage store (and the one
+    // "at least one thread must exist, period" invariant in saveThreadsStore) is actually shared.
+    let activeChatContext = "main";
+    const threadsForContext = (ctx) => threadsStore.threads.filter(t => (t.context || "main") === ctx);
     // Swaps which saved thread the live history/nextTurn/memStore variables point at — see this
     // section's own opening comment for why that's the whole mechanism. Does NOT touch the DOM;
     // callers that need the chat panel re-rendered after switching (anything other than the
@@ -15642,6 +13421,17 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
     let busy = false;
     // The in-flight turn's AbortController, so the send button can cancel it.
     let currentAbort = null;
+    // Set true for exactly one turn by the Table Builder bridge (see __goiaChatBridge.sendExcelOnly
+    // near the end of this file) — skips the "gather" stage's web-retrieval tool (ASK_WEBSITE_DATAGPT_TOOL)
+    // entirely for that turn, so a Table-Builder-originated conversation never leaves the workbook.
+    // Reset in send()'s own finally block — a per-TURN flag, not a thread property, so continuing
+    // the SAME thread later from the main DataGPT panel behaves normally (web tools allowed) again.
+    let excelOnlyNextTurn = false;
+    // Table Builder's docked chat has no mode switcher of its own (see .dt-docked's CSS hiding
+    // .chat-mode-btn) — it's always auto-apply there, regardless of whatever the user's own
+    // Manual/Auto preference is for the standalone DataGPT panel. Every write-confirmation check
+    // in this file reads this instead of the raw `autoApplyEdits` variable directly.
+    const effectiveAutoApply = () => autoApplyEdits || excelOnlyNextTurn;
     const renderSendBtn = () => {
         if (!sendBtn) return;
         if (busy) {
@@ -17811,7 +15601,7 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
             return { blocked: true, address: fullAddr, existingCount: occupied, existingValues: check.beforeValues };
         }
 
-        if (!autoApplyEdits) {
+        if (!effectiveAutoApply()) {
             const verb = occupied > 0 ? `overwrite ${occupied} existing cell(s) in` : "write to";
             const approved = await addConfirmCard(`DataGPT wants to ${verb} ${fullAddr} (${rows}×${cols}).`);
             if (!approved) return { ok: false, rejected: true, address: fullAddr };
@@ -17871,7 +15661,7 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
             return { blocked: true, address: fullAddr, existingCount: occupied, existingValues: check.beforeValues };
         }
 
-        if (!autoApplyEdits) {
+        if (!effectiveAutoApply()) {
             const verb = occupied > 0 ? `overwrite ${occupied} existing cell(s) in` : "fill";
             const approved = await addConfirmCard(`DataGPT wants to ${verb} ${fullAddr} (${check.rowCount}×${check.columnCount}) with "${formula}".`);
             if (!approved) return { ok: false, rejected: true, address: fullAddr };
@@ -18010,7 +15800,7 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
         } catch (e) { return { error: String(e.message || e) }; }
         if (exists) return { error: `A sheet named "${sheetName}" already exists — use write_cells/fill_formula/read_range on it directly instead of creating a duplicate.` };
 
-        if (!autoApplyEdits) {
+        if (!effectiveAutoApply()) {
             const approved = await addConfirmCard(`DataGPT wants to create a new sheet named "${sheetName}".`);
             if (!approved) return { ok: false, rejected: true, name: sheetName };
         }
@@ -18035,7 +15825,7 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
         if (!snap) return { ok: false, error: "Nothing to undo — no tracked change this session." };
 
         if (snap.kind === "createSheet") {
-            if (!autoApplyEdits) {
+            if (!effectiveAutoApply()) {
                 const approved = await addConfirmCard(`DataGPT wants to undo creating the sheet "${snap.sheetName}" (deletes it).`);
                 if (!approved) { undoStack.push(snap); return { ok: false, rejected: true, name: snap.sheetName }; }
             }
@@ -18055,7 +15845,7 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
         }
 
         const fullAddr = chatQualifiedAddress(snap.sheetName, snap.address);
-        if (!autoApplyEdits) {
+        if (!effectiveAutoApply()) {
             const approved = await addConfirmCard(`DataGPT wants to undo the last change to ${fullAddr}.`);
             if (!approved) { undoStack.push(snap); return { ok: false, rejected: true, address: fullAddr }; }
         }
@@ -18522,7 +16312,7 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
     const CHAT_STRUCTURE_DESTRUCTIVE = new Set(["delete_row", "delete_column", "delete_sheet", "delete_chart", "delete_all_charts"]);
     async function toolModifyStructure(p) {
         if (!p || !p.action) return { error: "action is required" };
-        if (CHAT_STRUCTURE_DESTRUCTIVE.has(p.action) && !autoApplyEdits) {
+        if (CHAT_STRUCTURE_DESTRUCTIVE.has(p.action) && !effectiveAutoApply()) {
             const desc = p.action === "delete_all_charts" ? `delete ALL charts on "${p.sheet || "the active sheet"}"`
                 : p.action === "delete_chart" ? `delete the chart "${p.chart_name}"`
                 : p.action === "delete_sheet" ? `delete the sheet "${p.sheet}"`
@@ -18657,7 +16447,7 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
 
     async function toolNamedRanges(p) {
         if (!p || !p.action) return { error: "action is required" };
-        if (p.action === "delete" && !autoApplyEdits) {
+        if (p.action === "delete" && !effectiveAutoApply()) {
             const approved = await addConfirmCard(`DataGPT wants to delete the named range "${p.name}". Any formula referencing it by name will break.`);
             if (!approved) return { ok: false, rejected: true };
         }
@@ -19121,6 +16911,19 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
                 "if the conversation history below names or clearly discusses one, that company is what the user means; resolve it by name and proceed, the same as if it had been typed in this very message. Only ask the user to name a company if the conversation genuinely gives you nothing to go on." +
                 (compareCo ? ` A second company has been explicitly added to compare against: ${compareCo.name} (fincode ${compareCo.fincode}, sector ${compareCo.sector || "unknown"}).` : "");
 
+            // "This table"/"this data"/"these numbers"/"this sheet" resolves from the LIVE selection
+            // FIRST, even when a completely different table was what the last few messages were
+            // about — the opposite priority order from contextNote's own company resolution (where
+            // conversation history is consulted directly, with no live-selection check first), and
+            // deliberately so: the user just clicked/selected something before typing this message,
+            // which is exactly the signal that they mean THAT table now, not whatever was on screen a
+            // few turns ago. Conversation history is the FALLBACK here, used only when there's no
+            // current selection worth noting at all (see CURRENT SELECTION below — a blank single
+            // cell doesn't count, same as everywhere else this selection is used) or the selected
+            // cell(s) don't actually sit in or next to any table.
+            const tableContextNote =
+                "When the user refers to \"this table\" (or \"this data\"/\"these numbers\"/\"this sheet\"), that means the table surrounding the CURRENT SELECTION below, if there is one — NOT a table discussed earlier in this conversation, even if a different one was the subject of the last few messages. This holds EVEN WHEN the most recent message is your own prior turn reporting exactly where you just wrote something (e.g. \"Wrote 4 live formula rows to 'Sheet3' at A1:D7\") — that sentence describes what THAT PAST action did, it is not a standing claim about what \"this table\" now means; a concrete, specific-sounding range stated a moment ago is not more current than the CURRENT SELECTION itself (confirmed live: \"format this table neatly\" with a genuinely different range selected formatted the OLD range from the prior turn's own outcome message instead). The selection itself may only be one cell or a small range inside a larger table; expand outward (read_range on the area around it, or the workbook snapshot/search_index) to find that table's real boundaries rather than treating only the exact selected cell(s) as \"the table\". Only fall back to a table named or discussed earlier in the conversation when there is no current selection worth noting below, or the selected cell(s) don't sit in or next to any table at all.";
+
             // Short notes on earlier turns that have left the 8-message window: what was asked and done.
             const notes = sessionNotes(bookName, { maxNotes: 5, maxChars: 1500 });
             if (notes) console.log(`[Chat] 🧠 earlier notes given to the loop (${notes.split("\n").length}):\n${notes}`);
@@ -19144,7 +16947,7 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
 
             const system =
                 `You are GoIndiaStocks' intelligent Financial+Excel AI chat assistant inside Excel. You help the user look up company data\n` +
-                `and work with their spreadsheet, including building financial projections. When you are dealing with financial data, hold yourself to the standard a careful financial analyst would: every number traceable, every assumption justified.. ${contextNote}\n\n` +
+                `and work with their spreadsheet, including building financial projections. When you are dealing with financial data, hold yourself to the standard a careful financial analyst would: every number traceable, every assumption justified.. ${contextNote} ${tableContextNote}\n\n` +
                 `Only the LAST user message below is the live request — answer that one.\n` +
                 `Earlier messages are past context only, even one that looks unanswered\n` +
                 `(e.g. the user stopped it partway) — never resume or retry an earlier one\n` +
@@ -19194,10 +16997,31 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
                 `  content, then finish with one autofit pass over everything you\n` +
                 `  touched; format_cells' column_width is only for the rare case of\n` +
                 `  several columns deliberately sharing ONE identical width.\n` +
+                `- When you write a live company-financial formula yourself (rather than\n` +
+                `  typing a number), use =GIA.GET(company, "metric", year[, quarter]) —\n` +
+                `  company a name or cell reference, "metric" a canonical name in quotes\n` +
+                `  (e.g. "Revenue"), year a PLAIN NUMBER (2026), quarter an optional 1-4.\n` +
+                `  The year argument must always be that plain number — never type a\n` +
+                `  label like "FY26"/"FY2026" directly into a formula you write, even if\n` +
+                `  an existing table's own Period column displays one; that label only\n` +
+                `  works as GIA.GET's year argument via a reference to the EXACT cell\n` +
+                `  that table itself built it into, not as a string you retype by hand.\n` +
+                `  If you're unsure that reference is safe, just use the plain year\n` +
+                `  number directly instead of reusing someone else's labeled cell.\n` +
                 `- If the sheet already has another table on it, check how that one is\n` +
                 `  styled before formatting a new one — read its header cells, or run\n` +
                 `  review_formatting on it — and match it, rather than reinventing the\n` +
                 `  look table by table on what's supposed to read as one coherent model.\n` +
+                `- =GIA.GET(company, metric, period[, quarter]) is this workbook's own live\n` +
+                `  company-data lookup, real and already available if you choose to write one\n` +
+                `  yourself — company is a name (quoted) or a cell reference, metric is a\n` +
+                `  canonical name like "Revenue", and period MUST be a plain fiscal-year\n` +
+                `  NUMBER (e.g. 2026) — never text like "FY26", even one you saw already\n` +
+                `  written as a label somewhere else in this sheet. A text period silently\n` +
+                `  fails to return data. Put the real number in the Period cell itself\n` +
+                `  (format it to display as "FY26" if you want that look, that's fine —\n` +
+                `  just never change the underlying VALUE to text) and reference that cell,\n` +
+                `  the same "link, don't retype" rule below.\n` +
                 `- Link cells you modify to their sources if those sources are already in\n` +
                 `  the sheet, rather than retyping a number.\n` +
                 `- Any row you label as a rate/growth/margin driver (e.g. "Revenue\n` +
@@ -19259,7 +17083,7 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
                 // iteration's text is user-visible) went dark after the FIRST one: no pulsing dot
                 // for any later iteration's wait, even while it was still genuinely working.
                 showThinking();
-                const phaseTools = stage === "gather" ? GATHER_TOOLS : EXCEL_TOOLS;
+                const phaseTools = (stage === "gather" && !excelOnlyNextTurn) ? GATHER_TOOLS : EXCEL_TOOLS;
                 if (stage !== lastLoggedStage) {
                     // gather and write summarise as separate collapsibles, same as the old
                     // research/write phases did.
@@ -19549,6 +17373,7 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
         } finally {
             try { abortController.abort(); } catch (e) { /* no-op if already settled */ }
             setBusy(false); currentAbort = null;
+            excelOnlyNextTurn = false; // one-turn-only flag — see its own declaration
         }
     }
     const greet = () => addMsg("bot",
@@ -19584,11 +17409,17 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
     // only ever shown via its own highlighted row in this list now (no separate header label —
     // see the HTML's own comment on the hamburger-only header button). Threads are listed
     // newest-ACTIVITY first (same ordering saveThreadsStore itself sorts by), not creation order,
-    // so the thread you were just using is always at the top.
+    // so the thread you were just using is always at the top. Scoped to activeChatContext — see its
+    // own comment — so this never shows the OTHER surface's conversations.
     function renderThreadList() {
         const active = getActiveThread();
+        // The thread bar's own label (see #chatDockedToolbar in taskpane.html). Updated from here
+        // rather than from its own set of hooks because every path that can change WHICH thread is
+        // active, or what it's called — switchToThread, createNewThread, the auto-rename's .then(),
+        // the drawer's delete handler, and the initial render — already calls this one function.
+        if (toolbarTitleEl) toolbarTitleEl.textContent = active ? (active.title || "New chat") : "New chat";
         if (!threadList) return;
-        const sorted = threadsStore.threads.slice().sort((a, b) => b.updatedAt - a.updatedAt);
+        const sorted = threadsForContext(activeChatContext).sort((a, b) => b.updatedAt - a.updatedAt);
         threadList.innerHTML = sorted.map(t => `
             <div class="chat-thread-item${t.id === active.id ? " active" : ""}" data-thread-id="${escapeHtml(t.id)}">
                 <div class="chat-thread-item-main">
@@ -19609,7 +17440,11 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
         if (busy) return;
         if (id === threadsStore.activeThreadId) return;
         const thread = threadsStore.threads.find(t => t.id === id);
-        if (!thread) return;
+        // Never switch into a thread belonging to the OTHER context — the only thing that should
+        // ever pass an id here is this context's own filtered list (renderThreadList's drawer, or
+        // __goiaChatBridge.listThreads' mini popover), so a mismatch means something upstream
+        // leaked across contexts, not a real request to cross over.
+        if (!thread || (thread.context || "main") !== activeChatContext) return;
         activateThread(thread);
         saveThreadsStore(threadsStore); // persists the new activeThreadId so a reload reopens on the same thread
         renderStreamFromHistory();
@@ -19618,6 +17453,7 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
     function createNewThread() {
         if (busy) return; // see switchToThread's own comment
         const t = emptyThread();
+        t.context = activeChatContext;
         threadsStore.threads.push(t);
         activateThread(t);
         saveThreadsStore(threadsStore);
@@ -19672,10 +17508,18 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
     // the real height — font metrics, a line-height this file doesn't control, OS/zoom
     // differences — none of which a hardcoded number can account for.
     const chatHeaderEl = panel.querySelector(".chat-header");
+    const chatToolbarEl = panel.querySelector(".chat-docked-toolbar");
     const threadPanelEl = threadMenu ? threadMenu.querySelector(".chat-thread-panel") : null;
+    // Both strips above the stream have a z-index over the drawer's backdrop and so paint straight
+    // over anything the drawer puts in that same space (see #chatThreadMenu's own HTML comment) —
+    // so the list has to start clear of BOTH, not just the header. Either can be zero-height in a
+    // given view (.chat-header is hidden entirely while docked in Table Builder), which this picks
+    // up for free by measuring what's actually rendered rather than assuming a fixed strip.
     const syncThreadPanelOffset = () => {
-        if (!chatHeaderEl || !threadPanelEl) return;
-        threadPanelEl.style.paddingTop = `${chatHeaderEl.getBoundingClientRect().height}px`;
+        if (!threadPanelEl) return;
+        const headerH = chatHeaderEl ? chatHeaderEl.getBoundingClientRect().height : 0;
+        const toolbarH = chatToolbarEl ? chatToolbarEl.getBoundingClientRect().height : 0;
+        threadPanelEl.style.paddingTop = `${headerH + toolbarH}px`;
     };
     syncThreadPanelOffset();
     window.addEventListener("resize", syncThreadPanelOffset);
@@ -19716,10 +17560,17 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
                 if (id === threadsStore.activeThreadId && busy) return;
                 threadsStore.threads = threadsStore.threads.filter(t => t.id !== id);
                 if (id === threadsStore.activeThreadId) {
-                    // Deleted the one you were on — land on whatever's now most recently active.
-                    const next = threadsStore.threads.slice().sort((a, b) => b.updatedAt - a.updatedAt)[0];
-                    activateThread(next);
-                    renderStreamFromHistory();
+                    // Deleted the one you were on — land on whatever's now most recently active IN
+                    // THIS CONTEXT (never the other surface's thread, even if it's globally more
+                    // recent); if none are left here, start a fresh one for this context instead.
+                    const next = threadsForContext(activeChatContext).sort((a, b) => b.updatedAt - a.updatedAt)[0];
+                    if (next) {
+                        activateThread(next);
+                        renderStreamFromHistory();
+                    } else {
+                        createNewThread(); // persists + re-renders everything itself
+                        return;
+                    }
                 }
                 saveThreadsStore(threadsStore);
                 renderThreadList();
@@ -19797,7 +17648,29 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
 
     const openPanel = () => { panel.style.display = "flex"; fab.style.display = "none"; if (!stream.childElementCount) greet(); input.focus(); startChatSelectionPolling(); };
     const closePanel = () => { panel.style.display = "none"; fab.style.display = ""; if (modeMenu) modeMenu.classList.remove("open"); stopChatSelectionPolling(); };
-    fab.addEventListener("click", openPanel);
+
+    // ── Entry point into either surface — keeps the standalone DataGPT panel ("main") and the
+    // Table Builder-docked chat ("tablebuilder", see __goiaChatBridge below) from bleeding into
+    // each other. Sets activeChatContext FIRST, before touching any thread — switchToThread/
+    // createNewThread/renderThreadList all read it, so this ordering is what makes every thread
+    // this call goes on to create or restore land correctly tagged. Then restores THIS context's
+    // own remembered thread (falling back to createNewThread() the first time a context is ever
+    // opened) rather than trusting whatever activeThreadId happens to currently be, which the OTHER
+    // context may have silently changed since this entry point was last used. Guarded by `busy` the
+    // same way switchToThread/createNewThread already are — never swap threads out from under an
+    // in-flight turn.
+    const chatContextThreadKey = (ctx) => `goia_chatThreadFor_${ctx}`;
+    const openThreadForContext = (ctx) => {
+        activeChatContext = ctx;
+        if (busy) return getActiveThread().id;
+        let rememberedId = null;
+        try { rememberedId = localStorage.getItem(chatContextThreadKey(ctx)); } catch (e) { /* best-effort */ }
+        const existing = rememberedId ? threadsForContext(ctx).find(t => t.id === rememberedId) : null;
+        if (existing) switchToThread(existing.id); else createNewThread();
+        try { localStorage.setItem(chatContextThreadKey(ctx), getActiveThread().id); } catch (e) { /* best-effort */ }
+        return getActiveThread().id;
+    };
+    fab.addEventListener("click", () => { openThreadForContext("main"); openPanel(); });
 
     // Ribbon handshake: the "Ask DataGPT" button's ShowTaskpane action points at
     // taskpane.html?view=datagpt (see manifest.xml), so auto-open the chat panel for that view too.
@@ -19811,28 +17684,18 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
     // thread-picker section) already does exactly that: pushes a brand-new empty thread, activates
     // it, persists it, and re-renders the stream (which falls back to greet() on its own for an
     // empty thread, so openPanel's own greet-if-empty check below is a no-op here, never a double
-    // greeting). Skipped only when the thread that was ALREADY active (restored by activateThread
-    // during this same setup, above) is itself already empty — e.g. the user opened DataGPT,
-    // never sent anything, and closed the ribbon pane — since creating a second empty thread on
-    // top of an unused first one would just be visually identical clutter, silently eating into
-    // MAX_THREADS over a session of casually clicking the ribbon button in and out.
+    // greeting). openThreadForContext runs FIRST so "the thread that was ALREADY active" means the
+    // main panel's own last thread specifically — not whatever Table Builder's docked chat may have
+    // left activeThreadId pointing at — then this checks THAT (now-restored) thread's own history.
+    // Skipped only when that thread is itself already empty — e.g. the user opened DataGPT, never
+    // sent anything, and closed the ribbon pane — since creating a second empty thread on top of an
+    // unused first one would just be visually identical clutter, silently eating into MAX_THREADS
+    // over a session of casually clicking the ribbon button in and out.
     if (initialView === "datagpt") {
+        openThreadForContext("main");
         if (history.length) createNewThread();
         openPanel();
     }
-    // A question Query Data's own intent triage decided belongs here instead (see
-    // classifyQueryDataIntent/delegateToDataGpt) — read once and cleared immediately, so switching
-    // to this view again later (the ribbon button, not another delegation) never re-fills a stale
-    // question. Prefilled into the input only, not auto-sent: the user still presses Send
-    // themselves, same as if they'd typed it here directly.
-    try {
-        const delegated = sessionStorage.getItem(QD_DELEGATED_QUESTION_KEY);
-        if (delegated) {
-            sessionStorage.removeItem(QD_DELEGATED_QUESTION_KEY);
-            input.value = delegated;
-            input.focus();
-        }
-    } catch (e) { /* storage unavailable — the view still opens, just without the prefilled question */ }
     // (No close button any more — see the chat header in taskpane.html.) Clear Chat (which used to
     // live here, next to the mode button) was removed outright — it only ever reset the CURRENT
     // thread's history in place, which the thread picker's own per-thread delete (chatThreadMenu's
@@ -19841,6 +17704,72 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
     input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
     sendBtn.addEventListener("click", () => { if (busy) stopCurrentTurn(); else send(); });
     renderSendBtn(); // markup ships the send glyph; make the JS the single source of truth from here
+
+    // ── Bridge for Table Builder's docked chat (see dockChatPanel/__goiaChatBridge usage in the
+    // downloadtable view's own code) ──
+    // This whole feature is a closure with no exports — everything below is the minimum surface
+    // another part of the page needs to drive it: which thread is active, sending a message through
+    // the real tool-calling loop (Excel-only for that turn), and narrating a message into the
+    // stream/history WITHOUT going through the loop at all (for the deterministic table-building
+    // pipeline's own progress/result, which isn't an LLM turn). `panelEl` is exposed so the Table
+    // Builder code can reparent the actual DOM node — this bridge only ever touches JS state, never
+    // the node's position in the page.
+    window.__goiaChatBridge = {
+        panelEl: panel,
+        isBusy: () => busy,
+        openThreadForContext,
+        // Sends `text` through the real tool-calling loop, Excel-only for this one turn. Returns
+        // false (does nothing) if a turn is already in flight — same guard the real send button
+        // already has via its own disabled state.
+        sendExcelOnly: (text) => {
+            if (busy || !text) return false;
+            excelOnlyNextTurn = true;
+            input.value = text;
+            send();
+            return true;
+        },
+        // Appends a plain message bubble to the CURRENTLY active thread — both the visible bubble
+        // AND persisted history, same shape every other message in this file uses — without
+        // involving the model/tool loop at all. `role` is "user" or "assistant".
+        narrate: (role, text) => {
+            if (!text) return;
+            addMsg(role === "user" ? "user" : "bot", text);
+            history.push({ role: role === "user" ? "user" : "assistant", content: text, turn: nextTurn++ });
+            persistActiveThread();
+            // The deterministic create-path narrates the user's own request HERE instead of going
+            // through send() (see generateBtn's own click handler: anything that doesn't classify
+            // as "modify" never calls send() at all) — send() is where the auto-rename trigger
+            // normally lives, so without this, a FormulaGPT thread that only ever took that path
+            // (the common case — most typed requests there are table-building, not edits) stayed
+            // "New chat" forever no matter how many messages went through it. Same fire-and-forget,
+            // retry-until-it-succeeds behavior as send()'s own trigger — see its own comment.
+            if (role === "user" && !getActiveThread().titleGenerated) {
+                const threadForTitle = getActiveThread();
+                generateThreadTitle(text).then((title) => {
+                    if (!title) return;
+                    threadForTitle.title = title;
+                    threadForTitle.titleGenerated = true;
+                    saveThreadsStore(threadsStore);
+                    renderThreadList();
+                });
+            }
+        },
+        // For Table Builder's own miniature thread-history popover (opened straight from the
+        // teaser, before the chat is even docked) — the same list renderThreadList's own drawer
+        // shows, pre-formatted (title/relative-time/active), so that popover needs no copy of
+        // threadsStore or chatThreadRelativeTime of its own. Hardcoded to "tablebuilder" rather
+        // than activeChatContext — this can be (and is designed to be) browsed BEFORE docking,
+        // i.e. before anything has set activeChatContext to "tablebuilder" for this turn, so
+        // reading that flag here would show whichever context was last active instead.
+        listThreads: () => threadsForContext("tablebuilder").sort((a, b) => b.updatedAt - a.updatedAt).map((t) => ({
+            id: t.id,
+            title: t.title || "New chat",
+            updatedAtLabel: chatThreadRelativeTime(t.updatedAt),
+            active: t.id === threadsStore.activeThreadId,
+        })),
+        switchToThread,
+        createNewThread,
+    };
 
     // ── GoIndia MCP access ──
     // goindia-mcp.fly.dev sends no Access-Control-Allow-Origin header, so the browser blocks this

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <OfficeApp xmlns="http://schemas.microsoft.com/office/appforoffice/1.1" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:bt="http://schemas.microsoft.com/office/officeappbasictypes/1.0" xmlns:ov="http://schemas.microsoft.com/office/taskpaneappversionoverrides" xsi:type="TaskPaneApp">
   <Id>e6da381b-1909-47c4-82b7-71d53cd3306c</Id>
-  <Version>1.8.0.0</Version>
+  <Version>1.9.0.0</Version>
   <ProviderName>Go India Stocks</ProviderName>
   <DefaultLocale>en-US</DefaultLocale>
   <DisplayName DefaultValue="GoIndia Stocks for Excel (LOCAL DEV)"/>
@@ -15,6 +15,13 @@
   <Hosts>
     <Host Name="Workbook"/>
   </Hosts>
+  <!-- Custom Functions spike (Phase 0) — see manifest.xml's own identical comment; kept in sync
+       with it by hand since this file otherwise just mirrors manifest.xml with localhost URLs. -->
+  <Requirements>
+    <Sets>
+      <Set Name="SharedRuntime" MinVersion="1.1"/>
+    </Sets>
+  </Requirements>
   <DefaultSettings>
     <SourceLocation DefaultValue="https://localhost:3000/taskpane.html"/>
   </DefaultSettings>
@@ -22,6 +29,23 @@
   <VersionOverrides xmlns="http://schemas.microsoft.com/office/taskpaneappversionoverrides" xsi:type="VersionOverridesV1_0">
     <Hosts>
       <Host xsi:type="Workbook">
+        <Runtimes>
+          <Runtime resid="Taskpane.Url" lifetime="long"/>
+        </Runtimes>
+        <AllFormFactors>
+          <ExtensionPoint xsi:type="CustomFunctions">
+            <Script>
+              <SourceLocation resid="Functions.Script.Url"/>
+            </Script>
+            <Page>
+              <SourceLocation resid="Taskpane.Url"/>
+            </Page>
+            <Metadata>
+              <SourceLocation resid="Functions.Metadata.Url"/>
+            </Metadata>
+            <Namespace resid="Functions.Namespace"/>
+          </ExtensionPoint>
+        </AllFormFactors>
         <DesktopFormFactor>
           <GetStarted>
             <Title resid="GetStarted.Title"/>
@@ -37,9 +61,7 @@
                  button switch the user to a ribbon tab (Office.Ribbon only exposes
                  requestCreateControls/requestUpdate — visibility and enabled-state only, never
                  tab activation), so a Home-tab button pointing at this tab was not possible;
-                 removing it entirely is the only way to make the custom tab unambiguous.
-                 Users upgrading from the old layout get a one-time explanatory popup inside the
-                 taskpane — see #ribbonMoveModal in taskpane.html. -->
+                 removing it entirely is the only way to make the custom tab unambiguous. -->
             <CustomTab id="GoIndiaTab">
               <Group id="DataGroup">
                 <Label resid="DataGroup.Label"/>
@@ -68,12 +90,13 @@
                     <SourceLocation resid="Taskpane.Download.Url"/>
                   </Action>
                 </Control>
-                <!-- "Table Builder" (user-facing name; PROTOTYPE) — replaces the earlier
-                     dropdown-based Download Table feature, itself since renamed again from
-                     "Query Data". Internal ids (DownloadTableButton, Taskpane.DownloadTable.Url,
-                     DownloadTableButton.Label/.Tooltip) are kept as-is on purpose, matching
-                     taskpane.js/html's ?view=downloadtable — only the user-facing label/tooltip
-                     text and icon changed, same precedent as the previous rename. -->
+                <!-- "Formula Wizard" (user-facing name; PROTOTYPE) — renamed again from "Table
+                     Builder", which itself replaced the earlier dropdown-based Download Table
+                     feature, itself since renamed again from "Query Data". Internal ids
+                     (DownloadTableButton, Taskpane.DownloadTable.Url, DownloadTableButton.
+                     Label/.Tooltip) are kept as-is on purpose, matching taskpane.js/html's
+                     ?view=downloadtable — only the user-facing label/tooltip text and icon
+                     changed, same precedent as every previous rename. -->
                 <Control xsi:type="Button" id="DownloadTableButton">
                   <Label resid="DownloadTableButton.Label"/>
                   <Supertip>
@@ -81,9 +104,9 @@
                     <Description resid="DownloadTableButton.Tooltip"/>
                   </Supertip>
                   <Icon>
-                    <bt:Image size="16" resid="Icon.SheetPlus.16x16"/>
-                    <bt:Image size="32" resid="Icon.SheetPlus.32x32"/>
-                    <bt:Image size="80" resid="Icon.SheetPlus.80x80"/>
+                    <bt:Image size="16" resid="Icon.FormulaWizard.16x16"/>
+                    <bt:Image size="32" resid="Icon.FormulaWizard.32x32"/>
+                    <bt:Image size="80" resid="Icon.FormulaWizard.80x80"/>
                   </Icon>
                   <Action xsi:type="ShowTaskpane">
                     <TaskpaneId>ButtonId1</TaskpaneId>
@@ -214,15 +237,29 @@
         <bt:Image id="Icon.Rupee.80x80" DefaultValue="https://localhost:3000/assets/icon-rupee-80.png"/>
         <!-- "Table Builder" (DownloadTableButton) — a spreadsheet grid with a red "+" badge,
              replacing the old magnifying-glass (Icon.Query.*, kept above — no longer referenced
-             by any control — in case a future revision wants it back). -->
+             by any control — in case a future revision wants it back). No longer referenced by
+             DownloadTableButton itself (renamed "Formula Wizard", see Icon.FormulaWizard.* below)
+             — kept in case a future revision wants it back, same precedent as Icon.Query.* above. -->
         <bt:Image id="Icon.SheetPlus.16x16" DefaultValue="https://localhost:3000/assets/icon-sheet-plus-16.png"/>
         <bt:Image id="Icon.SheetPlus.32x32" DefaultValue="https://localhost:3000/assets/icon-sheet-plus-32.png"/>
         <bt:Image id="Icon.SheetPlus.80x80" DefaultValue="https://localhost:3000/assets/icon-sheet-plus-80.png"/>
+        <!-- "Formula Wizard" (DownloadTableButton, renamed from "Table Builder") — no background
+             box (confirmed live: a navy box read wrong against the ribbon's own light background —
+             matches Icon.Rupee's own box-less style instead, see its comment above). Just a navy
+             (#173760) italic "f" — the same math-notation f(x) glyph used throughout this
+             feature's own UI, e.g. the Formula Picker panel's own title icon — with a small red
+             (#d80404) star accent, same navy/red brand pairing DESIGN_SYSTEM.md documents. -->
+        <bt:Image id="Icon.FormulaWizard.16x16" DefaultValue="https://localhost:3000/assets/icon-formula-wizard-16.png"/>
+        <bt:Image id="Icon.FormulaWizard.32x32" DefaultValue="https://localhost:3000/assets/icon-formula-wizard-32.png"/>
+        <bt:Image id="Icon.FormulaWizard.80x80" DefaultValue="https://localhost:3000/assets/icon-formula-wizard-80.png"/>
       </bt:Images>
       <bt:Urls>
         <bt:Url id="App.PrivacyUrl" DefaultValue="https://www.goindiastocks.com/exceladdin"/>
         <bt:Url id="GetStarted.LearnMoreUrl" DefaultValue="https://go.microsoft.com/fwlink/?LinkId=276812"/>
         <bt:Url id="Commands.Url" DefaultValue="https://localhost:3000/commands.html"/>
+        <bt:Url id="Taskpane.Url" DefaultValue="https://localhost:3000/taskpane.html"/>
+        <bt:Url id="Functions.Script.Url" DefaultValue="https://localhost:3000/functions.js"/>
+        <bt:Url id="Functions.Metadata.Url" DefaultValue="https://localhost:3000/functions.json"/>
         <bt:Url id="Taskpane.DataGPT.Url" DefaultValue="https://localhost:3000/taskpane.html?view=datagpt"/>
         <bt:Url id="Taskpane.Download.Url" DefaultValue="https://localhost:3000/taskpane.html?view=download"/>
         <bt:Url id="Taskpane.DownloadTable.Url" DefaultValue="https://localhost:3000/taskpane.html?view=downloadtable"/>
@@ -234,7 +271,7 @@
         <bt:String id="GoIndiaTab.Label" DefaultValue="GoIndia Stocks"/>
         <bt:String id="DataGroup.Label" DefaultValue="Data"/>
         <bt:String id="DownloadDataButton.Label" DefaultValue="Get Financials"/>
-        <bt:String id="DownloadTableButton.Label" DefaultValue="Table Builder"/>
+        <bt:String id="DownloadTableButton.Label" DefaultValue="Formula Wizard"/>
         <bt:String id="ChatGroup.Label" DefaultValue="DataGPT"/>
         <bt:String id="AskDataGPTButton.Label" DefaultValue="Ask DataGPT"/>
         <bt:String id="FeedbackGroup.Label" DefaultValue="Feedback"/>
@@ -242,6 +279,7 @@
         <bt:String id="AccountGroup.Label" DefaultValue="Account"/>
         <bt:String id="ProfileButton.Label" DefaultValue="Profile"/>
         <bt:String id="LogoutButton.Label" DefaultValue="Log Out"/>
+        <bt:String id="Functions.Namespace" DefaultValue="GIA"/>
       </bt:ShortStrings>
       <bt:LongStrings>
         <bt:String id="GetStarted.Description" DefaultValue="Go India Stocks add-in loaded successfully. Open the 'GoIndia Stocks' tab in the ribbon at the top of Excel to download company data, ask DataGPT, and view your profile."/>
