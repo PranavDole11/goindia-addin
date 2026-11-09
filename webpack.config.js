@@ -206,11 +206,15 @@ module.exports = async (env, options) => {
       new HtmlWebpackPlugin({
         filename: "taskpane.html",
         template: "./src/taskpane/taskpane.html",
-        // "functions" added for the Custom Functions spike — shared runtime means the SAME page
-        // backs both the visible task pane AND Excel's persistent custom-functions host, so
-        // functions.js's own CustomFunctions.associate(...) calls need to run in this exact page,
-        // not a separate one (see the entry comment above for why that's the whole point).
-        chunks: ["polyfill", "taskpane", "functions"],
+        // Deliberately NOT including "functions" here. Shared runtime already makes Office load
+        // functions.js into THIS SAME page at runtime — that's what the manifest's CustomFunctions
+        // ExtensionPoint <Page resid="Taskpane.Url"> + <Script resid="Functions.Script.Url"> pair
+        // means (see the entry comment above for why that's the whole point). Also baking a
+        // <script src="functions.js"> into taskpane.html's own markup made the file execute TWICE
+        // in that page — once from this markup, once from Office's own injection — which is what
+        // was causing every custom function to come back #NAME? once hosted (not on localhost,
+        // where the timing/ordering apparently masked it).
+        chunks: ["polyfill", "taskpane"],
       }),
       // Custom Functions spike — generates dist/.../functions.json from functions.js's own
       // @customfunction JSDoc tags; manifest.xml's CustomFunctions ExtensionPoint Metadata
