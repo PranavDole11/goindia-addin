@@ -31,7 +31,6 @@ import METRIC_REGISTRY from "../taskpane/metric-registry.json";
 function ping() {
     return "pong";
 }
-CustomFunctions.associate("PING", ping);
 
 /**
  * SPIKE ONLY. Reads the SAME localStorage key the task pane's own getWalletIdentity() reads
@@ -51,7 +50,6 @@ function whoami() {
         return `WHOAMI_ERROR: ${e.message}`;
     }
 }
-CustomFunctions.associate("WHOAMI", whoami);
 
 /**
  * SPIKE ONLY. No network call — a free probe for how often Excel actually re-invokes a plain
@@ -65,7 +63,6 @@ CustomFunctions.associate("WHOAMI", whoami);
 async function recalcProbe(nonce) {
     return new Date().toISOString();
 }
-CustomFunctions.associate("RECALCPROBE", recalcProbe);
 
 // Same bearer-token convention as gapiHeaders() in taskpane.js (taskpane.js:937-941) — a static,
 // build-time-baked value via the SAME webpack.DefinePlugin injection, identical regardless of
@@ -670,7 +667,6 @@ async function get(companyName, metric, period, quarter, table, column, periodLi
         return `GET_ERROR: ${e.message}`;
     }
 }
-CustomFunctions.associate("GET", get);
 
 /**
  * SPIKE ONLY. No network call — a hardcoded 2D array to prove dynamic-array spilling works at
@@ -685,4 +681,3 @@ function getTable() {
         ["Tata Motors Ltd.", "83855"],
     ];
 }
-CustomFunctions.associate("GETTABLE", getTable);
