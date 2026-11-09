@@ -10,3 +10,21 @@
   # (Site configuration -> Environment variables) for production builds to pick it up — this file
   # only tells the secret scanner to allow it through, it does not supply the value itself.
   SECRETS_SCAN_OMIT_KEYS = "OPENROUTER_KEY,TEST_MCP_KEY,GOINDIASTOCKS_API_TOKEN"
+
+# Excel's custom-functions runtime fetches the manifest's Functions.Metadata.Url (functions.json)
+# and Functions.Script.Url (functions.js) CROSS-ORIGIN — the request does not come from our own
+# page's origin. Without Access-Control-Allow-Origin on the response, Excel silently discards the
+# metadata: no function names are ever registered, so every =GIA.* formula resolves to #NAME? and
+# typing "=GIA." offers no autocomplete at all, while the task pane itself still works fine
+# (it loads as a top-level navigation, which is not CORS-gated).
+#
+# This is why custom functions worked only on localhost: webpack's devServer sets exactly this
+# header on every response (see devServer.headers in webpack.config.js), and Netlify sets no CORS
+# header by default. Keep the two in parity.
+#
+# Safe to apply site-wide: everything published here is already a publicly fetchable static file,
+# and a wildcard origin cannot be combined with credentials, so this grants no new access.
+[[headers]]
+  for = "/*"
+  [headers.values]
+    Access-Control-Allow-Origin = "*"
