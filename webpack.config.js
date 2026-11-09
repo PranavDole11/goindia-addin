@@ -270,6 +270,15 @@ module.exports = async (env, options) => {
             to: "[name][ext]",
           },
           {
+            // Netlify header rules. Only has any effect at the PUBLISH ROOT, which is dist/ — this
+            // emits it into this version's folder so CopyToDistRootPlugin below can lift it there,
+            // the same route google-signin*.html already takes. See _headers itself for why the
+            // Access-Control-Allow-Origin rule it carries is what makes =GIA.* formulas resolve.
+            from: "_headers",
+            to: "_headers",
+            toType: "file",
+          },
+          {
             from: "manifest*.xml",
             to: "[name]" + "[ext]",
             transform(content) {
@@ -322,7 +331,7 @@ module.exports = async (env, options) => {
               to: distRoot,
             }),
             new CopyToDistRootPlugin({
-              files: ["google-signin-dialog.html", "google-signin-callback.html"],
+              files: ["google-signin-dialog.html", "google-signin-callback.html", "_headers"],
               from: outputPath,
               to: distRoot,
             }),

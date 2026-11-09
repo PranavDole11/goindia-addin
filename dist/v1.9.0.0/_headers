@@ -1,0 +1,20 @@
+# Netlify header rules, applied from the PUBLISH ROOT (dist/). This duplicates the [[headers]]
+# block in netlify.toml on purpose: netlify.toml's rules were observed NOT to take effect on this
+# site (a freshly-fetched functions.json still came back with no Access-Control-Allow-Origin, with
+# cache-status fwd=miss proving it was not a stale edge cache), whereas a _headers file shipped in
+# the published output is applied by the CDN based on the deployed files themselves. Whichever of
+# the two Netlify honours, the header gets served.
+#
+# Why this header is load-bearing: Excel's custom-functions runtime fetches the manifest's
+# Functions.Metadata.Url (functions.json) and Functions.Script.Url (functions.js) CROSS-ORIGIN.
+# Without Access-Control-Allow-Origin, Excel silently discards functions.json and registers no
+# function names at all — every =GIA.* formula resolves to #NAME? and typing "=GIA." offers no
+# autocomplete, while the task pane itself still works (it loads as a top-level navigation, which
+# is not CORS-gated). This is the whole reason custom functions only ever worked on localhost:
+# webpack's devServer sets this same header on every response (devServer.headers in
+# webpack.config.js). Keep the two in parity.
+#
+# Safe site-wide: everything published here is already a publicly fetchable static file, and a
+# wildcard origin cannot be combined with credentials, so this grants no access that did not exist.
+/*
+  Access-Control-Allow-Origin: *
