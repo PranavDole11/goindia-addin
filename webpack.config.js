@@ -17,6 +17,20 @@ const CustomFunctionsMetadataPlugin = require("custom-functions-metadata-plugin"
 const urlDev = "https://localhost:3000/";
 const PROD_BASE = "https://goindia-addin.netlify.app/"; // must match manifest.xml's own hardcoded SourceLocation domain
 
+// Team-testing manifest identity. manifest_test.xml is DERIVED from manifest.xml at build time
+// (see the CopyWebpackPlugin pattern below) so there is only ever one manifest to maintain — it is
+// the same add-in, pointed at the same hosted files, with a different <Id> and DisplayName.
+//
+// Why a separate <Id> is needed at all: Excel caches an add-in's declared capabilities per <Id>.
+// PROD_ID shipped v1.2.0.0-v1.8.0.0 with NO CustomFunctions/SharedRuntime extension points, so on
+// any machine that already side-loaded one of those builds, Excel keeps serving that cached
+// "this add-in has no custom functions" registration — every =GIA.* formula comes back #NAME? even
+// though v1.9.0.0's manifest declares them correctly. Re-adding the manifest and restarting Excel
+// does NOT clear it. A never-before-seen <Id> gets a clean registration, which is why the
+// localhost manifest (its own distinct <Id>) always worked while the hosted one did not.
+const PROD_ID = "d2b44c70-d52e-4581-a233-f09e592bf9e5";
+const TEST_ID = "08c9ed1b-818c-4713-9491-dde980cc719c";
+
 // Single source of truth for the version: manifest.xml's own <Version> tag (the same value you
 // already bump by hand for every Partner Center submission) — not a separate package.json field
 // that could drift out of sync with it.
@@ -264,6 +278,26 @@ module.exports = async (env, options) => {
               // purpose: also re-points icon URLs into this version's folder, trading a little
               // duplicated icon weight per release for zero fragile selective-URL matching.
               return content.toString().split(PROD_BASE).join(`${PROD_BASE}v${VERSION}/`);
+            },
+          },
+          {
+            // The manifest to hand to colleagues for testing — derived from manifest.xml above, so
+            // it can never drift from it. Identical in every respect except <Id> and DisplayName
+            // (see TEST_ID's comment for why the distinct Id is what actually makes =GIA.* resolve
+            // on a machine that has previously installed a pre-v1.9.0.0 build). Installs alongside
+            // the production add-in rather than replacing it, so a tester keeps both.
+            from: "manifest.xml",
+            to: "manifest_test.xml",
+            transform(content) {
+              let xml = content.toString();
+              if (!dev) xml = xml.split(PROD_BASE).join(`${PROD_BASE}v${VERSION}/`);
+              return xml
+                .split(PROD_ID)
+                .join(TEST_ID)
+                .replace(
+                  '<DisplayName DefaultValue="GoIndia Stocks for Excel"/>',
+                  `<DisplayName DefaultValue="GoIndia Stocks for Excel (v${VERSION} TEST)"/>`
+                );
             },
           },
         ],
