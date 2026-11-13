@@ -35,45 +35,45 @@
             }
         },
         {
-            "description": "=GIA.GET(company, metric, period) — hand-typeable with just those 3. `quarter` is an optional\n4th value (1-4) for a quarterly read instead of annual; `table`/`column`/`periodLiteral` are\noptional power-user overrides (see resolveGetArgs); a typical formula never needs them.",
+            "description": "Looks up one financial figure for a company — type =GIA.GET(company, metric, year) and it\nfills in on its own, and updates again whenever you change the company, metric, or year.",
             "id": "GET",
             "name": "GET",
             "parameters": [
                 {
-                    "description": "Company name to look up (loose match).",
+                    "description": "The company's name, e.g. \"Tata Motors\".",
                     "name": "companyName",
                     "type": "string"
                 },
                 {
-                    "description": "Canonical metric name, e.g. \"Revenue\". Only optional when both `table`\nand `column` are given directly.",
+                    "description": "The financial metric to look up, e.g. \"Revenue\" or \"Diluted EPS\".",
                     "name": "metric",
                     "type": "string"
                 },
                 {
-                    "description": "Fiscal year, e.g. 2026 — or a cell reference to a label this app\nitself writes, \"FY26\"/\"Q3 FY26\" (see parseFiscalLabel), which also supplies the quarter.",
+                    "description": "The year to look up, e.g. 2026 — or click a cell that already\nhas a period like \"FY26\" or \"Q3 FY26\" in it.",
                     "name": "period",
                     "type": "any"
                 },
                 {
-                    "description": "Quarter number 1-4, for a quarterly read instead of annual. Omit for\nthe annual figure, or when `period` is already a \"Q.. FY..\" label.",
+                    "description": "Only for a quarterly figure: the quarter number, 1-4. Leave this out\nfor the full-year figure.",
                     "name": "quarter",
                     "optional": true,
                     "type": "number"
                 },
                 {
-                    "description": "Advanced: skip metric resolution and use this real table directly,\ne.g. \"GIAStock_Data.dbo.sc_year_data\".",
+                    "description": "Not needed for a normal formula — used internally by this app.",
                     "name": "table",
                     "optional": true,
                     "type": "string"
                 },
                 {
-                    "description": "Advanced: skip metric resolution and use this real column directly.",
+                    "description": "Not needed for a normal formula — used internally by this app.",
                     "name": "column",
                     "optional": true,
                     "type": "string"
                 },
                 {
-                    "description": "Advanced: skip period-format resolution and filter on this\nliteral (already in the target table's own stored format) directly.",
+                    "description": "Not needed for a normal formula — used internally by this app.",
                     "name": "periodLiteral",
                     "optional": true,
                     "type": "string"

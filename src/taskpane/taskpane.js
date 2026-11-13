@@ -940,6 +940,28 @@ const GOINDIASTOCKS_API_TOKEN = process.env.GOINDIASTOCKS_API_TOKEN || "";
 // needed (Content-Type, etc.) so this is a drop-in addition rather than a header object rewrite.
 const gapiHeaders = (extra) => ({ "Authorization": `Bearer ${GOINDIASTOCKS_API_TOKEN}`, ...(extra || {}) });
 
+// /goindiastock/company_search's OWN ranking is not reliable for an exact/near-exact name: for
+// "Tata Motors" (or even the exact canonical "Tata Motors Ltd.") it ranks "Tata Motors Ltd. - DVR
+// Ordinary" ABOVE the plain "Tata Motors Ltd." — confirmed live, not a one-off. Every caller that
+// auto-picks data[0] as THE match (no human in the loop to notice) inherits that wrong pick
+// permanently, e.g. into a Table Builder formula's company argument.
+//
+// This does not try to out-rank the API in general — a genuinely ambiguous query ("reliance",
+// "adani") has no principled single right answer and is left exactly as the API ranks it. It only
+// overrides when one candidate is an outright winner: its name, with exactly one trailing
+// corporate suffix (Ltd./Ltd/Limited) stripped, is an EXACT case-insensitive match to the query
+// normalized the same way. "Tata Motors Ltd." reduces to "tata motors" and matches; "Tata Motors
+// Ltd. - DVR Ordinary" and "Tata Motors Passenger Vehicles Ltd." don't end in a bare corporate
+// suffix at all (something else follows it), so they're untouched by the strip and never match.
+const stripCorporateSuffix = (s) => (s || "").trim().replace(/\s+(ltd\.?|limited)\.?$/i, "").trim().toLowerCase();
+const pickBestCompanyMatch = (candidates, queryText, getLabel = (c) => c) => {
+    const list = candidates || [];
+    if (!list.length) return undefined;
+    const target = stripCorporateSuffix(queryText);
+    const exact = target && list.find((c) => stripCorporateSuffix(getLabel(c)) === target);
+    return exact || list[0];
+};
+
 const WALLET_BASE_URL = "https://api.goindiastocks.com/wallet";
 const WALLET_DEDUCT_URL = `${WALLET_BASE_URL}/excel_deduct_model_cost`;
 const WALLET_DEDUCT_CHAT_URL = `${WALLET_BASE_URL}/excel_deduct_chat_cost`;
@@ -1550,9 +1572,13 @@ async function fetchFinancialData() {
         });
         const searchData = await searchRes.json();
 
-        if (!searchData.data || !searchData.data[0] || !searchData.data[0].value)
+        // See pickBestCompanyMatch's own comment — the API's own top result for an exact
+        // canonical name can still be a different company (confirmed live for "Tata Motors
+        // Ltd." itself, not just the loose "Tata Motors"), so this can't just take data[0].
+        const best = pickBestCompanyMatch(searchData.data, cellValue, (d) => d.label);
+        if (!best || !best.value)
             throw new Error("No company match in search");
-        const companyValue = searchData.data[0].value;
+        const companyValue = best.value;
 
         // Step 3: Get full company list
         const compRes = await fetch("https://api.goindiastocks.com/operational/companies_excel", { headers: gapiHeaders() });
@@ -2212,12 +2238,13 @@ function applyRibbonView() {
             });
             window.addEventListener("resize", () => { if (queryHintPreview.classList.contains("dt-query-hint-preview-open")) positionQueryHintPreview(); });
 
-            // ── Excel Table Outline card — hover-preview (this existing popover, now re-anchored
-            // here instead of the old header icon) + a fuller click/tap modal with its own
-            // independent video (see the plan's own design-decision note on why a second lazy
-            // element is safer than reparenting one between the two). Touch devices never fire
-            // mouseenter/mouseleave at all, so tap always lands on the modal — no feature
-            // detection needed for "mobile: tap-to-open modal only". -->
+            // ── Excel Table Outline card — click/tap opens a modal with its own independent
+            // video, a short explanation and 3 steps. This card used to also trigger a hover
+            // popover (openQueryHintPreview); that trigger was removed by request below.
+            // openQueryHintPreview is now unreachable dead code, left in place rather than
+            // deleted since closeQueryHintPreviewNow (which shares its state) still has other
+            // callers elsewhere in this file (the document click-outside handler right below,
+            // and the grid-skeleton-detection poll's own defensive cleanup). -->
             const dtExcelOutlineCardEl = document.getElementById("dtExcelOutlineCard");
             const dtExcelModalBackdropEl = document.getElementById("dtExcelOutlineModalBackdrop");
             const dtExcelModalVideoEl = document.getElementById("dtExcelOutlineModalVideo");
@@ -2238,13 +2265,19 @@ function applyRibbonView() {
                 dtExcelModalBackdropEl.style.display = "none";
                 if (dtExcelModalVideoEl) dtExcelModalVideoEl.pause();
             };
+            // Clicking the row now navigates to the dedicated Skeleton page (#dtWizardSkeletonPage
+            // — see showWizardPage below) instead of opening the explainer modal directly; "See how"
+            // (#dtExcelSeeHow) keeps that modal as a separate popup, with stopPropagation so it
+            // doesn't also navigate the row underneath it.
             if (dtExcelOutlineCardEl) {
                 // #dtQueryHint itself no longer has a click handler of its own — it's now
                 // invisible and pointer-events:none (see its own CSS comment), so every click
-                // anywhere on the card, including where that icon used to sit, lands here.
-                dtExcelOutlineCardEl.addEventListener("click", () => openExcelOutlineModal());
-                dtExcelOutlineCardEl.addEventListener("mouseenter", () => { if (!queryHintOpen) openQueryHintPreview(); });
-                dtExcelOutlineCardEl.addEventListener("mouseleave", () => { if (queryHintOpen) closeQueryHintPreviewNow(); });
+                // anywhere on the card lands here, except "See how" below (stopPropagation).
+                dtExcelOutlineCardEl.addEventListener("click", () => showWizardPage("skeleton"));
+            }
+            const dtExcelSeeHowEl = document.getElementById("dtExcelSeeHow");
+            if (dtExcelSeeHowEl) {
+                dtExcelSeeHowEl.addEventListener("click", (e) => { e.stopPropagation(); openExcelOutlineModal(); });
             }
             if (dtExcelModalCloseEl) dtExcelModalCloseEl.addEventListener("click", closeExcelOutlineModal);
             if (dtExcelModalBackdropEl) dtExcelModalBackdropEl.addEventListener("click", (e) => { if (e.target === dtExcelModalBackdropEl) closeExcelOutlineModal(); });
@@ -2273,15 +2306,14 @@ function applyRibbonView() {
                 }
             };
 
-            // ── Formula + Text, shown together ──────────────────────────────────────────────
+            // ── Formula + Text ───────────────────────────────────────────────────────────────
             // Formula replaces the standalone "Functions" ribbon button/view this session — same
             // company/metric/period picker, same =GIA.GET(company, metric, period) output, just
-            // merged in here instead of its own entry point. Both panels are visible at once —
-            // Text on top, Formula on the bottom (see #dtTextModePanel/#dtFormulaModePanel in
-            // taskpane.html, both plain flex:1 siblings now, no more switch picking one). Whichever
-            // one the user actually starts filling in dims the OTHER (.dt-input-panel-dimmed), so
-            // it's always clear which one will act when the user submits; clearing it back out
-            // un-dims the other. Neither is dimmed while both are empty.
+            // merged in here instead of its own entry point. Now full pages of their own (see
+            // showWizardPage below) rather than two panels sharing a screen, so
+            // updateInputModeDimming's dimming (.dt-input-panel-dimmed — "which one will act when
+            // the user submits") has nothing left to visibly contrast against; kept rather than torn
+            // out of its several call sites, since it's a harmless no-op now, not a bug.
             const dtTextModePanelEl = document.getElementById("dtTextModePanel");
             const dtFormulaModePanelEl = document.getElementById("dtFormulaModePanel");
             const updateInputModeDimming = () => {
@@ -2293,15 +2325,6 @@ function applyRibbonView() {
                 );
                 dtTextModePanelEl.classList.toggle("dt-input-panel-dimmed", usingFormula && !usingText);
                 dtFormulaModePanelEl.classList.toggle("dt-input-panel-dimmed", usingText && !usingFormula);
-                // The user is back to actively working Formula Picker's own fields — this is the
-                // general "should the teaser be out of the way" signal, not just returning from a
-                // docked chat (see recollapseFormulaGptIfBusy's own declaration for why this is a
-                // hook rather than a direct call: the state it needs lives inside Formula Picker's
-                // own guarded block, not reachable from here). Confirmed live: expanding the teaser
-                // via its collapsed bar WITHOUT ever docking the chat (just to glance at it, then
-                // clicking straight back into the Company/Metric fields) left it sitting there
-                // full-size and merely dimmed — "disabled-looking" — instead of collapsing back.
-                if (usingFormula && !usingText && recollapseFormulaGptIfBusy) recollapseFormulaGptIfBusy();
             };
             if (queryInput) {
                 queryInput.addEventListener("input", updateInputModeDimming);
@@ -2313,335 +2336,205 @@ function applyRibbonView() {
                 });
             }
 
+            // ── Wizard page router ─────────────────────────────────────────────────────────
+            // Exactly one of these four is ever display:flex at a time — the entire mechanism
+            // behind "clicking one of the three input methods opens its own full page, with a Back
+            // button to return," replacing the old single-page layout where docking chat or picking
+            // a metric collapsed a SIBLING to hand over its space. See each page's own HTML comment
+            // in taskpane.html for its contents.
+            const dtWizardPages = {
+                main: document.getElementById("dtWizardMainPage"),
+                formulagpt: document.getElementById("dtWizardFormulaGptPage"),
+                skeleton: document.getElementById("dtWizardSkeletonPage"),
+                formulapicker: document.getElementById("dtWizardFormulaPickerPage"),
+            };
+            // Tracked so other code (the grid-skeleton detection poll, below) can tell which page is
+            // CURRENTLY showing without re-reading every element's own style.display.
+            let currentWizardPage = "main";
+            const showWizardPage = (name) => {
+                currentWizardPage = name;
+                Object.entries(dtWizardPages).forEach(([key, el]) => {
+                    if (el) el.style.display = key === name ? "flex" : "none";
+                });
+            };
+
             // ── Docking DataGPT's chat in place of Formula (see the plan file "Table Builder —
             // dock DataGPT's chat in place of the Formula picker") ──
             // The real #chatPanel (see __goiaChatBridge, set up in setupAskClaudeChat) is
             // REPARENTED into #dtChatDock rather than a second chat engine being built — same DOM
             // node, same JS state (history, any in-flight turn), only its CSS position changes (its
-            // own .dt-docked override in taskpane.html). Formula collapses "upwards" to hand over
-            // its space; Table Builder's own composer hides itself since the real
-            // #chatInput/#chatSend (now visible here) is the active input for further conversation.
+            // own .dt-docked override in taskpane.html). "Docked" now simply means
+            // #dtWizardFormulaGptPage is the active wizard page (see showWizardPage above) — there's
+            // no more separate undocked-but-visible "teaser" state to distinguish it from.
             const dtChatDockEl = document.getElementById("dtChatDock");
-            // #dtOpenChatBtn doubles as a toggle — see its own icon/label swap in dockChatPanel/
-            // undockChatPanel below.
-            const dtOpenChatIconEl = document.getElementById("dtOpenChatIcon");
-            const dtOpenChatLabelEl = document.getElementById("dtOpenChatLabel");
-            const DT_OPEN_CHAT_ICON_MESSAGE = '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>';
-            const DT_OPEN_CHAT_ICON_FORMULA = '<span class="dt-open-chat-f">f</span>';
             let dtChatIsDocked = false;
-            // ── FormulaGPT teaser's animated example-prompt cycling ──────────────────────────
-            // A classic typewriter-cycling placeholder (type, pause, erase, next example) — shown
-            // ONLY in #dtQuery's own placeholder, so it never fights with real typed text, and
-            // never runs at all once chat is docked (queryInput itself becomes the full-chat's own
-            // input then, not a teaser demo). Paused (not reset) while the field is focused or has
-            // a value, so it can't overwrite something the user is mid-typing.
-            const DT_TEASER_PROMPTS = [
-                "e.g. Add Reliance EBITDA for FY24",
-                "Give me Reliance Industries Ltd revenue for the past 5 years",
-            ];
-            let dtTeaserPlaceholderRunning = false;
-            let dtTeaserPlaceholderTimer = null;
-            const dtStopTeaserPlaceholder = () => {
-                dtTeaserPlaceholderRunning = false;
-                if (dtTeaserPlaceholderTimer) { clearTimeout(dtTeaserPlaceholderTimer); dtTeaserPlaceholderTimer = null; }
-            };
-            const dtRunTeaserPlaceholder = () => {
-                if (dtTeaserPlaceholderRunning || !queryInput) return;
-                dtTeaserPlaceholderRunning = true;
-                let promptIdx = 0;
-                const TYPE_MS = 45, PAUSE_MS = 1400, ERASE_MS = 22, GAP_MS = 400, IDLE_RECHECK_MS = 400;
-                const step = () => {
-                    if (!dtTeaserPlaceholderRunning) return;
-                    if (dtChatIsDocked || document.activeElement === queryInput || queryInput.value) {
-                        dtTeaserPlaceholderTimer = setTimeout(step, IDLE_RECHECK_MS);
-                        return;
-                    }
-                    const text = DT_TEASER_PROMPTS[promptIdx % DT_TEASER_PROMPTS.length];
-                    let i = 0;
-                    const typeNext = () => {
-                        if (!dtTeaserPlaceholderRunning) return;
-                        queryInput.placeholder = text.slice(0, i);
-                        if (i < text.length) { i++; dtTeaserPlaceholderTimer = setTimeout(typeNext, TYPE_MS); return; }
-                        dtTeaserPlaceholderTimer = setTimeout(eraseNext, PAUSE_MS);
-                    };
-                    const eraseNext = () => {
-                        if (!dtTeaserPlaceholderRunning) return;
-                        i--;
-                        queryInput.placeholder = text.slice(0, Math.max(0, i));
-                        if (i > 0) { dtTeaserPlaceholderTimer = setTimeout(eraseNext, ERASE_MS); return; }
-                        promptIdx++;
-                        dtTeaserPlaceholderTimer = setTimeout(step, GAP_MS);
-                    };
-                    typeNext();
-                };
-                step();
-            };
-            dtRunTeaserPlaceholder(); // the view always starts undocked/teaser — begin cycling right away
-            // Formula collapses "upwards" for TWO independent reasons now — chat being docked
-            // (above), and a grid-skeleton table preview taking its place (computeSkeletonPreview,
-            // further down this closure) — either alone should collapse it, and it should only ever
-            // un-collapse once NEITHER reason still applies. A shared flag + this one recomputation
-            // point is what keeps dockChatPanel/undockChatPanel and computeSkeletonPreview/
-            // exitGridQueryMode from fighting over the same class when both happen to be true at
-            // once (e.g. the user clicks the Formula Picker toggle to undock chat while a skeleton
-            // preview is still showing).
-            let skeletonTablePreviewActive = false;
-            const dtSkeletonPreviewPaneEl = document.getElementById("dtSkeletonPreviewPane");
-            const updateFormulaCollapse = () => {
-                if (!dtFormulaModePanelEl) return;
-                dtFormulaModePanelEl.classList.toggle("dt-formula-collapsed", dtChatIsDocked || skeletonTablePreviewActive);
-                // The skeleton-table preview shares Formula's own vacated space with the docked
-                // chat (#dtChatDock) rather than sitting elsewhere — but ONLY when it's the reason
-                // Formula is collapsed; chat docking wins the slot if both ever apply at once (e.g.
-                // the user sends a skeleton-driven message — dockChatPanel runs before
-                // exitGridQueryMode's own cleanup does), so the two never render on top of each
-                // other fighting for the same space.
-                if (dtSkeletonPreviewPaneEl) dtSkeletonPreviewPaneEl.style.display = (skeletonTablePreviewActive && !dtChatIsDocked) ? "flex" : "none";
-            };
+            // The cycling example-prompt placeholder that used to animate in #dtQuery's own
+            // placeholder while "undocked" (and pause once docked) is gone — the composer now only
+            // ever exists on #dtWizardFormulaGptPage, which is always the "docked" state, so that
+            // animation would never actually run any more. #dtQuery's placeholder is just the plain
+            // static "Ask TableGPT anything…" string now, set directly in its HTML.
+            //
+            // #dtSkeletonPreviewPane no longer needs a show/hide toggle of its own either — it's
+            // always visible on its own dedicated Skeleton page now (see
+            // #dtWizardSkeletonPage/#dtSkeletonPreviewPane's own CSS comment in taskpane.html); its
+            // children already manage their own visibility, so computeSkeletonPreview/
+            // exitGridQueryMode no longer need their own skeletonTablePreviewActive flag either —
+            // removed, along with the updateFormulaCollapse/triggerFormulaGptAutoCollapse calls that
+            // were its only reason to exist.
             // The real New-chat/chat-history buttons live in .chat-docked-toolbar by default (shared
-            // with the standalone DataGPT view) — dockChatPanel/undockChatPanel below reparent them
-            // into/out of #dtComposerToolbarSlot (below Table Builder's own composer) rather than
-            // duplicating them, the same technique already used for the whole #chatPanel.
+            // with the standalone DataGPT view) — both reparented into #dtComposerToolbarSlot (in
+            // the TableGPT page's own composer footer) ONCE, here, permanently, rather than
+            // duplicating them (the same technique already used for the whole #chatPanel). Safe to
+            // leave here for the life of this page load: the standalone DataGPT view is a SEPARATE
+            // page load of its own (?view=datagpt, manifest.xml), so nothing else on THIS page load
+            // ever needs them back in .chat-docked-toolbar. Resolves "move history next to New
+            // chat" directly — there's no more separate teaser-only mini history popover now that
+            // TableGPT is a full page rather than something toggling inline on the main page.
             const dtComposerToolbarSlotEl = document.getElementById("dtComposerToolbarSlot");
             const chatThreadNewBtnEl = document.getElementById("chatThreadNewBtn");
             const chatThreadBtnEl = document.getElementById("chatThreadBtn");
-            const chatToolbarActionsEl = document.querySelector("#chatDockedToolbar .chat-toolbar-actions");
-            // Set below, inside the Formula Picker's own guarded block, where
-            // dtFnSelectedMetric/setTeaserCompact/dtTeaserManuallyExpanded actually live (that
-            // block's own `let`s are scoped to its `if {}`, not reachable from out here) — called
-            // from BOTH undockChatPanel (returning from a docked chat) AND updateInputModeDimming
-            // (the user clicking back into Formula Picker's own fields WITHOUT ever docking a chat
-            // — confirmed live: expanding the teaser via its collapsed bar just to glance at it,
-            // then going straight back to Formula Picker, left it sitting there full-size and
-            // merely dimmed instead of collapsing back). A plain mutable hook rather than hoisting
-            // that state up here, since none of it is otherwise needed outside Formula Picker's own
-            // logic.
-            let recollapseFormulaGptIfBusy = null;
-            // Same cross-scope-hook reasoning as recollapseFormulaGptIfBusy just above, for a
-            // SECOND, independent reason the teaser should auto-collapse: a grid-skeleton preview
-            // becoming ready (computeSkeletonPreview, in the "hand-built Excel selection" section
-            // further down this closure — also outside Formula Picker's own guarded block) takes
-            // over Formula's vacated space exactly the way picking a metric does, and should hand
-            // the teaser's own space over the same way. Assigned to the SAME underlying
-            // maybeAutoCollapseTeaser Formula Picker's own metric-pick trigger uses, so both
-            // reasons share one collapse/manual-expand state instead of two competing ones.
-            let triggerFormulaGptAutoCollapse = null;
+            [chatThreadNewBtnEl, chatThreadBtnEl].forEach((btn) => {
+                if (dtComposerToolbarSlotEl && btn && btn.parentElement !== dtComposerToolbarSlotEl) {
+                    dtComposerToolbarSlotEl.appendChild(btn);
+                }
+            });
             // Brings the chat to the foreground — ensures the Table-Builder-specific thread/context
             // is active (never the main DataGPT panel's own conversation — see openThreadForContext),
-            // then shows it in place of Formula. Returns false (no-op) only if the chat feature
-            // itself is unavailable (CHAT_ENABLED=false — see setupAskClaudeChat's own early return).
+            // reparents the real #chatPanel into #dtChatDock, and navigates to its page. Returns
+            // false (no-op) only if the chat feature itself is unavailable (CHAT_ENABLED=false — see
+            // setupAskClaudeChat's own early return).
+            // The REAL teaser (icon/title/desc + composer) lives on the main page, inside
+            // #dtWizardAiCard, by request — not a plain static label. dockChatPanel reparents the
+            // WHOLE #dtTextModePanel node from there into #dtWizardFormulaGptPage (appended after
+            // #dtChatDock, so the composer ends up at the bottom below the stream) and adds
+            // .dt-chat-docked to hide its open-area chrome there (the page's own header already
+            // shows "TableGPT"); undockChatPanel moves it right back to its slot in
+            // #dtWizardAiCard, chrome restored, state untouched either way.
+            const dtWizardAiCardEl = document.getElementById("dtWizardAiCard");
+            const dtWizardFormulaGptPageEl = document.getElementById("dtWizardFormulaGptPage");
             const dockChatPanel = () => {
                 const bridge = window.__goiaChatBridge;
-                if (!bridge || !dtChatDockEl || !dtFormulaModePanelEl) return false;
+                if (!bridge || !dtChatDockEl || !dtWizardFormulaGptPageEl) return false;
                 bridge.openThreadForContext("tablebuilder");
                 if (bridge.panelEl.parentElement !== dtChatDockEl) dtChatDockEl.appendChild(bridge.panelEl);
                 bridge.panelEl.classList.add("dt-docked");
                 bridge.panelEl.style.display = "flex";
                 dtChatDockEl.style.display = "flex";
+                if (dtTextModePanelEl && dtTextModePanelEl.parentElement !== dtWizardFormulaGptPageEl) {
+                    dtWizardFormulaGptPageEl.appendChild(dtTextModePanelEl);
+                }
+                if (dtTextModePanelEl) dtTextModePanelEl.classList.add("dt-chat-docked");
                 dtChatIsDocked = true;
-                updateFormulaCollapse();
+                showWizardPage("formulagpt");
                 // Table Builder's OWN composer (#dtQuery/#dtDownload) stays visible and is the one
                 // input surface used throughout — it's the SAME box for every message, first or
-                // tenth, not swapped out for DataGPT's own composer once docked. generateBtn's click
-                // handler already docks unconditionally on every send (a harmless no-op once already
-                // docked) and keeps routing through intent triage, so no other change is needed to
-                // keep using it here. DataGPT's own #chatInput/#chatSend (.chat-composer) is hidden
+                // tenth, not swapped out for DataGPT's own composer. generateBtn's click handler
+                // already docks unconditionally on every send (a harmless no-op once already docked)
+                // and keeps routing through intent triage, so no other change is needed to keep
+                // using it here. DataGPT's own #chatInput/#chatSend (.chat-composer) is hidden
                 // instead — see .dt-docked .chat-composer in taskpane.html — redundant once this
-                // composer is doing the job. dtQueryHintRowEl itself is NOT hidden here any more —
-                // it now lives in the persistent title bar (.fb-header), not in the content area
-                // Formula/chat trade places in, so there's no reason for it to disappear just
-                // because chat is docked. The thread bar (#chatDockedToolbar — the active thread's
-                // name plus New-chat/history) needs nothing done to it either: it's a permanent part
-                // of #chatPanel in both views now, so it simply comes along with the panel and ends
-                // up as the top strip of the docked area once .chat-header above it is hidden.
-                if (dtOpenChatIconEl) dtOpenChatIconEl.innerHTML = DT_OPEN_CHAT_ICON_FORMULA;
-                if (dtOpenChatLabelEl) dtOpenChatLabelEl.textContent = "Formula Picker";
-                // The teaser's own chrome (icon/heading/info/description) hides once docked — the
-                // docked chat panel gets its own header (#chatDockedHeader) instead — and the
-                // cycling example-prompt placeholder gives way to a plain, real one, since this box
-                // is now an ongoing conversation's actual input, not a demo. See taskpane.html's own
-                // CSS for what .dt-chat-docked hides.
-                if (dtTextModePanelEl) dtTextModePanelEl.classList.add("dt-chat-docked");
-                dtStopTeaserPlaceholder();
-                if (queryInput) queryInput.placeholder = "Ask FormulaGPT anything…";
-                // New chat / chat history move down into the composer's own footer row, alongside
-                // the live selection readout — see #dtComposerToolbarSlot's own HTML comment.
-                if (dtComposerToolbarSlotEl && chatThreadNewBtnEl && chatThreadBtnEl) {
-                    if (chatThreadNewBtnEl.parentElement !== dtComposerToolbarSlotEl) dtComposerToolbarSlotEl.appendChild(chatThreadNewBtnEl);
-                    if (chatThreadBtnEl.parentElement !== dtComposerToolbarSlotEl) dtComposerToolbarSlotEl.appendChild(chatThreadBtnEl);
-                }
-                // The Excel Table Outline entry point is a Formula-Picker-adjacent affordance — out
-                // of place once the view is showing a live conversation instead.
-                if (dtExcelOutlineCardEl) dtExcelOutlineCardEl.style.display = "none";
-                // The teaser's own mini history popover no longer has anything to anchor to once its
-                // trigger hides (see the .dt-chat-docked CSS rule) — closeTeaserHistoryMenu is
-                // declared further down this closure, same forward-reference pattern as
-                // dtStopTeaserPlaceholder/dtFnUpdateFormulaPreview elsewhere in this file: safe since
-                // dockChatPanel itself is only ever CALLED later, well after this whole block
-                // finishes its one synchronous init pass.
-                closeTeaserHistoryMenu();
+                // composer is doing the job.
                 return true;
             };
             // "Backgrounds" the chat — hides it WITHOUT touching its thread/history/any in-flight
             // turn (mirrors closePanel's own display-only toggle in setupAskClaudeChat, confirmed
-            // safe to do independently of it), and restores the normal Table Builder view.
+            // safe to do independently of it), moves the teaser back to its main-page slot, and
+            // returns to the main wizard page.
             const undockChatPanel = () => {
                 const bridge = window.__goiaChatBridge;
                 if (bridge && bridge.panelEl) { bridge.panelEl.style.display = "none"; bridge.panelEl.classList.remove("dt-docked"); }
                 if (dtChatDockEl) dtChatDockEl.style.display = "none";
-                dtChatIsDocked = false;
-                updateFormulaCollapse();
-                if (dtOpenChatIconEl) dtOpenChatIconEl.innerHTML = DT_OPEN_CHAT_ICON_MESSAGE;
-                if (dtOpenChatLabelEl) dtOpenChatLabelEl.textContent = "FormulaGPT";
-                if (dtTextModePanelEl) dtTextModePanelEl.classList.remove("dt-chat-docked");
-                dtRunTeaserPlaceholder();
-                // Re-collapse the teaser if Formula Picker still has a metric selected — a user
-                // who manually re-expanded it just to open the chat (see
-                // #dtTeaserCollapsedBar's own click handler) shouldn't come BACK from that chat to
-                // find the full teaser eating Formula Picker's space again.
-                if (recollapseFormulaGptIfBusy) recollapseFormulaGptIfBusy();
-                // Restore New chat / chat history to their normal home in .chat-docked-toolbar, so
-                // the standalone DataGPT view (which never calls dockChatPanel) always finds them
-                // where it expects them.
-                if (chatToolbarActionsEl && chatThreadNewBtnEl && chatThreadBtnEl) {
-                    if (chatThreadNewBtnEl.parentElement !== chatToolbarActionsEl) chatToolbarActionsEl.appendChild(chatThreadNewBtnEl);
-                    if (chatThreadBtnEl.parentElement !== chatToolbarActionsEl) chatToolbarActionsEl.appendChild(chatThreadBtnEl);
+                if (dtTextModePanelEl) {
+                    dtTextModePanelEl.classList.remove("dt-chat-docked");
+                    if (dtWizardAiCardEl && dtTextModePanelEl.parentElement !== dtWizardAiCardEl) {
+                        dtWizardAiCardEl.insertBefore(dtTextModePanelEl, dtWizardAiCardEl.firstChild);
+                    }
                 }
-                if (dtExcelOutlineCardEl) dtExcelOutlineCardEl.style.display = "";
+                dtChatIsDocked = false;
+                showWizardPage("main");
             };
+            // #chatDockedCloseBtn is TableGPT's own Back button now — relabeled "← Back", shown in
+            // the same row as the thread title (see its own CSS/HTML comments) instead of a separate
+            // page header. No other back button for this page.
             const chatDockedCloseBtnEl = document.getElementById("chatDockedCloseBtn");
             if (chatDockedCloseBtnEl) chatDockedCloseBtnEl.addEventListener("click", () => undockChatPanel());
-            // Focusing the composer is ONE way to open the full chat without sending anything, same
-            // as clicking a chat app's own input does. A harmless no-op if already docked
-            // (dockChatPanel just re-confirms the thread context in that case).
-            if (queryInput) {
-                queryInput.addEventListener("focus", () => {
-                    if (!dtChatIsDocked && !dockChatPanel()) showDtStatus("err", "Chat isn't available right now.");
-                });
-            }
-            // The icon/title/description block above the composer is ALSO clickable — opens the
-            // chat the same way, without requiring the user to type or focus the input first. A
-            // div+role="button" (not a real <button> — it contains one, #dtTeaserHistoryBtn, which
-            // a button can't nest), so Enter/Space are wired by hand to match real button semantics.
+            // The open-area (icon/title/desc) inside the teaser — clicking it opens TableGPT the
+            // same way focusing/typing the composer or clicking Send already does (all three call
+            // dockChatPanel). A div+role="button" (not a real <button>), so Enter/Space are wired by
+            // hand to match real button semantics.
             const dtTeaserOpenAreaEl = document.getElementById("dtTeaserOpenArea");
             if (dtTeaserOpenAreaEl) {
-                const openFormulaGptTeaser = () => {
+                const openFormulaGptPage = () => {
                     if (!dockChatPanel()) { showDtStatus("err", "Chat isn't available right now."); return; }
                     if (queryInput) queryInput.focus();
                 };
-                dtTeaserOpenAreaEl.addEventListener("click", openFormulaGptTeaser);
+                dtTeaserOpenAreaEl.addEventListener("click", openFormulaGptPage);
                 dtTeaserOpenAreaEl.addEventListener("keydown", (e) => {
-                    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openFormulaGptTeaser(); }
+                    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openFormulaGptPage(); }
                 });
             }
-            // Top-right corner of that same block — a MINIATURE thread-history popover, opened right
-            // from this icon rather than the full side-panel drawer, and browsable before the chat
-            // is even docked (picking a thread docks it as part of switching). Reuses the real
-            // thread store via window.__goiaChatBridge's listThreads/switchToThread/createNewThread
-            // (see taskpane.js's own __goiaChatBridge definition) — no second thread list of its own.
-            const dtTeaserHistoryBtnEl = document.getElementById("dtTeaserHistoryBtn");
-            const dtTeaserHistoryMenuEl = document.getElementById("dtTeaserHistoryMenu");
-            let dtTeaserHistoryOpen = false;
-            // Grows UPWARD from the button's own top-right corner, not downward — the teaser sits
-            // near the BOTTOM of the view (just above the Excel Table Outline card), so a
-            // fixed-height popover growing down routinely ran past the bottom of a short task-pane
-            // window. `bottom` (not `top`) anchors it there; its own max-height is computed fresh on
-            // every open from the room actually available ABOVE the button, same
-            // compute-available-space approach positionQueryHintPreview already uses for the same
-            // kind of clipping risk. position:fixed (not absolute) for the same reason
-            // #dtQueryHintPreview is — .fb-box's own overflow:hidden would otherwise clip this past
-            // the box's edge regardless of direction.
-            const DT_TEASER_HISTORY_IDEAL_HEIGHT = 260;
-            const DT_TEASER_HISTORY_MARGIN = 8; // breathing room kept clear above the very top of the window
-            const positionTeaserHistoryMenu = () => {
-                if (!dtTeaserHistoryBtnEl || !dtTeaserHistoryMenuEl) return;
-                const r = dtTeaserHistoryBtnEl.getBoundingClientRect();
-                const width = dtTeaserHistoryMenuEl.offsetWidth || 230;
-                const availableAbove = r.top - DT_TEASER_HISTORY_MARGIN;
-                dtTeaserHistoryMenuEl.style.maxHeight = `${Math.max(80, Math.min(DT_TEASER_HISTORY_IDEAL_HEIGHT, availableAbove))}px`;
-                dtTeaserHistoryMenuEl.style.bottom = `${window.innerHeight - r.top + 4}px`;
-                dtTeaserHistoryMenuEl.style.left = `${Math.max(4, Math.min(r.right - width, window.innerWidth - width - 4))}px`;
-            };
-            const closeTeaserHistoryMenu = () => {
-                if (!dtTeaserHistoryMenuEl) return;
-                // Inline override, not just removing the open class — positionTeaserHistoryMenu sets
-                // a fresh max-height on every open (see its own comment), so this has to explicitly
-                // collapse that same inline value back to 0 for the close transition to animate
-                // correctly, the same way closeQueryHintPreviewNow does for #dtQueryHintPreview.
-                dtTeaserHistoryMenuEl.classList.remove("dt-teaser-history-menu-open");
-                dtTeaserHistoryMenuEl.style.maxHeight = "0";
-                if (dtTeaserHistoryBtnEl) dtTeaserHistoryBtnEl.setAttribute("aria-expanded", "false");
-                dtTeaserHistoryOpen = false;
-            };
-            const renderTeaserHistoryMenu = () => {
-                if (!dtTeaserHistoryMenuEl) return;
-                const bridge = window.__goiaChatBridge;
-                const threads = (bridge && bridge.listThreads) ? bridge.listThreads() : [];
-                const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-                const rows = threads.length
-                    ? threads.map((t) => `
-                        <div class="dt-teaser-history-item${t.active ? " active" : ""}" data-thread-id="${esc(t.id)}">
-                            <span class="dt-teaser-history-item-title">${esc(t.title)}</span>
-                            <span class="dt-teaser-history-item-meta">${esc(t.updatedAtLabel)}</span>
-                        </div>
-                    `).join("")
-                    : `<div class="dt-teaser-history-empty">No conversations yet</div>`;
-                dtTeaserHistoryMenuEl.innerHTML = `<div class="dt-teaser-history-new" id="dtTeaserHistoryNew">+ New chat</div>${rows}`;
-            };
-            const openTeaserHistoryMenu = () => {
-                if (!dtTeaserHistoryMenuEl) return;
-                renderTeaserHistoryMenu();
-                dtTeaserHistoryMenuEl.style.display = "block";
-                positionTeaserHistoryMenu();
-                // Reflow before adding the open class, so the max-height transition actually
-                // animates from 0 instead of jumping straight to its open value.
-                void dtTeaserHistoryMenuEl.offsetHeight;
-                dtTeaserHistoryMenuEl.classList.add("dt-teaser-history-menu-open");
-                if (dtTeaserHistoryBtnEl) dtTeaserHistoryBtnEl.setAttribute("aria-expanded", "true");
-                dtTeaserHistoryOpen = true;
-            };
-            if (dtTeaserHistoryBtnEl && dtTeaserHistoryMenuEl) {
-                // stopPropagation so this never also fires the open-area's own click underneath it.
-                dtTeaserHistoryBtnEl.addEventListener("click", (e) => {
-                    e.stopPropagation();
-                    if (dtTeaserHistoryOpen) closeTeaserHistoryMenu(); else openTeaserHistoryMenu();
+            // Focusing/typing the composer ALSO opens the page immediately (by request) — same
+            // dockChatPanel call, just a different trigger. Harmless to call repeatedly: dockChatPanel
+            // itself guards every reparent with a parentElement check.
+            if (queryInput) queryInput.addEventListener("focus", () => dockChatPanel());
+            // Clicking ANYWHERE in the teaser container — not just the open-area or the composer's
+            // own input/send — opens the page too (by request). #dtTextModePanel's own padding
+            // around those two sub-elements wasn't covered by either one's own click target before
+            // this. Guarded to only fire while still in its main-page slot (#dtWizardAiCard): once
+            // reparented onto the full TableGPT page, clicks inside it (e.g. into a different
+            // field, or a reparented New-chat/history button) should behave normally, not keep
+            // re-stealing focus back to the query input.
+            if (dtTextModePanelEl) {
+                dtTextModePanelEl.addEventListener("click", () => {
+                    if (dtWizardAiCardEl && dtTextModePanelEl.parentElement !== dtWizardAiCardEl) return;
+                    if (!dockChatPanel()) { showDtStatus("err", "Chat isn't available right now."); return; }
+                    if (queryInput) queryInput.focus();
                 });
-                dtTeaserHistoryMenuEl.addEventListener("click", (e) => {
-                    e.stopPropagation();
-                    const isNew = !!e.target.closest("#dtTeaserHistoryNew");
-                    const item = isNew ? null : e.target.closest(".dt-teaser-history-item[data-thread-id]");
-                    if (!isNew && !item) return;
-                    closeTeaserHistoryMenu();
-                    // Dock FIRST — docking is what sets the chat engine's active CONTEXT to
-                    // "tablebuilder" (via bridge.openThreadForContext, inside dockChatPanel), and
-                    // createNewThread/switchToThread below both act on whatever context is
-                    // CURRENTLY active. Calling them before docking would tag a fresh thread (or
-                    // validate a switch) against whatever context was last active instead — e.g.
-                    // the standalone DataGPT panel's "main" — defeating the whole point of keeping
-                    // FormulaGPT's and DataGPT's threads separate.
-                    if (!dtChatIsDocked) dockChatPanel();
-                    const bridge = window.__goiaChatBridge;
-                    if (isNew) {
-                        if (bridge && bridge.createNewThread) bridge.createNewThread();
-                    } else if (bridge && bridge.switchToThread) {
-                        bridge.switchToThread(item.dataset.threadId);
+            }
+            const dtSkeletonBackBtnEl = document.getElementById("dtSkeletonBackBtn");
+            if (dtSkeletonBackBtnEl) dtSkeletonBackBtnEl.addEventListener("click", () => showWizardPage("main"));
+            // The REAL Formula Picker form lives on the main page, inside #dtWizardFormulaCard, by
+            // request — its own progressive disclosure already shows just the metric field until a
+            // pick is made, which IS the "teaser" shape naturally, no separate static row needed.
+            // Focusing the metric field reparents the WHOLE #dtFormulaModePanel node into
+            // #dtWizardFormulaPickerCard and navigates there; the page's own Back button moves it
+            // right back, state (any metric/company/period already picked) untouched either way.
+            const dtWizardFormulaCardEl = document.getElementById("dtWizardFormulaCard");
+            const dtWizardFormulaPickerCardEl = document.getElementById("dtWizardFormulaPickerCard");
+            // Assigned further down (inside the picker's own init block, once its fields exist) —
+            // the Back button below calls this so a formula already inserted doesn't linger on the
+            // main page's teaser view; declared here (outer scope) since the picker's own consts
+            // are block-scoped to that later `if`, invisible to this earlier listener otherwise.
+            let dtFnResetFormulaPicker = null;
+            const openFormulaPickerPage = () => {
+                if (dtFormulaModePanelEl && dtWizardFormulaPickerCardEl && dtFormulaModePanelEl.parentElement !== dtWizardFormulaPickerCardEl) {
+                    dtWizardFormulaPickerCardEl.appendChild(dtFormulaModePanelEl);
+                }
+                showWizardPage("formulapicker");
+            };
+            // Clicking ANYWHERE in the main-page slot (its own padding, the title/desc text, not
+            // just the metric input itself) opens the page too (by request). Attached to the SLOT
+            // (#dtWizardFormulaCard), not to #dtFormulaModePanel itself, so this can never fire once
+            // the panel's been reparented onto the full page — that slot sits empty from then on,
+            // so there's nothing left here to click.
+            if (dtWizardFormulaCardEl) {
+                dtWizardFormulaCardEl.addEventListener("click", () => {
+                    openFormulaPickerPage();
+                    const metricInput = document.getElementById("fnMetricInput");
+                    if (metricInput) metricInput.focus();
+                });
+            }
+            const dtFormulaPickerBackBtnEl = document.getElementById("dtFormulaPickerBackBtn");
+            if (dtFormulaPickerBackBtnEl) {
+                dtFormulaPickerBackBtnEl.addEventListener("click", () => {
+                    if (dtFormulaModePanelEl && dtWizardFormulaCardEl && dtFormulaModePanelEl.parentElement !== dtWizardFormulaCardEl) {
+                        dtWizardFormulaCardEl.appendChild(dtFormulaModePanelEl);
                     }
-                });
-                document.addEventListener("click", (e) => {
-                    if (!dtTeaserHistoryOpen) return;
-                    if (dtTeaserHistoryBtnEl.contains(e.target) || dtTeaserHistoryMenuEl.contains(e.target)) return;
-                    closeTeaserHistoryMenu();
-                });
-                window.addEventListener("resize", () => { if (dtTeaserHistoryOpen) positionTeaserHistoryMenu(); });
-            }
-            const dtOpenChatBtnEl = document.getElementById("dtOpenChatBtn");
-            if (dtOpenChatBtnEl) {
-                // Toggle: backgrounded -> dock (shows "Open Chat"); already docked -> undock (shows
-                // "Formula Picker" right up until the click, since the icon/label already reflect
-                // whichever state is CURRENT, not the state a click would produce).
-                dtOpenChatBtnEl.addEventListener("click", () => {
-                    if (dtChatIsDocked) { undockChatPanel(); return; }
-                    if (!dockChatPanel()) showDtStatus("err", "Chat isn't available right now.");
+                    // Back always returns the teaser to its initial, nothing-picked shape — a
+                    // metric/company left filled in from a formula already inserted isn't a draft
+                    // worth resuming, it's just stale state the main page shouldn't show.
+                    if (dtFnResetFormulaPicker) dtFnResetFormulaPicker();
+                    showWizardPage("main");
                 });
             }
             // Live "Cell X selected" / "Cell range X selected" readout — same wording/element
@@ -2721,73 +2614,20 @@ function applyRibbonView() {
                         : `<li class="fn-suggest-empty">No matching metric</li>`;
                     dtFnMetricListEl.style.display = "block";
                 };
-                // Persistent "compact bar" collapse (see #dtTeaserCollapsedBar's own HTML comment) —
-                // a DIFFERENT, still-visible state from the metric-list's own temporary full-hide
-                // below: this one kicks in once a metric is actually picked (Formula Picker's own
-                // Company/Period/Formula fields just grew), and stays collapsed until the user
-                // manually clicks the bar, not just whenever the list happens to close again.
-                let dtTeaserCompactActive = false;
-                // Sticks once the user has manually re-expanded, so picking a DIFFERENT metric
-                // afterward doesn't yank the teaser shut on them again — only clearing back to no
-                // metric (see dtFnOnMetricChange's own empty branch) resets this, so the next fresh
-                // pick still auto-collapses.
-                let dtTeaserManuallyExpanded = false;
-                const dtTeaserCollapsedBarEl = document.getElementById("dtTeaserCollapsedBar");
-                const setTeaserCompact = (compact) => {
-                    dtTeaserCompactActive = compact;
-                    if (dtTextModePanelEl) dtTextModePanelEl.classList.toggle("dt-teaser-compact", compact);
-                    if (dtTeaserCollapsedBarEl) dtTeaserCollapsedBarEl.setAttribute("aria-expanded", compact ? "false" : "true");
-                    if (dtExcelOutlineCardEl) dtExcelOutlineCardEl.classList.toggle("dt-excel-collapsed", compact || dtMetricListOpenForExpand);
-                };
-                if (dtTeaserCollapsedBarEl) {
-                    dtTeaserCollapsedBarEl.addEventListener("click", () => {
-                        dtTeaserManuallyExpanded = true;
-                        setTeaserCompact(false);
-                    });
-                }
-                // See recollapseFormulaGptIfBusy's own declaration (near dockChatPanel) for why this
-                // assignment exists and who calls it. A metric is still selected -> the room
-                // constraint that triggered the FIRST auto-collapse is still in effect, so BOTH
-                // returning from a docked chat AND the user clicking back into Formula Picker's own
-                // fields clear the manual-expand flag and re-collapse, the same as a fresh pick
-                // would — "manually expanded" was only ever a means to glance at/open FormulaGPT,
-                // not a standing preference to keep displacing Formula Picker's own fields.
-                recollapseFormulaGptIfBusy = () => {
-                    if (dtFnSelectedMetric && !dtTeaserCompactActive) {
-                        dtTeaserManuallyExpanded = false;
-                        setTeaserCompact(true);
-                    }
-                };
-                // The ONE auto-collapse rule, shared by every trigger — a metric just picked
-                // (below) and a grid-skeleton preview just becoming ready (computeSkeletonPreview,
-                // via triggerFormulaGptAutoCollapse) both call this same function rather than each
-                // having their own copy of the "already compact, or user already expanded it by
-                // hand" guard.
-                const maybeAutoCollapseTeaser = () => {
-                    if (!dtTeaserCompactActive && !dtTeaserManuallyExpanded) setTeaserCompact(true);
-                };
-                triggerFormulaGptAutoCollapse = maybeAutoCollapseTeaser;
-                // While the metric list is open, FULLY collapse the FormulaGPT teaser and Excel Table
-                // Outline card below it — Formula Picker is already flex:1, so shrinking its
-                // siblings to nothing hands their space over to it, giving the ~700-item list more
-                // room to drop before #dtFormulaModePanel's own overflow:hidden would otherwise clip
-                // it. Restored the instant the list closes (a pick, an outside click, or Escape) —
-                // independent of (and layered UNDER) the teaser's own persistent compact-bar state
-                // above: #dtTextModePanel's own opacity/max-height collapse here hides everything
-                // inside it regardless of which of its children (full teaser or the compact bar)
-                // would otherwise be showing.
-                let dtMetricListOpenForExpand = false;
-                const setMetricPickerExpanded = (expanded) => {
-                    dtMetricListOpenForExpand = expanded;
-                    if (dtTextModePanelEl) dtTextModePanelEl.classList.toggle("dt-teaser-collapsed", expanded);
-                    if (dtExcelOutlineCardEl) dtExcelOutlineCardEl.classList.toggle("dt-excel-collapsed", expanded || dtTeaserCompactActive);
-                };
+                // The teaser compact-bar / metric-list-expand collapse mechanics that used to live
+                // here (setTeaserCompact, maybeAutoCollapseTeaser, setMetricPickerExpanded,
+                // recollapseFormulaGptIfBusy, triggerFormulaGptAutoCollapse) are gone — they all
+                // existed to hand space between TableGPT/Excel Outline/Formula Picker while they
+                // shared one page; now each is its own full page (see showWizardPage), so there's no
+                // space to hand over any more. Removed in full, not just the cross-panel parts, since
+                // every remaining caller of them was ALSO part of that same now-removed mechanism.
+                //
                 // Focusing (click OR tab-in) opens the list showing whatever's already typed —
                 // empty on first use, so this is the "browse all ~700" entry point; re-focusing
                 // after a metric is already chosen shows just that one name filtered down to
                 // itself, scrolled into view, rather than dumping the full list again.
                 dtFnMetricInputEl.addEventListener("focus", () => {
-                    setMetricPickerExpanded(true);
+                    openFormulaPickerPage(); // navigates to #dtWizardFormulaPickerPage — see its own declaration
                     dtFnRenderMetricList(dtFnMetricInputEl.value);
                     const activeEl = dtFnMetricListEl.querySelector(".fn-suggest-item.active");
                     if (activeEl) activeEl.scrollIntoView({ block: "nearest" });
@@ -2799,7 +2639,6 @@ function applyRibbonView() {
                     dtFnSelectedMetric = item.dataset.metric;
                     dtFnMetricInputEl.value = dtFnSelectedMetric;
                     dtFnMetricListEl.style.display = "none";
-                    setMetricPickerExpanded(false);
                     dtFnOnMetricChange();
                 });
                 // Same outside-click-closes convention the company suggestion list already uses
@@ -2810,11 +2649,10 @@ function applyRibbonView() {
                 document.addEventListener("click", (e) => {
                     if (dtFnMetricInputEl.contains(e.target) || dtFnMetricListEl.contains(e.target)) return;
                     dtFnMetricListEl.style.display = "none";
-                    setMetricPickerExpanded(false);
                     if (dtFnMetricInputEl.value !== dtFnSelectedMetric) dtFnMetricInputEl.value = dtFnSelectedMetric;
                 });
                 dtFnMetricInputEl.addEventListener("keydown", (e) => {
-                    if (e.key === "Escape") { dtFnMetricListEl.style.display = "none"; setMetricPickerExpanded(false); dtFnMetricInputEl.blur(); return; }
+                    if (e.key === "Escape") { dtFnMetricListEl.style.display = "none"; dtFnMetricInputEl.blur(); return; }
                     // Enter picks the first (closest) match currently showing — the same shortcut
                     // the company search box's own suggestion list doesn't need (it only ever
                     // shows a handful of server-ranked matches, clicking is already quick there),
@@ -2891,9 +2729,6 @@ function applyRibbonView() {
                         dtFnPeriodFieldEl.style.display = "none";
                         dtFnInsertBtn.style.display = "none";
                         dtFnUpdateFormulaPreview();
-                        // A fresh pick later should auto-collapse the teaser again — see
-                        // setTeaserCompact's own comment on why this flag only resets here.
-                        dtTeaserManuallyExpanded = false;
                         return;
                     }
                     const entry = (METRIC_REGISTRY.metrics || []).find((m) => m.name === metric);
@@ -2909,11 +2744,6 @@ function applyRibbonView() {
                     // A newer pick could have resolved out of order while this await was in flight —
                     // bail if the selection no longer agrees with what this call started for.
                     if (dtFnSelectedMetric !== metric) return;
-                    // Formula Picker just grew its own Company/Period/Formula fields — hand the
-                    // teaser's space over by default (once), unless the user has already manually
-                    // expanded it back out this "session" (see maybeAutoCollapseTeaser's own
-                    // comment).
-                    maybeAutoCollapseTeaser();
                     dtFnEntityFieldEl.style.display = "";
                     dtFnEntityLabelEl.textContent = entityType;
                     const isCompanyEntity = entityType === "Company";
@@ -3112,6 +2942,24 @@ function applyRibbonView() {
                 let dtFnStatusRevertTimer = null;
                 const dtFnClearStatusRevertTimer = () => {
                     if (dtFnStatusRevertTimer) { clearTimeout(dtFnStatusRevertTimer); dtFnStatusRevertTimer = null; }
+                };
+
+                // Wired to the outer-scope hook the Formula Picker page's Back button calls (see
+                // its own declaration/listener above) — clears everything Insert leaves behind
+                // (metric stays picked by design while still on the page, for repeat inserts) so
+                // leaving the page always lands back on the plain, nothing-picked metric field.
+                dtFnResetFormulaPicker = () => {
+                    dtFnClearStatusRevertTimer();
+                    dtFnMetricListEl.style.display = "none";
+                    dtFnSelectedMetric = "";
+                    dtFnMetricInputEl.value = "";
+                    dtFnCompanyInput.value = "";
+                    dtFnClearCompanyCellRef();
+                    dtFnRenderCompanySuggestions([]);
+                    dtFnSetArmedPick(null);
+                    dtFnStatusEl.style.display = "none";
+                    dtFnInsertBtn.style.display = "";
+                    dtFnOnMetricChange();
                 };
 
                 dtFnInsertBtn.addEventListener("click", async () => {
@@ -4710,10 +4558,11 @@ function applyRibbonView() {
             // match targets, already loaded at Table Builder startup — zero network cost for the
             // common "spelled it right" case). Only on a miss does this fall back to one
             // /goindiastock/company_search call (the SAME endpoint the Formula picker's own company
-            // autocomplete already trusts directly as a GIA.GET() companyName argument), taking its
-            // top result. A name that matches neither comes back in `unresolved` — callers decline
-            // the whole request rather than silently building formulas around a name that can never
-            // match anything.
+            // autocomplete already trusts directly as a GIA.GET() companyName argument), picking its
+            // best result via pickBestCompanyMatch rather than blindly taking data[0] — see that
+            // function's own comment for why the API's top result can't be trusted as-is. A name
+            // that matches neither comes back in `unresolved` — callers decline the whole request
+            // rather than silently building formulas around a name that can never match anything.
             const resolvePlanCompanies = async (companies) => {
                 const resolved = [];
                 const unresolved = [];
@@ -4726,7 +4575,8 @@ function applyRibbonView() {
                             body: JSON.stringify({ searchtxt: name }),
                         });
                         const data = await res.json();
-                        const top = (data?.data || []).map((d) => d.label).filter(Boolean)[0];
+                        const labels = (data?.data || []).map((d) => d.label).filter(Boolean);
+                        const top = pickBestCompanyMatch(labels, name);
                         if (top) resolved.push(top); else unresolved.push(name);
                     } catch (e) {
                         console.warn(`[QueryData] company search failed for "${name}":`, e.message);
@@ -5283,8 +5133,7 @@ function applyRibbonView() {
                 skeletonPreviewTextEl.textContent = text;
                 skeletonPreviewEl.style.display = "flex";
             };
-            // The actual mini TABLE preview — replaces Formula (collapsed via updateFormulaCollapse,
-            // skeletonTablePreviewActive) rather than the plain text box above, once a grid resolves
+            // The actual mini TABLE preview — replaces the plain text box above, once a grid resolves
             // cleanly enough for buildFormulaGrid/buildFormulaGridPivoted to produce real
             // columns/rows. Reuses those two builders verbatim (same shape that will actually get
             // WRITTEN — collapsed single-company column, pivoted layout, etc.) rather than a second,
@@ -5369,8 +5218,6 @@ function applyRibbonView() {
                 skeletonPreviewResult = null;
                 skeletonPreviewAddress = null;
                 setInsertReady(false);
-                skeletonTablePreviewActive = false;
-                updateFormulaCollapse();
                 renderSkeletonPreviewTable(null);
                 renderSkeletonPreview("loading", "Reading your selection…");
                 let result = null;
@@ -5395,13 +5242,6 @@ function applyRibbonView() {
                 if (grid) {
                     renderSkeletonPreview(null); // the table itself replaces this text box
                     renderSkeletonPreviewTable(grid);
-                    skeletonTablePreviewActive = true;
-                    updateFormulaCollapse();
-                    // Same room-handover FormulaGPT already gives Formula Picker once a metric is
-                    // picked — a resolved skeleton preview takes over Formula's own vacated space
-                    // exactly the same way, so it hands the teaser's space over too. See
-                    // triggerFormulaGptAutoCollapse's own declaration for why this is a hook.
-                    if (triggerFormulaGptAutoCollapse) triggerFormulaGptAutoCollapse();
                 } else {
                     // Resolved, but not into a shape buildFormulaGrid can build (e.g. a ranking/
                     // aggregate request) — no table to show, fall back to the plain-text summary.
@@ -5419,8 +5259,6 @@ function applyRibbonView() {
                 skeletonPreviewAddress = null;
                 renderSkeletonPreview(null);
                 renderSkeletonPreviewTable(null);
-                skeletonTablePreviewActive = false;
-                updateFormulaCollapse();
                 setInsertReady(false);
                 // Download itself is the one shared submit button for both modes — only the hint
                 // next to it toggles, since "or select headers" doesn't make sense once a selection
@@ -5529,6 +5367,11 @@ function applyRibbonView() {
                     queryHint.style.display = "none";
                     closeQueryHintPreviewNow(); // no dangling-open popover once its own trigger is hidden
                     updateInputModeDimming();
+                    // Auto-navigate to the Skeleton page the moment a qualifying selection is made —
+                    // by request, but only FROM the main page: the user is actively on TableGPT or
+                    // Formula Picker, a selection they make there for some other reason (e.g. picking
+                    // a cell for Formula Picker's own armed fields) shouldn't yank them away from it.
+                    if (currentWizardPage === "main") showWizardPage("skeleton");
                     // Fire-and-forget — this poll tick doesn't wait on it (tryGridSkeletonFastPath can
                     // take a real network/LLM round trip), it just kicks the preview off and moves on;
                     // the result lands via renderSkeletonPreview/setInsertReady whenever it resolves.
@@ -13294,11 +13137,11 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
     const MAX_THREADS = 30; // each thread already self-bounds its own size (40 clipped messages, memory capped at MEM_MAX_BYTES) — this caps how many of THOSE can accumulate
     const CHAT_THREADS_MAX_BYTES = 1500000; // generous relative to one thread's own ~100-150KB ceiling; only ever binds if someone genuinely accumulates dozens of heavily-used threads
     const newThreadId = () => `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
-    // "main" (the standalone DataGPT panel) vs "tablebuilder" (FormulaGPT, docked in Table
+    // "main" (the standalone DataGPT panel) vs "tablebuilder" (TableGPT, docked in Table
     // Builder) — see openThreadForContext's own comment further down for the full picture. Default
     // here is "main" since that's the ONLY context that existed before this field did; every
     // pre-existing thread (and anything sanitizeThread can't otherwise place) stays visible to
-    // DataGPT rather than silently vanishing, while FormulaGPT simply starts with none of its own.
+    // DataGPT rather than silently vanishing, while TableGPT simply starts with none of its own.
     const emptyThread = () => ({
         id: newThreadId(), title: "New chat", titleGenerated: false,
         createdAt: Date.now(), updatedAt: Date.now(),
@@ -13384,7 +13227,7 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
     let threadsStore = loadThreadsStore();
     const getActiveThread = () => threadsStore.threads.find(t => t.id === threadsStore.activeThreadId) || threadsStore.threads[0];
     // Which context is CURRENTLY driving this engine — "main" (the standalone DataGPT panel) or
-    // "tablebuilder" (FormulaGPT, docked inside Table Builder). Set by openThreadForContext, which
+    // "tablebuilder" (TableGPT, docked inside Table Builder). Set by openThreadForContext, which
     // every entry point into either surface already calls first. Everything that lists, creates or
     // switches threads filters through threadsForContext below, so the two surfaces never see or
     // land on each other's conversations — only the underlying localStorage store (and the one
@@ -17739,7 +17582,7 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
             // The deterministic create-path narrates the user's own request HERE instead of going
             // through send() (see generateBtn's own click handler: anything that doesn't classify
             // as "modify" never calls send() at all) — send() is where the auto-rename trigger
-            // normally lives, so without this, a FormulaGPT thread that only ever took that path
+            // normally lives, so without this, a TableGPT thread that only ever took that path
             // (the common case — most typed requests there are table-building, not edits) stayed
             // "New chat" forever no matter how many messages went through it. Same fire-and-forget,
             // retry-until-it-succeeds behavior as send()'s own trigger — see its own comment.
