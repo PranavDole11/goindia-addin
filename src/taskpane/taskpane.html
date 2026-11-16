@@ -1166,7 +1166,14 @@
                                             <span class="fb-panel-title-icon" aria-hidden="true">f</span>
                                             <span class="fb-panel-title">Formula Picker</span>
                                         </div>
-                                        <p class="fb-panel-desc">Build your table using company, metric, period and a formula.</p>
+                                        <!-- The one-line description ("Build your table using company,
+                                             metric, period and a formula.") was removed by request —
+                                             the name "Formula Picker" (shown right above, and again on
+                                             the full page's own header once this panel is reparented
+                                             there) is already intuitive enough, and the line's own
+                                             vertical space was part of why the Insert button below
+                                             could clip past the bottom of the visible area once the
+                                             live formula preview appeared. -->
                                         <!-- Metric comes FIRST and is the only field visible until something
                                              is picked — everything below depends on it: table-entity-map.json
                                              (fetched via getEntityTypeForTable in taskpane.js) says what kind
@@ -1880,7 +1887,25 @@
                        is already the main-page-only slot (the full page uses the separate
                        #dtWizardFormulaPickerCard), so no extra scoping needed here. */
                     #dtWizardFormulaCard:hover { background: #f0f5ff; }
-                    #dtFormulaModePanel { display: flex; flex-direction: column; }
+                    /* Gap/padding trimmed from .fb-body's own defaults (14px gap, 16px all round) —
+                       scoped to this panel specifically, not the shared .fb-body class other views
+                       (Feedback, Download Data) also use, since this is the one with an Insert
+                       button that can clip out of reach below (see the scroll fix further down). */
+                    #dtFormulaModePanel { display: flex; flex-direction: column; gap: 10px; padding: 12px 16px; }
+                    #dtFormulaModePanel .fb-field { gap: 4px; }
+                    /* Scoped to the full page only (#dtWizardFormulaPickerCard) — on the main-page
+                       teaser slot (#dtWizardFormulaCard) this panel stays content-sized like every
+                       other teaser; only once reparented onto its own full page does it need to
+                       become the SCROLLING region, so the card's own header (Back + title) stays
+                       pinned above it instead of scrolling away too — same pattern
+                       #dtSkeletonPreviewPane already uses on the Skeleton page. Without this, once
+                       company/period are filled in and the live formula preview appears, the panel
+                       could grow past whatever height .fb-box's own overflow:hidden actually allows
+                       here, clipping Insert out of reach with no way to scroll to it — reported
+                       live ("the insert formula button clipping out of bounds... unable to click
+                       it"). */
+                    #dtWizardFormulaPickerCard { flex: 1; min-height: 0; }
+                    #dtWizardFormulaPickerCard #dtFormulaModePanel { flex: 1; min-height: 0; overflow-y: auto; }
                     /* Where DataGPT's real #chatPanel gets reparented into — see dockChatPanel in
                        taskpane.js. flex:1 so it fills #dtWizardFormulaGptPage above the composer;
                        #chatPanel's own position:fixed is overridden back to a plain FLAT in-flow
