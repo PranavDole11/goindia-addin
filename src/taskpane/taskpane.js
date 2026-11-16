@@ -954,12 +954,33 @@ const gapiHeaders = (extra) => ({ "Authorization": `Bearer ${GOINDIASTOCKS_API_T
 // Ltd. - DVR Ordinary" and "Tata Motors Passenger Vehicles Ltd." don't end in a bare corporate
 // suffix at all (something else follows it), so they're untouched by the strip and never match.
 const stripCorporateSuffix = (s) => (s || "").trim().replace(/\s+(ltd\.?|limited)\.?$/i, "").trim().toLowerCase();
+// A separately-listed variant of an otherwise-identified company — a DVR/Partly Paid/Preference
+// share class, a warrant, etc. — is always stored as "<plain name> - <qualifier>", never folded
+// into the plain listing's own exact-match text above. Reported live, twice, same shape: a plain
+// "Tata Motors Ltd." request resolved to fincode 217889 ("Tata Motors Ltd. - DVR Ordinary")
+// instead of the plain listing (322918) the user meant — whether that specific failure went
+// through THIS function's list[0] fallback (if the exact-match tier above didn't fire for some
+// reason) or through one of the other two places a company name gets matched by LIKE in this file
+// (buildDeterministicQuery's own companyFilter, the freeform SQL-writer's prompt) isn't confirmed
+// per-occurrence, but the fix belongs here too on its own merits: unlike "reliance"/"adani", this
+// isn't a case with no principled right answer — a bare company name, with no qualifier of its
+// own, never means a dash-qualified variant of it, so list[0] should never be allowed to land on
+// one when an unqualified candidate exists.
+const hasDashQualifier = (s) => /\s-\s/.test(String(s || ""));
 const pickBestCompanyMatch = (candidates, queryText, getLabel = (c) => c) => {
     const list = candidates || [];
     if (!list.length) return undefined;
     const target = stripCorporateSuffix(queryText);
     const exact = target && list.find((c) => stripCorporateSuffix(getLabel(c)) === target);
-    return exact || list[0];
+    if (exact) return exact;
+    // Only applies when the user's OWN query doesn't ask for a qualified variant itself — prefer
+    // the plain candidate over the API's own ranking, but only among candidates that exist; if
+    // every candidate carries a qualifier, this changes nothing and list[0] stands.
+    if (!hasDashQualifier(queryText)) {
+        const plain = list.find((c) => !hasDashQualifier(getLabel(c)));
+        if (plain) return plain;
+    }
+    return list[0];
 };
 
 const WALLET_BASE_URL = "https://api.goindiastocks.com/wallet";
@@ -1015,15 +1036,22 @@ const DOWNLOADTABLE_FALLBACK_SQL_MODEL = "anthropic/claude-haiku-5.5";
 // adds its own network round trip (send input, wait, receive) on top of the model's own thinking
 // time, and cutting that whole round trip out end to end outweighs jev's own per-call speed edge.
 const DOWNLOADTABLE_PLAN_MODEL = "anthropic/claude-haiku-5.5";
-// Intent triage for the typed query box — see classifyQueryDataIntent below. Deliberately the
-// cheapest model on the roster, not DOWNLOADTABLE_PLAN_MODEL: a 3-way classification needs none of
-// the schema-grounded judgment the actual plan extraction does, so paying for a stronger model here
-// buys nothing. "typesafe/jev-1.14" (OpenRouter's zero-generated-token Decisions API) was the other
-// option raised for this — not used because it is a DIFFERENT API shape from callQueryDataLLM's
-// plain chat-completion call (see the design note above this comment for why that split was already
-// removed once from this file), and re-adding a second integration just for one lightweight
-// classification isn't worth it when qwen already does the job through the existing path.
-const QD_INTENT_CLASSIFIER_MODEL = "qwen/qwen-2.5-7b-instruct";
+// Intent triage for the typed query box — see classifyQueryDataIntent below. A 3-way
+// classification needs none of the schema-grounded judgment the actual plan extraction does, so
+// this was deliberately the cheapest model on the roster rather than DOWNLOADTABLE_PLAN_MODEL.
+// That was "qwen/qwen-2.5-7b-instruct" until OpenRouter DELISTED it ("no longer available on
+// OpenRouter: no provider serves this model anymore", HTTP 404 — confirmed live by replaying this
+// exact call). Because callQueryDataLLM throws on a non-ok response and classifyQueryDataIntent
+// catches everything and falls back to "download", that delisting silently routed EVERY typed
+// request into the brand-new-table builder — including plain "modify this table" asks, which that
+// path can only decline ("no company or metric named"), never hand to the Excel tool loop that
+// could actually service them. Nothing surfaced but a console.warn, so it read as "TableGPT forgot
+// how to edit tables". Moved onto the same model the rest of this feature's calls already use:
+// known-available (it is exercised on every single Download), and at ~$0.00004 per triage the cost
+// argument for a separate cheaper model never justified a second availability risk.
+// NOTE: a model slug going dead is not hypothetical — re-check this one first if the symptom ever
+// comes back.
+const QD_INTENT_CLASSIFIER_MODEL = "anthropic/claude-haiku-5.5";
 // Every written table reserves exactly this many rows above its header for title metadata (see
 // writeDownloadedTableToSheet and the preview-grid builder further down) — a fixed, predictable
 // offset so a future "find this table's tag from wherever the user clicked" step can just walk up
@@ -2279,6 +2307,13 @@ function applyRibbonView() {
             if (dtExcelSeeHowEl) {
                 dtExcelSeeHowEl.addEventListener("click", (e) => { e.stopPropagation(); openExcelOutlineModal(); });
             }
+            // Same trigger, reachable from INSIDE the Skeleton page itself (#dtWizardSkeletonPage)
+            // now too — no stopPropagation needed here, this one isn't layered over a bigger
+            // clickable row the way the main-page card's own copy is.
+            const dtSkeletonSeeHowEl = document.getElementById("dtSkeletonSeeHow");
+            if (dtSkeletonSeeHowEl) {
+                dtSkeletonSeeHowEl.addEventListener("click", openExcelOutlineModal);
+            }
             if (dtExcelModalCloseEl) dtExcelModalCloseEl.addEventListener("click", closeExcelOutlineModal);
             if (dtExcelModalBackdropEl) dtExcelModalBackdropEl.addEventListener("click", (e) => { if (e.target === dtExcelModalBackdropEl) closeExcelOutlineModal(); });
             document.addEventListener("keydown", (e) => {
@@ -3238,10 +3273,16 @@ function applyRibbonView() {
                     // was spent reasoning before any output was written (confirmed live, on an
                     // earlier model used here) — a distinct, more actionable failure than "wrote
                     // bad JSON".
-                    if (choice?.finish_reason === "length") {
-                        throw new Error("The AI ran out of space thinking before it could answer — please try again or simplify the request.");
-                    }
-                    throw new Error("The AI's response wasn't valid JSON — please try again.");
+                    const err = choice?.finish_reason === "length"
+                        ? new Error("The AI ran out of space thinking before it could answer — please try again or simplify the request.")
+                        : new Error("The AI's response wasn't valid JSON — please try again.");
+                    // Raw text survives on the thrown error so a caller whose own fallback (on
+                    // catch) would otherwise silently pick the "safe" default can still scan it for
+                    // an unambiguous answer instead — see classifyQueryDataIntent's own catch, which
+                    // was defaulting to "download" even when the model's (truncated/malformed) reply
+                    // clearly started with {"intent":"modify".
+                    err.rawContent = content;
+                    throw err;
                 }
                 return parsed;
             };
@@ -3736,6 +3777,24 @@ function applyRibbonView() {
                     + "join/filter everywhere else on that one resolved key — never match the name text directly "
                     + "in the main query's own JOIN/WHERE, which would silently mix in every matching variant's "
                     + "rows instead of just the canonical one.\n\n"
+                    + "A name LIKE can ALSO match a genuinely DIFFERENT real entity that just happens to share the "
+                    + "plain company name as a substring — a separate share class (DVR/Partly Paid/Preference "
+                    + "shares), a warrant, or a similarly-named subsidiary — which is its OWN distinct row with its "
+                    + "OWN fincode, not a mode duplicate the isdefault flag was ever meant to disambiguate (it can "
+                    + "carry isdefault = 'yes' on its own canonical row too, so that flag alone will NOT tell the "
+                    + "two apart). Reported live, more than once: 'Tata Motors Ltd' as LIKE '%Tata Motors Ltd%' AND "
+                    + "isdefault = 'yes', with no further tie-break, resolved to fincode 217889 ('Tata Motors Ltd. "
+                    + "- DVR Ordinary') instead of the plain listing the user meant (fincode 322918, 'Tata Motors "
+                    + "Ltd.') — the DVR line had no matching rows in the quarterly table being joined against, so "
+                    + "the ENTIRE query silently returned zero rows with no error. The general tell, not specific "
+                    + "to DVR: a real variant like this is always stored as \"<plain name> - <qualifier>\" — a "
+                    + "space, a hyphen, a space, then whatever the qualifier is. Unless the request's own company "
+                    + "name already has that shape itself (meaning a qualified variant is genuinely what was "
+                    + "asked for), exclude any stored name containing ' - ' from a positive name match (e.g. add "
+                    + "AND CompName NOT LIKE '% - %' alongside the LIKE), and when a TOP 1/scalar subquery resolves "
+                    + "the entity's key, add an explicit ORDER BY that prefers the plainest matching name (e.g. "
+                    + "ORDER BY LEN(CompName) ASC) rather than leaving the tie-break to whatever order the engine "
+                    + "happens to return rows in.\n\n"
                     + "When the result is about one or more specific companies, always include a company name "
                     + "column (e.g. CompName) in the SELECT list — not just fincode — so the output table itself "
                     + "shows which company each row belongs to, not only the title written above it.\n\n"
@@ -3767,9 +3826,20 @@ function applyRibbonView() {
                     + "\"explanation\": \"<empty string if sql is non-empty — don't waste effort narrating a "
                     + "query that worked; only if sql is empty, 1 sentence on why it's impossible>\"}";
                 const userPrompt = `TABLE SCHEMA(S):\n${schemaMarkdown}\n\nUSER REQUEST: ${userQuery}${shortlistHint || ""}`;
-                // Same reasoning-token headroom concern as Stage 1 above.
+                // Same reasoning-token headroom concern as Stage 1 above. 6000 used to be the
+                // budget here — replaying the REAL "Tata Motors revenue + provision growth" call
+                // that produced this file's own DVR-disambiguation guidance (see the company-name
+                // rule above) already used 5721/6000 completion tokens (4828 of them reasoning)
+                // BEFORE that guidance existed; adding it (3 extra WHERE clauses plus an ORDER BY,
+                // duplicated across this query's two separate company-resolution subqueries) pushed
+                // a replay of the same call to finish_reason="length" at 6000 even with the
+                // guidance text trimmed as tight as it would go — not a prompt-wording problem, a
+                // budget one. The same replay completed normally (finish_reason="stop") at 7936
+                // completion tokens once given more room. 12000 is comfortable headroom above that,
+                // not a tight fit to it — this model only ever bills for tokens it actually
+                // generates, so slack here costs nothing on a query that completes well under it.
                 const tLlm = performance.now();
-                const result = await callQueryDataLLM("Stage 2: SQL generation", systemPrompt, userPrompt, 6000, DOWNLOADTABLE_FALLBACK_SQL_MODEL);
+                const result = await callQueryDataLLM("Stage 2: SQL generation", systemPrompt, userPrompt, 12000, DOWNLOADTABLE_FALLBACK_SQL_MODEL);
                 console.log(`[QueryData timing]   Stage 2 LLM call (${DOWNLOADTABLE_FALLBACK_SQL_MODEL}), prompt ${userPrompt.length.toLocaleString()} chars: ${(performance.now() - tLlm).toFixed(0)}ms`);
                 return result;
             };
@@ -4029,12 +4099,32 @@ function applyRibbonView() {
                     + "acted on, in the same request.\n\n"
                     + "Return STRICT JSON, nothing else, no markdown fences: {\"intent\": \"download\"|\"modify\"|\"both\"}";
                 try {
-                    const result = await callQueryDataLLM("Intent triage", systemPrompt, userQuery, 30, QD_INTENT_CLASSIFIER_MODEL, "minimal");
+                    // 100, not the 30 this used to pass: the bare answer ({"intent":"modify"}) is
+                    // ~8 tokens, but a reasoning-capable model's hidden chain-of-thought is also
+                    // charged against max_tokens (see callQueryDataLLM's own finish_reason="length"
+                    // branch, which exists because that already bit this file once), and the model
+                    // here is now one of those. Headroom is free when the visible answer is this
+                    // short — nothing is gained by running the budget close.
+                    const result = await callQueryDataLLM("Intent triage", systemPrompt, userQuery, 100, QD_INTENT_CLASSIFIER_MODEL, "minimal");
                     const intent = result && result.intent;
                     return (intent === "modify" || intent === "both") ? intent : "download";
                 } catch (e) {
+                    // Before giving up: callQueryDataLLM attaches the model's raw, unparsed text to
+                    // a JSON-failure error as `rawContent` — an unambiguous {"intent":"modify"} that
+                    // merely arrived wrapped in prose, or without its closing brace, is still a
+                    // usable answer and shouldn't be thrown away for the "safe" default.
+                    const m = e.rawContent && e.rawContent.match(/"intent"\s*:\s*"(modify|both)"/);
+                    if (m) {
+                        console.warn(`[QueryData] intent triage JSON was malformed but salvageable — using "${m[1]}" from the raw reply:`, e.message);
+                        return m[1];
+                    }
                     // Never let a classifier hiccup block the real feature — an unclassified request
-                    // just proceeds through Download exactly as it always has.
+                    // just proceeds through Download exactly as it always has. Worth knowing what
+                    // this costs when the failure is NOT a hiccup but something permanent: a dead
+                    // model slug took this branch on every single request for an unknown stretch,
+                    // and because the fallback is silent and plausible-looking, the only visible
+                    // symptom was Download declining perfectly reasonable edit requests. If this
+                    // line ever shows up repeatedly in the console, treat it as an outage, not noise.
                     console.warn("[QueryData] intent triage failed, proceeding as a download:", e.message);
                     return "download";
                 }
@@ -4431,8 +4521,21 @@ function applyRibbonView() {
 
                 // b.isdefault = 'yes' always applies (picks the one canonical row per company,
                 // named or not); the CompName filter is additional, only when companies were named.
+                // A LIKE match on a plain name can also catch a genuinely different, separately-
+                // listed entity that merely shares it as a prefix — a DVR/Partly Paid/Preference
+                // share class, a warrant — stored as "<name> - <qualifier>", with its own
+                // isdefault = 'yes' row, so that flag alone doesn't tell the two apart either
+                // (reported live: "Tata Motors Ltd." matching through to fincode 217889, "Tata
+                // Motors Ltd. - DVR Ordinary", instead of the plain listing at 322918). Unless the
+                // resolved company name ITSELF names a qualifier (resolvePlanCompanies — see
+                // pickBestCompanyMatch's own comment — already prefers the plain listing when one
+                // of these two is ambiguous, so `c` carrying one here means that's genuinely what
+                // was asked for), exclude any stored name that has one.
                 const companyFilter = companies.length
-                    ? `(${companies.map((c) => `b.CompName LIKE '%${escapeSqlLiteral(c)}%'`).join(" OR ")}) AND b.isdefault = 'yes'`
+                    ? `(${companies.map((c) => {
+                          const like = `b.CompName LIKE '%${escapeSqlLiteral(c)}%'`;
+                          return hasDashQualifier(c) ? like : `(${like} AND b.CompName NOT LIKE '% - %')`;
+                      }).join(" OR ")}) AND b.isdefault = 'yes'`
                     : "b.isdefault = 'yes'";
 
                 const selectParts = ["b.CompName"];
@@ -4898,6 +5001,25 @@ function applyRibbonView() {
                 const sql = `SELECT * FROM (\n${bodies.join("\nUNION ALL\n")}\n) q\n`
                     + `ORDER BY q.CompName, ${fyExpr} DESC, ${qExpr} DESC`;
                 const describeValue = (v) => (v.quarter ? `Q${v.quarter} FY${String(v.fiscalYear).slice(-2)}` : `FY${String(v.fiscalYear).slice(-2)}`);
+                // companies/metrics/period, so a caller can ALSO build a live-formula grid instead of
+                // only ever falling back to this literal-value SQL (which is what happened before
+                // these three were added here — generateBtn's own `Array.isArray(result.metrics)`
+                // formula-grid gate, and buildFormulaGrid itself, both silently require them, so a
+                // mixed annual+quarterly skeleton always produced a hardcoded-value table, or — once
+                // the typed-in-Excel skeleton's own Insert handler hit buildFormulaGrid returning
+                // null for the very same missing-fields reason — an outright blank/failed table).
+                // One FLAT metrics list works for every row regardless of which grain its own period
+                // happens to be: `display` (not a pinned table/column) is the same simple form the
+                // Formula Picker itself writes, and GIA.GET() re-resolves the real table/column from
+                // the metric name + that row's own period text at Excel-eval time — so the same
+                // formula is correct whether its row's period is annual or quarterly. literalNull
+                // only for a metric with no registry slot at EITHER grain (truly no data to show).
+                const metrics = (plan.metrics || []).map((m) => {
+                    if (!m || !m.column) return m;
+                    const entry = qdRegistryByKey.get(normalizeMetricKey(m.column));
+                    if (!entry) return { ...m };
+                    return (entry.annual || entry.quarterly) ? { display: entry.name } : { literalNull: true, display: entry.name };
+                });
                 return {
                     sql,
                     title: built[0].title,
@@ -4906,6 +5028,9 @@ function applyRibbonView() {
                     // Deliberately null: there are two anchors here, one per half, so there is no
                     // single period format a caller could re-derive a literal against.
                     anchorTable: null,
+                    companies: plan.companies,
+                    metrics,
+                    period: { mode: "years", values }, // the FULL mixed list, both grains — expandPeriodToList's "years" branch reads values directly, ignoring anchorIsQuarterly
                     // The UNION of both halves' real tables — not necessarily the same set the
                     // caller walked in with (a mixed-grain rebuild can bring in a table that wasn't
                     // joined before, e.g. a table that was previously annual-only now also needing
@@ -4983,6 +5108,25 @@ function applyRibbonView() {
                     result = buildDeterministicQuery(plan, metaByTable);
                 } catch (e) {
                     console.warn("[QueryData] deterministic query attempt failed, falling back to LLM-written SQL:", e.message);
+                }
+                // A request naming BOTH an annual period and a quarterly one in the same breath
+                // ("…for the past 3 years and the past 3 quarters as well") extracts as period.mode
+                // "years" with a mixed values list — exactly what buildDeterministicQuery's own
+                // "every period table must share one grain" guard always declines (see its comment)
+                // and what standardizePlanMetrics can't fix either, since it pins every metric to
+                // ONE grain's table from a single hint. Same retry tryGridSkeletonFastPath already
+                // has for the identical shape coming from a hand-drawn sheet selection — without it,
+                // this always fell straight to the freeform-LLM SQL fallback below, which has no
+                // metrics/companies/period shape for generateBtn's own formula-grid gate to use, so
+                // the table it wrote was always a hardcoded-value snapshot, never live formulas.
+                if (!result && plan.period && plan.period.mode === "years" && Array.isArray(plan.period.values)
+                    && plan.period.values.some((v) => v && v.quarter) && plan.period.values.some((v) => v && !v.quarter)) {
+                    try {
+                        result = await buildGrainAwareQuery(plan, plan.period.values);
+                        if (result && Array.isArray(result.tables)) tables = result.tables;
+                    } catch (e) {
+                        console.warn("[QueryData] mixed annual+quarterly grain-aware build failed:", e.message);
+                    }
                 }
                 if (!result) {
                     if (onProgress) onProgress("Writing the SQL query…");
@@ -5178,36 +5322,98 @@ function applyRibbonView() {
                 const gridAnchor = cachedGridSelectionAnchor;
                 if (dtSkeletonInsertBtn) dtSkeletonInsertBtn.disabled = true;
                 if (dtSkeletonInsertStatusEl) dtSkeletonInsertStatusEl.style.display = "none";
+                // This path had no observable trace at all before — reported live: a table got
+                // written with every value cell blank, with no way for either side to see the SQL
+                // that produced it or whether the backend actually returned any rows. currentTrace
+                // was already reset for this exact selection back in computeSkeletonPreview (the
+                // call that actually ran tryGridSkeletonFastPath); `outcome` here is appended to
+                // that same trace at save time below, same shape generateBtn's own click handler
+                // already logs for the typed-text path.
+                let outcome = "(ended before any outcome was recorded)";
                 try {
-                    // Clear the user's FULL original skeleton rectangle first — same reasoning as
-                    // generateBtn's own comment on this exact call: a skeleton drawn wider than
-                    // the table that actually gets written would otherwise leave unused header
-                    // cells behind.
-                    if (gridAnchor.rows && gridAnchor.cols) {
-                        await clearTableBlock(gridAnchor.sheetName, gridAnchor.row - 1, gridAnchor.col - 1, gridAnchor.rows, gridAnchor.cols);
-                    }
+                    // Build the live-formula grid FIRST, BEFORE touching the sheet at all. This
+                    // used to clear the user's full typed skeleton first and build the grid only
+                    // afterward — reported live: a layout buildFormulaGrid[Pivoted] can't express
+                    // (one metric summed across quarters into an annual figure while another is
+                    // annual-only with its quarterly cell deliberately left blank — the same shape
+                    // computeSkeletonPreview's own "resolved, but not into a shape buildFormulaGrid
+                    // can build" branch already shows a plain-text summary for instead of a formula
+                    // preview, which is the tell that THIS build was always going to decline too)
+                    // threw after the clear had already run, leaving the sheet blank with nothing
+                    // written in its place. Build (and, on the fallback below, fetch) the
+                    // replacement before clearing anything, so a failure at either step leaves the
+                    // user's original skeleton untouched.
                     const grid = result.pivotSpec
                         ? buildFormulaGridPivoted(result, result.pivotSpec, gridAnchor)
                         : buildFormulaGrid(result, gridAnchor);
-                    if (!grid) throw new Error("Couldn't build formulas for this layout.");
-                    const singleCompanyInfo = grid.singleCompanyName ? { companyName: grid.singleCompanyName } : null;
+                    if (grid) {
+                        if (gridAnchor.rows && gridAnchor.cols) {
+                            await clearTableBlock(gridAnchor.sheetName, gridAnchor.row - 1, gridAnchor.col - 1, gridAnchor.rows, gridAnchor.cols);
+                        }
+                        const singleCompanyInfo = grid.singleCompanyName ? { companyName: grid.singleCompanyName } : null;
+                        const metaRows = QD_TABLE_META_ROWS + (singleCompanyInfo ? 1 : 0);
+                        const neededRows = grid.rows.length + 1 + metaRows; // +1 header
+                        const sheetName = await writeDownloadedTableToSheet(grid, gridAnchor, singleCompanyInfo, true);
+                        const whereText = `"${sheetName}" at ${blockAddress(gridAnchor.row, gridAnchor.col, neededRows, grid.columns.length)} (overwrote the table you selected)`;
+                        const msg = `Wrote ${grid.rows.length} live formula row${grid.rows.length === 1 ? "" : "s"} to ${whereText}.`;
+                        outcome = `FORMULA TABLE — ${msg}\n(SQL would have been:\n${result.sql})`;
+                        if (dtSkeletonInsertStatusEl) {
+                            dtSkeletonInsertStatusEl.className = "fb-status ok";
+                            dtSkeletonInsertStatusEl.textContent = msg;
+                            dtSkeletonInsertStatusEl.style.display = "block";
+                        }
+                        return;
+                    }
+                    // buildFormulaGrid[Pivoted] declined — same fallback generateBtn's own click
+                    // handler already has for this exact case (see its own comment there), missing
+                    // here until now: run the SQL that's already been generated and write the
+                    // literal values it returns instead of giving up outright.
+                    if (!result.sql) throw new Error("Couldn't build a table for this layout.");
+                    outcome = `SQL generated:\n${result.sql}\n\nExplanation: ${result.explanation || "(none given)"}\nTables used: ${(result.tables_used || []).join(", ") || "(none)"}`;
+                    let data = await runGeneratedSql(result.sql, cachedGridQueryText, (cachedGridQueryText || "").slice(0, 31), result.tables_used, result.title, result.description);
+                    if (result.pivotSpec) data = pivotQueryResultByPeriodColumns(data, result.pivotSpec);
+                    data.title = result.title || (cachedGridQueryText || "").slice(0, 60);
+                    const singleCompanyInfo = detectSingleCompanyColumn(data);
                     const metaRows = QD_TABLE_META_ROWS + (singleCompanyInfo ? 1 : 0);
-                    const neededRows = grid.rows.length + 1 + metaRows; // +1 header
-                    const sheetName = await writeDownloadedTableToSheet(grid, gridAnchor, singleCompanyInfo, true);
-                    const whereText = `"${sheetName}" at ${blockAddress(gridAnchor.row, gridAnchor.col, neededRows, grid.columns.length)} (overwrote the table you selected)`;
+                    const neededRows = (data.rows?.length || 0) + 1 + metaRows; // +1 header
+                    const neededCols = Math.max(singleCompanyInfo ? 2 : 1, (data.columns?.length || 1) - (singleCompanyInfo ? 1 : 0));
+                    if (gridAnchor.rows && gridAnchor.cols) {
+                        await clearTableBlock(gridAnchor.sheetName, gridAnchor.row - 1, gridAnchor.col - 1, gridAnchor.rows, gridAnchor.cols);
+                    }
+                    const sheetName = await writeDownloadedTableToSheet(data, gridAnchor, singleCompanyInfo);
+                    const whereText = `"${sheetName}" at ${blockAddress(gridAnchor.row, gridAnchor.col, neededRows, neededCols)} (overwrote the table you selected)`;
+                    const msg = `Wrote ${data.row_count.toLocaleString()} row${data.row_count === 1 ? "" : "s"} to ${whereText}.`;
+                    // Confirmed only AFTER this write: a table whose cells are all blank still
+                    // reports a non-zero row_count (the backend returned that many rows, each full
+                    // of nulls) — row_count alone can't tell "the table is actually blank" apart
+                    // from "the table is actually full", which is exactly the gap that made that
+                    // report impossible to diagnose from the status line alone. Recorded in the
+                    // trace so the next one is: how many of the fetched rows' own cells came back
+                    // null, out of how many data cells total (header/meta rows excluded).
+                    const totalDataCells = (data.rows || []).reduce((n, r) => n + r.length, 0);
+                    const blankDataCells = (data.rows || []).reduce((n, r) => n + r.filter((v) => v === null || v === undefined || v === "").length, 0);
+                    outcome += `\n\nEXECUTION: success — ${data.row_count} row(s) written to ${whereText}. ${blankDataCells}/${totalDataCells} returned data cell(s) were null/blank.`;
                     if (dtSkeletonInsertStatusEl) {
-                        dtSkeletonInsertStatusEl.className = "fb-status ok";
-                        dtSkeletonInsertStatusEl.textContent = `Wrote ${grid.rows.length} live formula row${grid.rows.length === 1 ? "" : "s"} to ${whereText}.`;
+                        dtSkeletonInsertStatusEl.className = blankDataCells > 0 && blankDataCells === totalDataCells ? "fb-status err" : "fb-status ok";
+                        dtSkeletonInsertStatusEl.textContent = blankDataCells > 0 && blankDataCells === totalDataCells
+                            ? `Wrote the table to ${whereText}, but every value came back blank from the query — the SQL ran, it just didn't match the data you expected. Check the console's [QueryData trace] for the generated SQL.`
+                            : msg;
                         dtSkeletonInsertStatusEl.style.display = "block";
                     }
                 } catch (e) {
                     console.warn("[QueryData] skeleton insert failed:", e.message);
+                    outcome = `ERROR: ${e.message}`;
                     if (dtSkeletonInsertStatusEl) {
                         dtSkeletonInsertStatusEl.className = "fb-status err";
                         dtSkeletonInsertStatusEl.textContent = e.message || "Couldn't insert the formulas — please try again.";
                         dtSkeletonInsertStatusEl.style.display = "block";
                     }
                 } finally {
+                    // See computeSkeletonPreview's own comment on currentTrace — this path had NO
+                    // way to inspect the generated SQL/LLM calls before this. Labeled with
+                    // cachedGridQueryText (the skeleton's own synthesized description) since there's
+                    // no typed question here to use instead.
+                    if (currentTrace) saveQueryDataTrace(formatQueryDataTrace(cachedGridQueryText || "(skeleton insert)", currentTrace, outcome), cachedGridQueryText || "(skeleton insert)");
                     if (dtSkeletonInsertBtn) dtSkeletonInsertBtn.disabled = false;
                     exitGridQueryMode();
                 }
@@ -5220,12 +5426,34 @@ function applyRibbonView() {
                 setInsertReady(false);
                 renderSkeletonPreviewTable(null);
                 renderSkeletonPreview("loading", "Reading your selection…");
+                // Fresh trace for THIS selection, same spirit as generateSql's own reset — this is
+                // the one spot that actually calls tryGridSkeletonFastPath for a skeleton (Insert
+                // just reuses the cached skeletonPreviewResult, see insertSkeletonFormulaGrid),
+                // so it's the only place that can capture the LLM calls/SQL this layout produced.
+                // This whole path had NO tracing before — "the table came out blank" was reported
+                // with the generated SQL unobservable from either side; saveQueryDataTrace at
+                // Insert time (below) now has something real to write out.
+                currentTrace = [];
                 let result = null;
                 try {
                     result = await tryGridSkeletonFastPath(textRows, fallbackQueryText, () => {});
                 } catch (e) {
                     console.warn("[QueryData] skeleton preview failed:", e.message);
                 }
+                // This is the ONLY place that runs the skeleton's own LLM calls — Insert
+                // (insertSkeletonFormulaGrid) just reuses this cached result and makes no LLM call
+                // of its own, so this is also the only place real OpenRouter cost for this whole
+                // flow is ever incurred. It was never flushed from here at all: generateBtn's typed
+                // path is the one spot in the file that calls flushQueryDataCost, so every preview
+                // computed while dragging a selection around — Insert clicked afterward or not —
+                // left real cost sitting in the shared qdPendingCostUsd pool, un-deducted, to either
+                // be silently absorbed for good or get dumped onto some unrelated LATER typed
+                // question's bill whenever that next ran flushQueryDataCost. Flushed here,
+                // unconditionally, before the seq check below, so a superseded preview (the user
+                // moved on before this resolved) still gets billed for the call that already ran —
+                // same principle as generateBtn's own flush running in a `finally` regardless of
+                // outcome.
+                flushQueryDataCost(fallbackQueryText);
                 if (seq !== skeletonPreviewSeq) return; // a newer selection already superseded this
                 if (!result || !result.sql) {
                     renderSkeletonPreview("err", (result && result.explanation) || "Couldn't make sense of this layout yet — press Send to try the full request anyway.");
@@ -15068,22 +15296,66 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
     // gone stale, or any other failure, is handled the same way: the turn just runs without it,
     // never a blocked question over something this inherently best-effort.
     const CHAT_SELECTION_MAX_CELLS = 500; // generous for "the few rows/cols the user is actually looking at"; small enough to never meaningfully bloat the prompt
+    // How far to peek around a blank single-cell selection before giving up on it entirely — see
+    // the isBlankSingleCell branch below. Biased downward/rightward since this app's own tables
+    // are always written with their header at the TOP-LEFT of the block (see
+    // writeDownloadedTableToSheet et al.) — a blank cell is far more likely to be sitting just
+    // above/left of a table's corner (e.g. a blank A1 right before a header that starts at A1
+    // itself) than below/right of one.
+    const CHAT_SELECTION_NEIGHBORHOOD_UP = 3, CHAT_SELECTION_NEIGHBORHOOD_DOWN = 10,
+        CHAT_SELECTION_NEIGHBORHOOD_LEFT = 2, CHAT_SELECTION_NEIGHBORHOOD_RIGHT = 8;
     async function getCurrentSelectionContextSafe(timeoutMs = 3000) {
         const read = async () => {
             let out = null;
             await Excel.run(async (ctx) => {
                 const range = ctx.workbook.getSelectedRange();
-                range.load("address,values,rowCount,columnCount");
+                range.load("address,values,rowCount,columnCount,rowIndex,columnIndex");
                 const sheet = range.worksheet;
                 sheet.load("name");
                 await ctx.sync();
                 // A single blank cell is just the default resting state of a selection, not
                 // something the user pointed at on purpose the way a populated cell or any
                 // multi-cell range is — including it would add noise to every single turn asked
-                // with nothing deliberately selected, which is most of them.
+                // with nothing deliberately selected, which is most of them. BUT a blank cell can
+                // also be the user deliberately clicking right next to (or at the blank corner of)
+                // a real table — confirmed live: "for this table, replace FY23/24/22 with the
+                // latest 3 quarters" with a genuinely blank A1 selected got no selection context
+                // at all under the old all-or-nothing rule, so the model had nothing to resolve
+                // "this table" from and asked the user to list it out by hand instead of just
+                // looking at what's actually on the sheet near the click. Peeking at a small
+                // neighborhood first — rather than only the exact cell — tells the two cases apart
+                // instead of discarding both the same way.
                 const isBlankSingleCell = range.rowCount === 1 && range.columnCount === 1
                     && (range.values[0][0] === "" || range.values[0][0] == null);
-                if (isBlankSingleCell) return;
+                if (isBlankSingleCell) {
+                    try {
+                        // getOffsetRange throws outright for a negative row/column index (A1 is
+                        // the single most common place for this exact case to land on — a blank
+                        // top-left corner cell right before a table's own header — so this isn't
+                        // an edge case worth letting the catch below silently eat). Clamped to
+                        // what's actually above/left of the selection rather than the fixed
+                        // margin, rather than skipping the whole neighborhood lookup over it.
+                        const upMargin = Math.min(CHAT_SELECTION_NEIGHBORHOOD_UP, range.rowIndex);
+                        const leftMargin = Math.min(CHAT_SELECTION_NEIGHBORHOOD_LEFT, range.columnIndex);
+                        const shifted = range.getOffsetRange(-upMargin, -leftMargin);
+                        const neighborhood = shifted.getResizedRange(
+                            upMargin + CHAT_SELECTION_NEIGHBORHOOD_DOWN,
+                            leftMargin + CHAT_SELECTION_NEIGHBORHOOD_RIGHT
+                        );
+                        neighborhood.load("address,values,rowCount,columnCount");
+                        await ctx.sync();
+                        const hasContent = neighborhood.values.some((row) => row.some((v) => v !== "" && v != null));
+                        if (!hasContent) return; // genuinely empty nearby too — the resting-state case this skip was meant for
+                        const exactCell = range.address.includes("!") ? range.address.split("!").pop() : range.address;
+                        const address = `${chatQualifiedAddress(sheet.name, neighborhood.address)} (the exact selected cell, ${exactCell}, is itself blank — this is the area around it)`;
+                        const text = neighborhood.values.map((row) => row.map((v) => (v === "" || v == null ? "-" : v)).join("\t")).join("\n");
+                        out = { address, rows: neighborhood.rowCount, cols: neighborhood.columnCount, text };
+                    } catch (e) {
+                        // Expanding past the sheet's own edge (row/col 1, or its far bound) throws —
+                        // fall back to exactly the old behavior: nothing worth noting.
+                    }
+                    return;
+                }
                 const address = chatQualifiedAddress(sheet.name, range.address);
                 if (range.rowCount * range.columnCount > CHAT_SELECTION_MAX_CELLS) {
                     // Still worth naming WHERE and how big it is even when too large to dump in
@@ -16628,11 +16900,26 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
         // skipClarifierOnce suppresses asking again immediately after this message answers the
         // last clarification.
         const CLARIFIER_WB_CHARS = 6000; // compactText has no size cap of its own; bound what a cheap/minimal-effort model has to read
-        const runClarifier = async (wbPromise) => {
+        const CLARIFIER_SELECTION_CHARS = 1500; // the neighborhood read can be ~100 cells; same "bound what a cheap model reads" reasoning as the workbook cap
+        const runClarifier = async (wbPromise, selPromise) => {
             try {
                 const wb = await wbPromise;
                 const wbBlock = wb.compactText
                     ? `\n\n=== OPEN WORKBOOK (structure only — no values) ===\n${wb.compactText.slice(0, CLARIFIER_WB_CHARS)}\n=== END ===`
+                    : "";
+                // The clarifier used to be handed the workbook but deliberately NOT the selection,
+                // on the reasoning that it "only ever needs to resolve a company name". That was
+                // the whole bug: this gate ENDS the turn when it asks, so the main loop below —
+                // which does have the selection, and a long tableContextNote telling the model
+                // that "this table" means whatever surrounds it — never gets to run at all. With
+                // no idea anything was selected, "for this table, replace FY22/23/24 with the
+                // latest 3 quarters" looks unanswerable to this call, so it asked which of the
+                // workbook's tables was meant (confirmed live, twice) even though the user had
+                // clicked inside the very table they were describing. It needs the same signal the
+                // main loop gets, or it cannot judge that question at all.
+                const sel = selPromise ? await selPromise : null;
+                const selBlock = sel
+                    ? `\n\n=== CURRENT SELECTION — what the user has selected in the sheet RIGHT NOW ===\n${sel.address} (${sel.rows} row(s) x ${sel.cols} column(s))${sel.text ? `:\n${sel.text.slice(0, CLARIFIER_SELECTION_CHARS)}` : ""}\n=== END SELECTION ===`
                     : "";
                 const clarMessages = [
                     {
@@ -16644,12 +16931,20 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
                             `first — if that company is already in it, treat it as resolved; don't\n` +
                             `ask just because the bare name could also match some other, unrelated\n` +
                             `company elsewhere.\n\n` +
+                            `If there is a CURRENT SELECTION below, the user is POINTING at something\n` +
+                            `as they ask. "this table", "this data", "these numbers", "this sheet",\n` +
+                            `"this company" all refer to whatever that selection sits in or next to —\n` +
+                            `that is an ANSWER, not an ambiguity. Never ask which table, which sheet,\n` +
+                            `which range or which of the workbook's companies is meant when a\n` +
+                            `selection is present: the assistant that runs after you can read the\n` +
+                            `whole sheet around it and work that out for itself. Asking anyway just\n` +
+                            `makes the user type out what they already clicked on.\n\n` +
                             `Never ask about anything else — not a missing time period, not which\n` +
                             `data series/column/unit to use, not a metric's exact definition. Pick\n` +
                             `the most reasonable interpretation yourself and proceed. Never ask just\n` +
                             `to be safe.\n\n` +
                             `Reply with only this JSON: {"ask": true/false, "question": "...", "options": ["...", "..."]}` +
-                            wbBlock,
+                            wbBlock + selBlock,
                     },
                     ...history.slice(-4).map(m => ({ role: m.role, content: String(m.content ?? "").slice(0, 500) })),
                     { role: "user", content: q },
@@ -16673,7 +16968,26 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
                 const clarData = await clarRes.json();
                 const clarCost = Number(clarData.usage?.cost || 0);
                 const parsed = JSON.parse(clarData.choices?.[0]?.message?.content || "{}");
-                return { ask: parsed.ask === true, question: parsed.question, options: parsed.options, cost: clarCost };
+                let shouldAsk = parsed.ask === true;
+                // Backstop for the selection rule in the system prompt above. That rule alone is
+                // only ~2 times in 3: replaying this exact call (same question, same prior-turn
+                // history, selection included) returned ask:false, ask:true, ask:false across
+                // three runs — a reasoning model is not deterministic even at temperature 0, so
+                // one in three users still got told to pick a table they had already clicked on.
+                // A prompt cannot be made reliable by asking it more firmly, so the invariant is
+                // enforced in code instead: when the user is POINTING at something, a question
+                // about WHERE in the workbook to act is already answered, and the main loop below
+                // is strictly better equipped to work it out (it gets the selection, the
+                // neighborhood around it, and read_range to expand further).
+                // Deliberately keyed on workbook-location words — the clarifier's real job, a
+                // genuinely ambiguous real-world company NAME ("which Bajaj did you mean?"),
+                // names candidate companies and mentions no table/sheet/range, so it still gets
+                // through untouched (verified against both shapes).
+                if (shouldAsk && sel && /\b(table|sheet|range|workbook|cell)s?\b/i.test(String(parsed.question || ""))) {
+                    console.log(`[Chat] 🖱 clarifier asked a workbook-location question with a live selection (${sel.address}) — overriding to proceed: "${parsed.question}"`);
+                    shouldAsk = false;
+                }
+                return { ask: shouldAsk, question: parsed.question, options: parsed.options, cost: clarCost };
             } catch (e) {
                 return null;
             }
@@ -16693,10 +17007,12 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
         const wbPromise = getWorkbookSummarySafe();
         // Fired here too, alongside the workbook index, so it costs nothing extra: by the time the
         // main loop below is ready to build its system prompt, this has almost certainly already
-        // resolved. Never handed to the clarifier — that one only ever needs to resolve a company
-        // name, nothing about what's selected.
+        // resolved. Handed to the clarifier as well — see runClarifier's own comment: it ENDS the
+        // turn when it asks, so anything it can't see is something the main loop never gets a
+        // chance to reason about. Both are the same already-in-flight promise, awaited in two
+        // places, so this adds no second read and no extra latency.
         const selectionPromise = getCurrentSelectionContextSafe();
-        const clarifierPromise = skipClarifierOnce ? null : runClarifier(wbPromise);
+        const clarifierPromise = skipClarifierOnce ? null : runClarifier(wbPromise, selectionPromise);
 
         if (clarifierPromise) {
             const clarifierResult = await clarifierPromise;
@@ -17290,6 +17606,10 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
         if (!thread || (thread.context || "main") !== activeChatContext) return;
         activateThread(thread);
         saveThreadsStore(threadsStore); // persists the new activeThreadId so a reload reopens on the same thread
+        // Also keep THIS context's own "last used thread" (read by openThreadForContext, below) in
+        // sync — otherwise the next time something re-docks/re-focuses this surface, it would read
+        // the STALE remembered id and silently switch back to whatever was active before this pick.
+        try { localStorage.setItem(chatContextThreadKey(activeChatContext), thread.id); } catch (e) { /* best-effort */ }
         renderStreamFromHistory();
         renderThreadList();
     }
@@ -17300,6 +17620,10 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
         threadsStore.threads.push(t);
         activateThread(t);
         saveThreadsStore(threadsStore);
+        // Same reasoning as switchToThread's own persistence just above — without this, clicking
+        // "New chat" then clicking back into the composer (which re-runs openThreadForContext) read
+        // the OLD remembered thread id and reverted to it, undoing the new chat entirely.
+        try { localStorage.setItem(chatContextThreadKey(activeChatContext), t.id); } catch (e) { /* best-effort */ }
         renderStreamFromHistory();
         renderThreadList();
     }
@@ -17409,6 +17733,7 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
                     const next = threadsForContext(activeChatContext).sort((a, b) => b.updatedAt - a.updatedAt)[0];
                     if (next) {
                         activateThread(next);
+                        try { localStorage.setItem(chatContextThreadKey(activeChatContext), next.id); } catch (e) { /* best-effort */ }
                         renderStreamFromHistory();
                     } else {
                         createNewThread(); // persists + re-renders everything itself

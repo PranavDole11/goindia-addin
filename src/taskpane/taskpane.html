@@ -1054,7 +1054,15 @@
                                  themselves any more (no composer, no metric field) — clicking ANYWHERE
                                  on a row navigates to that method's own page. -->
                             <div id="dtWizardMainPage" class="dt-wizard-page">
-                                <div class="dt-wizard-group-label">Show or tell us what you need</div>
+                                <div class="dt-wizard-page-head">
+                                    <h3 class="dt-wizard-page-heading">Add data to your sheet</h3>
+                                    <p class="dt-wizard-page-subtext">Three ways to get the same result. Pick any one.</p>
+                                </div>
+
+                                <div class="dt-wizard-group-label-row">
+                                    <div class="dt-wizard-group-label">Show or tell us what you need</div>
+                                    <span class="dt-wizard-badge dt-wizard-badge-assisted">Assisted</span>
+                                </div>
                                 <div class="dt-wizard-card" id="dtWizardAiCard">
                                     <!-- The REAL TableGPT teaser (renamed from "TableGPT") —
                                          icon/title/desc (click opens), the live composer
@@ -1098,14 +1106,18 @@
                                         </div>
                                         <div class="fb-status" id="dtStatus" style="display:none;"></div>
                                     </div>
+                                </div>
 
-                                    <div class="dt-wizard-card-divider"></div>
-
-                                    <!-- Excel Table Outline entry — click anywhere on the row (except
-                                         "See how") navigates to #dtWizardSkeletonPage (see
-                                         dtExcelOutlineCardEl's own click handler in taskpane.js);
-                                         "See how" instead opens the explainer modal below, unchanged,
-                                         with stopPropagation so it doesn't also navigate. -->
+                                <!-- Excel Table Outline entry — its own separate container now (was
+                                     sharing #dtWizardAiCard's card with TableGPT above, split apart
+                                     by request). Click anywhere on the row (except "See how") navigates
+                                     to #dtWizardSkeletonPage (see dtExcelOutlineCardEl's own click
+                                     handler in taskpane.js); "See how" instead opens the explainer
+                                     modal (#dtExcelOutlineModalBackdrop — lives as a sibling of the
+                                     wizard pages near the end of #dtDownloadBody now, not nested in
+                                     here — see its own comment for why), with stopPropagation so it
+                                     doesn't also navigate. -->
+                                <div class="dt-wizard-card" id="dtWizardExcelCard">
                                     <div id="dtExcelOutlineCard">
                                         <span class="dt-excel-icon" aria-hidden="true">
                                             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"></rect><path d="M8 3v18M3 9h18M3 15h18"></path></svg>
@@ -1127,28 +1139,12 @@
                                         </span>
                                         <span class="dt-excel-chevron" id="dtExcelSeeHow">See how <span class="dt-excel-chevron-arrow" aria-hidden="true">&rarr;</span></span>
                                     </div>
-
-                                    <!-- Click/tap modal — its own independent lazy <video> (see
-                                         openExcelOutlineModal in taskpane.js). Stays a popup layered
-                                         over whichever page is showing, per request — not folded into
-                                         the new Skeleton page itself. -->
-                                    <div class="dt-excel-modal-backdrop" id="dtExcelOutlineModalBackdrop" style="display:none;">
-                                        <div class="dt-excel-modal" role="dialog" aria-modal="true" aria-labelledby="dtExcelModalTitle">
-                                            <div class="dt-excel-modal-head">
-                                                <span id="dtExcelModalTitle">Build from table outline</span>
-                                                <button type="button" class="dt-excel-modal-close" id="dtExcelOutlineModalClose" aria-label="Close">&times;</button>
-                                            </div>
-                                            <video id="dtExcelOutlineModalVideo" muted loop playsinline preload="none"></video>
-                                            <ul class="dt-excel-modal-steps">
-                                                <li><strong>Create a skeleton</strong> — company names, metric headers and periods in plain cells.</li>
-                                                <li><strong>Select</strong> the full range you just built.</li>
-                                                <li><strong>Click Download</strong> (the composer's send button) to fill it in.</li>
-                                            </ul>
-                                        </div>
-                                    </div>
                                 </div>
 
-                                <div class="dt-wizard-group-label">Build your formula</div>
+                                <div class="dt-wizard-group-label-row dt-wizard-group-label-row-spaced">
+                                    <div class="dt-wizard-group-label">Build your formula</div>
+                                    <span class="dt-wizard-badge dt-wizard-badge-manual">Manual</span>
+                                </div>
                                 <div class="dt-wizard-card" id="dtWizardFormulaCard">
                                     <!-- The REAL Formula Picker form lives HERE by request, not a
                                          static label row — its own progressive disclosure already
@@ -1320,6 +1316,13 @@
                             <div id="dtWizardSkeletonPage" class="dt-wizard-page" style="display:none;">
                                 <div class="dt-wizard-page-header">
                                     <button type="button" class="dt-wizard-back-btn" id="dtSkeletonBackBtn">&larr; Back</button>
+                                    <!-- Same "See how" trigger as the main-page card (#dtExcelSeeHow) —
+                                         a separate id since this is a second, independent element, but
+                                         both open the SAME shared modal (openExcelOutlineModal in
+                                         taskpane.js), so a user who navigated straight here (or just
+                                         wants a refresher without leaving the page) doesn't have to
+                                         go back to the main page to see the instructions again. -->
+                                    <span class="dt-excel-chevron" id="dtSkeletonSeeHow" style="margin-left:auto;">See how <span class="dt-excel-chevron-arrow" aria-hidden="true">&rarr;</span></span>
                                 </div>
                                 <p class="dt-wizard-page-hint">Build a skeleton in your sheet — company names, metric headers and periods — then select it. It'll show up here.</p>
                                 <div id="dtSkeletonPreviewPane">
@@ -1358,6 +1361,34 @@
                                         <button type="button" class="dt-wizard-back-btn" id="dtFormulaPickerBackBtn">&larr; Back</button>
                                         <span class="dt-wizard-page-title">Formula Picker</span>
                                     </div>
+                                </div>
+                            </div>
+
+                            <!-- Click/tap modal — its own independent lazy <video> (see
+                                 openExcelOutlineModal in taskpane.js). A sibling of all four wizard
+                                 pages (not nested inside any one of them, e.g. #dtWizardMainPage's
+                                 own #dtWizardExcelCard, where it used to live) — showWizardPage only
+                                 ever toggles display on the four #dtWizard*Page elements themselves,
+                                 so anything nested INSIDE one of them is display:none, and therefore
+                                 invisible regardless of its own style, whenever that page isn't the
+                                 active one. Reported live: opened fine from the main page's "See how"
+                                 (#dtExcelSeeHow, still inside #dtWizardMainPage) but did nothing
+                                 visible from the Skeleton page's own copy (#dtSkeletonSeeHow) for
+                                 exactly that reason. Living here instead, it now stays reachable (and
+                                 visible — it's position:fixed;inset:0 regardless of where in the DOM
+                                 it sits) no matter which wizard page is currently showing. -->
+                            <div class="dt-excel-modal-backdrop" id="dtExcelOutlineModalBackdrop" style="display:none;">
+                                <div class="dt-excel-modal" role="dialog" aria-modal="true" aria-labelledby="dtExcelModalTitle">
+                                    <div class="dt-excel-modal-head">
+                                        <span id="dtExcelModalTitle">Build from table outline</span>
+                                        <button type="button" class="dt-excel-modal-close" id="dtExcelOutlineModalClose" aria-label="Close">&times;</button>
+                                    </div>
+                                    <video id="dtExcelOutlineModalVideo" muted loop playsinline preload="none"></video>
+                                    <ul class="dt-excel-modal-steps">
+                                        <li><strong>Create a skeleton</strong> — company names, metric headers and periods in plain cells.</li>
+                                        <li><strong>Select</strong> the full range you just built.</li>
+                                        <li><strong>Click Download</strong> (the composer's send button) to fill it in.</li>
+                                    </ul>
                                 </div>
                             </div>
                         </div>
@@ -1747,7 +1778,7 @@
                        view in the earlier single-page design). New class, not .fb-box itself, since
                        that class is already overridden just above for the OUTER Data Wizard
                        shell. */
-                    .dt-wizard-page { flex: 1; display: flex; flex-direction: column; min-height: 0; padding-top: 10px; }
+                    .dt-wizard-page { flex: 1; display: flex; flex-direction: column; min-height: 0; padding-top: 6px; }
                     /* The chat window is flat now (no border/radius/shadow of its own — see
                        #chatPanel.dt-docked), so the usual page gutters (.dt-wizard-page's own
                        padding-top, #dtDownloadBody's own left/right padding) would just read as dead
@@ -1756,26 +1787,54 @@
                        flush with the window's true edges — and the background goes white (was the
                        view's own #f5f7fa grey) so there's no colour seam behind the chat either. */
                     #dtWizardFormulaGptPage { padding-top: 0; margin: 0 -10px; background: #fff; }
-                    .dt-wizard-group-label { margin: 0 16px 6px; font-size: 10px; font-weight: 700; color: #6b7686; }
-                    .dt-wizard-group-label:not(:first-child) { margin-top: 14px; }
+                    /* Page-level header ("Add data to your sheet") sitting above both group
+                       labels — new by request, same 16px side inset every row in this view
+                       already shares. */
+                    .dt-wizard-page-head { margin: 0 16px 10px; }
+                    .dt-wizard-page-heading { margin: 0 0 2px; font-size: 12.5px; font-weight: 700; color: #173760; }
+                    .dt-wizard-page-subtext { margin: 0; font-size: 10px; color: #6b7686; line-height: 1.35; }
+                    /* Group label + its "how to use this" badge on one row, spread to the card's
+                       own edges — the label keeps its own font/color, margin now lives on the row
+                       instead so the row (not just the text) controls the 16px side inset. */
+                    .dt-wizard-group-label-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0 16px 4px; }
+                    .dt-wizard-group-label-row .dt-wizard-group-label { margin: 0; }
+                    .dt-wizard-group-label-row-spaced { margin-top: 13px; }
+                    .dt-wizard-group-label { font-size: 10px; font-weight: 700; color: #6b7686; }
+                    .dt-wizard-badge { flex-shrink: 0; font-size: 9.5px; font-weight: 700; letter-spacing: 0.02em; padding: 3px 9px; border-radius: 999px; white-space: nowrap; }
+                    .dt-wizard-badge-assisted { background: #e3f6e8; color: #1a7a3d; }
+                    .dt-wizard-badge-manual { background: #efe8fb; color: #6b3fa0; }
                     /* No overflow:hidden (unlike .fb-box) — deliberately: Formula Picker's own
                        ~700-item metric dropdown (.fn-suggest-list, position:absolute) needs to drop
                        past this card's own bounds without being clipped. No child here paints a
                        background flush to the card's own edge, so the rounded corners stay clean
                        without it. */
-                    .dt-wizard-card { background: #fff; border: 1.5px solid #e6eaf0; border-radius: 12px; display: flex; flex-direction: column; min-height: 0; }
+                    .dt-wizard-card { background: #fff; border: 1.5px solid #e6eaf0; border-radius: 12px; display: flex; flex-direction: column; min-height: 0; transition: opacity .15s ease; }
+                    /* Gap between the TableGPT and Excel Outline cards now that they're split
+                       apart (used to be the removed .dt-wizard-card-divider's own margin). */
+                    .dt-wizard-card + .dt-wizard-card { margin-top: 6px; }
+                    /* Hovering any one of the three main-page entry cards dims the OTHER two —
+                       :has() on the shared #dtWizardMainPage ancestor is what lets this reach a
+                       card that comes BEFORE the hovered one too, which a plain ~ sibling
+                       combinator can't do (only selects siblings that come after). Each card is
+                       excluded from its own hovered rule by the trailing :not(:hover), so it never
+                       dims itself. */
+                    #dtWizardMainPage:has(#dtWizardAiCard:hover) .dt-wizard-card:not(:hover),
+                    #dtWizardMainPage:has(#dtWizardExcelCard:hover) .dt-wizard-card:not(:hover),
+                    #dtWizardMainPage:has(#dtWizardFormulaCard:hover) .dt-wizard-card:not(:hover) {
+                        opacity: 0.45;
+                    }
                     /* Content-sized on the main page (two static entry cards, nothing needs to
                        stretch) — only a sub-page's OWN content (e.g. #dtChatDock on the TableGPT
                        page) ever needs flex:1. */
                     #dtWizardMainPage .dt-wizard-card { flex: 0 0 auto; }
-                    /* Single rule between the TableGPT entry and the Excel Outline row below it on
-                       the main page. */
-                    /* Equal gap on both sides — TableGPT's and Excel Outline's own hover-highlight
-                       boxes both already include their own padding right up to their edges (see
-                       each one's own :hover rule), so this divider's own margin is the ONLY space
-                       between each highlight and the line; it needs to match on both sides or one
-                       reads as sitting closer to the divider than the other. */
-                    .dt-wizard-card-divider { border-top: 1px solid #e6eaf0; margin: 6px 16px; }
+                    /* The main page's three cards can add up to more height than the task pane
+                       has room for, and nothing here was scrollable — content below the fold was
+                       just unreachable. overflow-y:auto scoped to this one page only; the other
+                       three pages
+                       (#dtWizardFormulaGptPage/#dtWizardSkeletonPage/#dtWizardFormulaPickerPage)
+                       already manage their own internal scrolling lower down their own tree
+                       (#chatStream, #dtSkeletonPreviewPane) and don't need this on the page itself. */
+                    #dtWizardMainPage { overflow-y: auto; }
                     /* Back button + (optional) page label, shared by all three sub-pages. */
                     .dt-wizard-page-header { display: flex; align-items: center; gap: 10px; padding: 0 16px 10px; flex: 0 0 auto; }
                     /* Formula Picker's own header lives INSIDE #dtWizardFormulaPickerCard (first
@@ -1805,11 +1864,11 @@
                     }
                     .dt-wizard-back-btn:hover { color: #2f6fd0; }
                     .dt-wizard-page-hint { margin: 0 16px 10px; font-size: 10px; color: #6b7686; line-height: 1.4; }
-                    #dtTextModePanel { flex: 0 0 auto; padding: 6px 16px 14px; }
+                    #dtTextModePanel { flex: 0 0 auto; padding: 6px 16px 10px; }
                     /* Extra breathing room above the icon/title on the main-page teaser specifically
                        — the full TableGPT page's own top padding (zeroed, see
                        #dtWizardFormulaGptPage) is unrelated to this. */
-                    #dtWizardAiCard #dtTextModePanel { padding-top: 16px; }
+                    #dtWizardAiCard #dtTextModePanel { padding-top: 12px; }
                     /* Same hover highlight #dtExcelOutlineCard gives its own row, applied directly on
                        THIS container's existing bounds rather than an inset padded box of its own
                        like that card has — by request, no extra padding added just for this. Scoped
@@ -2148,10 +2207,10 @@
                        name (inside #dtChatDock's own toolbar) instead, so the icon/title/desc here
                        would just be repeated chrome. */
                     #dtTextModePanel.dt-chat-docked .dt-teaser-open-area { display: none; }
-                    .dt-teaser-head { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; }
+                    .dt-teaser-head { display: flex; align-items: center; gap: 6px; margin-bottom: 2px; }
                     .dt-teaser-icon { color: #2f6fd0; font-size: 14px; line-height: 1; }
                     .dt-teaser-title { font-size: 12.5px; font-weight: 700; color: #2f6fd0; }
-                    .dt-teaser-desc { font-size: 10px; color: #6b7686; margin: 0 0 8px; }
+                    .dt-teaser-desc { font-size: 10px; color: #6b7686; margin: 0 0 5px; }
                     /* No composer-specific color override here any more, in either the teaser or the
                        full page — .dt-composer-box/.dt-composer-send's own base rules (below) are
                        the original scheme for both, by request, rather than a blue TableGPT tint
@@ -2181,7 +2240,7 @@
                        and the box reaches all the way to the bottom of its own container. */
                     #dtExcelOutlineCard {
                         flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
-                        margin: 0; padding: 7px 16px 14px;
+                        margin: 0; padding: 5px 16px 10px;
                         border-radius: 10px;
                         cursor: pointer; transition: background-color .12s ease;
                     }
