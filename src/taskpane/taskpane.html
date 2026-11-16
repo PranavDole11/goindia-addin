@@ -1061,7 +1061,6 @@
 
                                 <div class="dt-wizard-group-label-row">
                                     <div class="dt-wizard-group-label">Show or tell us what you need</div>
-                                    <span class="dt-wizard-badge dt-wizard-badge-assisted">Assisted</span>
                                 </div>
                                 <div class="dt-wizard-card" id="dtWizardAiCard">
                                     <!-- The REAL TableGPT teaser (renamed from "TableGPT") —
@@ -1143,7 +1142,6 @@
 
                                 <div class="dt-wizard-group-label-row dt-wizard-group-label-row-spaced">
                                     <div class="dt-wizard-group-label">Build your formula</div>
-                                    <span class="dt-wizard-badge dt-wizard-badge-manual">Manual</span>
                                 </div>
                                 <div class="dt-wizard-card" id="dtWizardFormulaCard">
                                     <!-- The REAL Formula Picker form lives HERE by request, not a
@@ -1800,16 +1798,13 @@
                     .dt-wizard-page-head { margin: 0 16px 10px; }
                     .dt-wizard-page-heading { margin: 0 0 2px; font-size: 12.5px; font-weight: 700; color: #173760; }
                     .dt-wizard-page-subtext { margin: 0; font-size: 10px; color: #6b7686; line-height: 1.35; }
-                    /* Group label + its "how to use this" badge on one row, spread to the card's
-                       own edges — the label keeps its own font/color, margin now lives on the row
-                       instead so the row (not just the text) controls the 16px side inset. */
+                    /* Just the group label now (its own "Assisted"/"Manual" badge was removed by
+                       request) — still wrapped in its own row div rather than folded back into a
+                       bare label element, since that row is what carries the 16px side inset. */
                     .dt-wizard-group-label-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0 16px 4px; }
                     .dt-wizard-group-label-row .dt-wizard-group-label { margin: 0; }
                     .dt-wizard-group-label-row-spaced { margin-top: 13px; }
                     .dt-wizard-group-label { font-size: 10px; font-weight: 700; color: #6b7686; }
-                    .dt-wizard-badge { flex-shrink: 0; font-size: 9.5px; font-weight: 700; letter-spacing: 0.02em; padding: 3px 9px; border-radius: 999px; white-space: nowrap; }
-                    .dt-wizard-badge-assisted { background: #e3f6e8; color: #1a7a3d; }
-                    .dt-wizard-badge-manual { background: #efe8fb; color: #6b3fa0; }
                     /* No overflow:hidden (unlike .fb-box) — deliberately: Formula Picker's own
                        ~700-item metric dropdown (.fn-suggest-list, position:absolute) needs to drop
                        past this card's own bounds without being clipped. No child here paints a
