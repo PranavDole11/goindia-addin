@@ -4163,7 +4163,7 @@ function applyRibbonView() {
                     + "isn't a company at all and will fail to resolve downstream. Same idea either order: "
                     + "\"Reliance Industries Ltd's revenue\" and \"revenue for Reliance Industries Ltd\" both "
                     + "still name the same one company, with the same metric phrase stripped out.\n\n"
-                    + "The period has FOUR possible shapes — picking the right one matters, since \"range\" and "
+                    + "The period has FIVE possible shapes — picking the right one matters, since \"range\" and "
                     + "\"years\" are NOT interchangeable:\n"
                     + "- \"specific\": exactly ONE literal period named or impliable from context — fiscal_year "
                     + "(and quarter, 1-4, ONLY if quarterly-grained).\n"
@@ -4175,6 +4175,21 @@ function applyRibbonView() {
                     + "GRANULARITY (see \"granularity\" below), so \"the last 4 quarters\" is range_count 4 with "
                     + "granularity \"quarterly\" — never 4 with granularity \"annual\", and never translated "
                     + "into some number of years.\n"
+                    + "- \"dual_range\": the request names BOTH a relative annual window AND a relative "
+                    + "quarterly window TOGETHER, each with its own count — \"the last 5 years and the last 4 "
+                    + "quarters\", \"past 3 years as well as the last 2 quarters\". An ordinary \"range\" only "
+                    + "ever carries ONE count/granularity, so this compound shape needs its own mode: set "
+                    + "\"annual_range_count\" to the years count and \"quarterly_range_count\" to the quarters "
+                    + "count (both ints), and leave granularity null — it doesn't apply when both grains are "
+                    + "requested at once. Use \"dual_range\" ONLY when the request actually names two separate "
+                    + "counts for two different grains in the same breath; an ordinary \"last N years\" or "
+                    + "\"last N quarters\" alone is always plain \"range\", never \"dual_range\". This does NOT "
+                    + "change how \"metrics\" is filled in: list each requested metric exactly ONCE, mapped to "
+                    + "EITHER grain's table (whichever you'd naturally pick) — never twice, once per grain. The "
+                    + "other grain's table is found automatically later from that one mapping. Example: "
+                    + "\"Revenue, EBITDA and PAT for Wipro for the last 5 years and the last 4 quarters\" -> "
+                    + "period.mode \"dual_range\", annual_range_count 5, quarterly_range_count 4, granularity "
+                    + "null.\n"
                     + "- \"years\" with \"values\" set to an explicit list of {\"fiscal_year\": <int>, "
                     + "\"quarter\": <1-4 or null>}: an EXPLICIT, FIXED span or list of named periods — \"from "
                     + "FY22 to FY25\", \"2020 to 2023\", \"FY21 and FY23\", \"Q1 FY24 through Q3 FY24\". "
@@ -4243,9 +4258,11 @@ function applyRibbonView() {
                     + "Return STRICT JSON, nothing else, no markdown fences: "
                     + "{\"feasible\": true|false, "
                     + "\"companies\": [\"<company name as named in the request>\"], "
-                    + "\"period\": {\"mode\": \"specific\"|\"latest\"|\"range\"|\"years\", \"fiscal_year\": <int "
+                    + "\"period\": {\"mode\": \"specific\"|\"latest\"|\"range\"|\"years\"|\"dual_range\", \"fiscal_year\": <int "
                     + "or null>, \"quarter\": <1-4 or null>, \"range_count\": <int or null>, \"values\": "
                     + "[{\"fiscal_year\": <int>, \"quarter\": <1-4 or null>}] or null — only for mode \"years\", "
+                    + "\"annual_range_count\": <int or null>, \"quarterly_range_count\": <int or null> — only "
+                    + "for mode \"dual_range\", "
                     + "\"granularity\": \"annual\"|\"quarterly\"|null — set for EVERY mode, not just \"specific\"}, "
                     + "\"metrics\": [{\"table\": \"<exact table name from the catalog>\", \"column\": \"<exact column name>\"}], "
                     + "\"ranking\": {\"column\": \"<exact metric column>\", \"direction\": \"desc\"|\"asc\", \"limit\": <int or null>} | null, "
@@ -4306,6 +4323,26 @@ function applyRibbonView() {
                     return { table: std.table, column: std.columns[0], columns: std.columns, display: std.display };
                 });
                 if (changed) console.log(`[QueryData] metric standardisation: re-pointed ${changed} metric(s) to match the requested period (quarterly=${hints.quarterly}, future=${hints.future})`);
+                // De-dup: the model occasionally lists the SAME requested metric more than once —
+                // most often for a "dual_range" compound request ("...last 5 years and last 4
+                // quarters"), where it maps one copy to the annual table and one to the quarterly
+                // table even though a single mapping is all either buildDeterministicQuery or the
+                // grain-aware/dual-range builders need (each re-resolves the right table per grain
+                // itself — see buildGrainAwareQuery). Keyed on the OUTPUT name (display, or the raw
+                // column when the registry doesn't cover it) — the same identity buildDeterministicQuery's
+                // own seenColumns dedup-suffix logic uses to decide two metrics are "the same
+                // column" — so a genuine duplicate collapses to one entry here instead of surfacing
+                // downstream as a confusing "Revenue" / "Revenue ()" pair of columns.
+                const seen = new Set();
+                let dupes = 0;
+                plan.metrics = plan.metrics.filter((m) => {
+                    const key = m && (m.display || m.column);
+                    if (!key) return true;
+                    if (seen.has(key)) { dupes++; return false; }
+                    seen.add(key);
+                    return true;
+                });
+                if (dupes) console.log(`[QueryData] metric standardisation: dropped ${dupes} duplicate metric mapping(s)`);
                 return plan;
             };
 
@@ -4389,6 +4426,13 @@ function applyRibbonView() {
                 if (period.mode === "range" && !(period.range_count > 0)) return null;
                 if (period.mode === "years" && !(Array.isArray(period.values) && period.values.length)) return null;
                 if (period.mode === "since" && !Number.isInteger(period.since_fiscal_year)) return null;
+                // "dual_range" (a mixed-grain compound like "last 5 years and last 4 quarters") has
+                // no single-table meaning here — every branch below assumes ONE grain/anchor. It's
+                // built by buildDualRangeQuery instead, via buildGrainAwareQuery; declining here (not
+                // just leaving it unhandled) matters because the "latest"/"range" branch further down
+                // falls back to n=1 for any mode it doesn't recognize — silently building a "latest"
+                // query rather than failing closed.
+                if (period.mode === "dual_range") return null;
 
                 // One source per metric table: either the plain table (a literal period filter
                 // folded into WHERE later) or a derived table applying a per-entity
@@ -5043,6 +5087,34 @@ function applyRibbonView() {
                 };
             };
 
+            // Builds a query for extractPlanAndTables' "dual_range" shape — a request naming BOTH a
+            // relative annual window and a relative quarterly window together ("the last 5 years and
+            // the last 4 quarters"). Neither buildDeterministicQuery nor plain "range" mode can
+            // express two different counts/grains for one request (see the "range" mode's own
+            // comment above: it carries exactly one count/granularity) — but buildGrainAwareQuery
+            // already does exactly the UNION this needs, for the explicit "years"-list case (a
+            // hand-typed "FY22, FY23, Q1 FY24" grid). The only missing piece is resolving "the last
+            // N" into concrete fiscal years/quarters up front, which is exactly what the live-
+            // formula-grid path's own expandPeriodToList already does (anchored to
+            // lastCompletedFiscalYear()/lastCompletedFiscalQuarter(), same as buildDeterministicQuery's
+            // own "range" SQL) — so this just resolves each count through that, then hands the
+            // combined explicit list straight to buildGrainAwareQuery.
+            const buildDualRangeQuery = async (plan) => {
+                const period = plan && plan.period;
+                if (!period || period.mode !== "dual_range") return null;
+                const values = [];
+                if (period.annual_range_count > 0) {
+                    const list = expandPeriodToList({ mode: "range", range_count: period.annual_range_count }, false) || [];
+                    list.forEach((e) => values.push({ fiscalYear: e.fiscalYear, quarter: null }));
+                }
+                if (period.quarterly_range_count > 0) {
+                    const list = expandPeriodToList({ mode: "range", range_count: period.quarterly_range_count }, true) || [];
+                    list.forEach((e) => values.push({ fiscalYear: e.fiscalYear, quarter: e.quarterNo }));
+                }
+                if (!values.length) return null; // neither count was actually usable — nothing to build
+                return buildGrainAwareQuery(plan, values);
+            };
+
             // The one fixed company-identifier join table is always included regardless of what the
             // plan says — never relies on the model to remember that convention. Returns null when
             // there's nothing usable at all (no metrics extracted), which generateSql treats as an
@@ -5103,29 +5175,42 @@ function applyRibbonView() {
                 // fall through to asking an LLM to write the SQL freeform, exactly as before.
                 if (onProgress) onProgress("Building the query…");
                 let result = null;
-                try {
-                    const metaByTable = await loadPeriodJoinMetadata(tables);
-                    result = buildDeterministicQuery(plan, metaByTable);
-                } catch (e) {
-                    console.warn("[QueryData] deterministic query attempt failed, falling back to LLM-written SQL:", e.message);
-                }
-                // A request naming BOTH an annual period and a quarterly one in the same breath
-                // ("…for the past 3 years and the past 3 quarters as well") extracts as period.mode
-                // "years" with a mixed values list — exactly what buildDeterministicQuery's own
-                // "every period table must share one grain" guard always declines (see its comment)
-                // and what standardizePlanMetrics can't fix either, since it pins every metric to
-                // ONE grain's table from a single hint. Same retry tryGridSkeletonFastPath already
-                // has for the identical shape coming from a hand-drawn sheet selection — without it,
-                // this always fell straight to the freeform-LLM SQL fallback below, which has no
-                // metrics/companies/period shape for generateBtn's own formula-grid gate to use, so
-                // the table it wrote was always a hardcoded-value snapshot, never live formulas.
-                if (!result && plan.period && plan.period.mode === "years" && Array.isArray(plan.period.values)
-                    && plan.period.values.some((v) => v && v.quarter) && plan.period.values.some((v) => v && !v.quarter)) {
+                // period.mode "dual_range" ("the last 5 years and the last 4 quarters") never fits
+                // buildDeterministicQuery (it assumes one grain/anchor — see its own guard) and isn't
+                // the explicit-mixed-"years"-list shape the retry just below handles either, so it's
+                // routed straight to its own builder instead of wasting a doomed attempt first.
+                if (plan.period && plan.period.mode === "dual_range") {
                     try {
-                        result = await buildGrainAwareQuery(plan, plan.period.values);
+                        result = await buildDualRangeQuery(plan);
                         if (result && Array.isArray(result.tables)) tables = result.tables;
                     } catch (e) {
-                        console.warn("[QueryData] mixed annual+quarterly grain-aware build failed:", e.message);
+                        console.warn("[QueryData] dual-range (mixed last-N-years + last-N-quarters) build failed:", e.message);
+                    }
+                } else {
+                    try {
+                        const metaByTable = await loadPeriodJoinMetadata(tables);
+                        result = buildDeterministicQuery(plan, metaByTable);
+                    } catch (e) {
+                        console.warn("[QueryData] deterministic query attempt failed, falling back to LLM-written SQL:", e.message);
+                    }
+                    // A request naming BOTH an annual period and a quarterly one in the same breath
+                    // ("…for the past 3 years and the past 3 quarters as well") extracts as period.mode
+                    // "years" with a mixed values list — exactly what buildDeterministicQuery's own
+                    // "every period table must share one grain" guard always declines (see its comment)
+                    // and what standardizePlanMetrics can't fix either, since it pins every metric to
+                    // ONE grain's table from a single hint. Same retry tryGridSkeletonFastPath already
+                    // has for the identical shape coming from a hand-drawn sheet selection — without it,
+                    // this always fell straight to the freeform-LLM SQL fallback below, which has no
+                    // metrics/companies/period shape for generateBtn's own formula-grid gate to use, so
+                    // the table it wrote was always a hardcoded-value snapshot, never live formulas.
+                    if (!result && plan.period && plan.period.mode === "years" && Array.isArray(plan.period.values)
+                        && plan.period.values.some((v) => v && v.quarter) && plan.period.values.some((v) => v && !v.quarter)) {
+                        try {
+                            result = await buildGrainAwareQuery(plan, plan.period.values);
+                            if (result && Array.isArray(result.tables)) tables = result.tables;
+                        } catch (e) {
+                            console.warn("[QueryData] mixed annual+quarterly grain-aware build failed:", e.message);
+                        }
                     }
                 }
                 if (!result) {
@@ -13508,7 +13593,12 @@ const CHAT_ENABLED = true; // re-enabled for local testing of the new Excel tool
         if (busy) {
             // Deliberately ENABLED while busy — it is the stop control now, not a send control.
             sendBtn.disabled = false;
-            sendBtn.textContent = "■";
+            // A plain CSS square (.chat-stop-icon in taskpane.html), not the "■" text glyph this
+            // used to be — that glyph's own internal padding sits off-centre within its line box
+            // (confirmed live: visibly riding low in the button despite #chatSend's flex centering),
+            // since centering the GLYPH's line box isn't the same as centering the shape drawn
+            // inside it. A plain block has no such metrics to fight.
+            sendBtn.innerHTML = '<span class="chat-stop-icon"></span>';
             sendBtn.title = "Stop";
             sendBtn.classList.add("stop");
         } else {

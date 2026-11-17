@@ -2979,9 +2979,16 @@
                        forcing it into this button's own 21x21/padding:0 footprint and badly
                        crushing its "Manual"/"Auto" label — confirmed live, a real rendering bug,
                        not just a style mismatch. */
-                    #chatSend.stop { background: #b80000; font-size: 15px; line-height: 1; }
+                    #chatSend.stop { background: #b80000; }
                     #chatSend.stop:hover { background: #9a0000; }
                     #chatSend:disabled { background: #c3ccd8; cursor: not-allowed; }
+                    /* The stop state's icon is a plain CSS square, not the "■" glyph it used to be —
+                       that glyph's own internal padding sits off-centre within its line box in every
+                       font we tested, so even with #chatSend's align-items/justify-content:center it
+                       visibly rode low in the button. A plain block has no such metrics to fight;
+                       #chatSend's flex centering alone puts it dead center. currentColor ties it to
+                       the button's own (white) text color rather than hardcoding one. */
+                    .chat-stop-icon { display: block; width: 8px; height: 8px; border-radius: 0.5px; background: currentColor; }
                     .chat-balance-notice { display: none; margin-bottom: 6px; padding: 6px 8px; border-radius: 8px; background: #fdecec; border: 1px solid #f5c2c2; color: #a12626; font-size: 11px; line-height: 1.35; }
                     /* A small, quiet chip — confirms what DataGPT will treat as "the selection"
                        without competing with the composer for attention. monospace + ellipsis
